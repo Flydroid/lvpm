@@ -1,1 +1,8 @@
 /target
+
+# Analysis capture artifacts — local data, contain machine-specific paths
+*.log
+*.pcapng
+/*.json
+
+__pycache__/

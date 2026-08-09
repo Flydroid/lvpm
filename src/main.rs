@@ -10,6 +10,7 @@ mod install;
 mod spec;
 mod target;
 mod version;
+mod viserver;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -62,6 +63,35 @@ enum Cmd {
     },
     /// Remove a previously installed package.
     Uninstall { package: String },
+    /// Open a VI reference over VI Server and release it. Proves the transport
+    /// against a running LabVIEW without changing anything on disk.
+    ViProbe {
+        /// VI to open a reference to.
+        vi: PathBuf,
+    },
+    /// Load a VI over VI Server and save it back — the relink primitive.
+    ViSave {
+        /// VI to load and re-save in place.
+        vi: PathBuf,
+    },
+    /// Set controls, run a VI, and read values back — the hook-VI primitive.
+    ViRun {
+        /// VI to run.
+        vi: PathBuf,
+        /// Set a control first: name=type:value with type bool|i32|dbl|str,
+        /// e.g. --set "Iterations=i32:10". Repeatable.
+        #[arg(long = "set", value_name = "NAME=TYPE:VALUE")]
+        sets: Vec<String>,
+        /// Read one control or indicator afterwards. Repeatable.
+        #[arg(long = "get", value_name = "NAME")]
+        gets: Vec<String>,
+        /// Read every control and indicator afterwards.
+        #[arg(long)]
+        get_all: bool,
+        /// Seconds to wait for the VI to finish.
+        #[arg(long, default_value_t = 120)]
+        timeout: u64,
+    },
     /// Show what lvpm has installed into the selected target.
     List,
     /// Search the indexes.
@@ -72,10 +102,13 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match &cli.cmd {
         Cmd::Targets => cmd_targets(),
-        Cmd::Install { package, dry_run, no_deps } => {
-            cmd_install(&cli, package, *dry_run, *no_deps)
-        }
+        Cmd::Install { package, dry_run, no_deps } => cmd_install(&cli, package, *dry_run, *no_deps),
         Cmd::Uninstall { package } => cmd_uninstall(&cli, package),
+        Cmd::ViProbe { vi } => cmd_vi_probe(&cli, vi),
+        Cmd::ViSave { vi } => cmd_vi_save(&cli, vi),
+        Cmd::ViRun { vi, sets, gets, get_all, timeout } => {
+            cmd_vi_run(&cli, vi, sets, gets, *get_all, *timeout)
+        }
         Cmd::List => cmd_list(&cli),
         Cmd::Search { query } => cmd_search(&cli, query),
     }
@@ -251,6 +284,7 @@ fn cmd_install(cli: &Cli, package: &str, dry_run: bool, no_deps: bool) -> Result
 
     let mut total_writes = 0usize;
     let mut hook_warnings: Vec<String> = Vec::new();
+    let mut installed_files: Vec<String> = Vec::new();
 
     for e in &plan {
         if install::is_installed(&roots, &e.name) {
@@ -292,6 +326,7 @@ fn cmd_install(cli: &Cli, package: &str, dry_run: bool, no_deps: bool) -> Result
         } else {
             let m = install::apply(&roots, &spec, &mut zip, &p)?;
             println!("{} files", m.files.len());
+            installed_files.extend(m.files.iter().cloned());
         }
 
         if p.skipped_existing > 0 {
@@ -312,9 +347,11 @@ fn cmd_install(cli: &Cli, package: &str, dry_run: bool, no_deps: bool) -> Result
         println!("\ndry run: {total_writes} files would be written, nothing changed");
     } else {
         println!("\ndone. {total_writes} files written.");
-        if roots.target.is_some() {
-            println!("note: no mass compile was run — LabVIEW will recompile these on first load");
-        }
+    }
+
+    if !dry_run && roots.target.is_some() {
+        println!("note: LabVIEW will resolve these VIs' links when it first loads them,");
+        println!("      but will not persist that unless something saves them.");
     }
     if !hook_warnings.is_empty() {
         println!("\npackages with script VIs that were skipped:");
@@ -323,6 +360,154 @@ fn cmd_install(cli: &Cli, package: &str, dry_run: bool, no_deps: bool) -> Result
         }
     }
     Ok(())
+}
+
+fn cmd_vi_probe(cli: &Cli, vi: &std::path::Path) -> Result<()> {
+    let roots = roots_for(cli)?;
+    let Some(t) = roots.target.clone() else {
+        bail!("vi-probe needs a real LabVIEW target, not --prefix");
+    };
+    let port = viserver::check_vi_server(&t)?;
+    println!("connecting to {} on port {port}", t.label());
+
+    let started = std::time::Instant::now();
+    let mut conn =
+        viserver::Connection::connect("127.0.0.1", port, std::time::Duration::from_secs(30))?;
+    println!("  handshake ok            {:>7.0} ms", started.elapsed().as_secs_f64() * 1000.0);
+
+    let t0 = std::time::Instant::now();
+    let vi_ref = conn.open_vi_reference(vi)?;
+    println!(
+        "  opened {} -> {vi_ref}  {:>7.0} ms",
+        vi.file_name().unwrap_or_default().to_string_lossy(),
+        t0.elapsed().as_secs_f64() * 1000.0
+    );
+
+    conn.release(vi_ref)?;
+    conn.close();
+    println!("  released + closed       {:>7.0} ms total", started.elapsed().as_secs_f64() * 1000.0);
+    Ok(())
+}
+
+fn cmd_vi_save(cli: &Cli, vi: &std::path::Path) -> Result<()> {
+    let roots = roots_for(cli)?;
+    let Some(t) = roots.target.clone() else {
+        bail!("vi-save needs a real LabVIEW target, not --prefix");
+    };
+    if !vi.is_file() {
+        bail!("no such VI: {}", vi.display());
+    }
+    let before = std::fs::metadata(vi)?.modified()?;
+    let port = viserver::check_vi_server(&t)?;
+
+    let mut conn =
+        viserver::Connection::connect("127.0.0.1", port, std::time::Duration::from_secs(300))?;
+
+    let t0 = std::time::Instant::now();
+    let vi_ref = conn.open_vi_reference(vi)?;
+    let load_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+    let t1 = std::time::Instant::now();
+    let result = conn.save_instrument(vi_ref, vi);
+    let save_ms = t1.elapsed().as_secs_f64() * 1000.0;
+
+    conn.release(vi_ref)?;
+    conn.close();
+    result?;
+
+    // The reply carrying err=0 says the request was accepted; the file's
+    // timestamp is what says the save actually happened.
+    let after = std::fs::metadata(vi)?.modified()?;
+    println!("  load {load_ms:>7.0} ms   save {save_ms:>7.0} ms");
+    if after > before {
+        println!("  file rewritten — relink persisted");
+    } else {
+        println!("  file NOT rewritten: LabVIEW accepted the save but had nothing to write");
+        println!("  (expected when the VI is already current and its links resolved)");
+    }
+    Ok(())
+}
+
+/// Parse a `--set` argument: `name=type:value` with type bool|i32|dbl|str.
+///
+/// The type is explicit because LabVIEW rejects a mismatched variant with
+/// error 91 — better to be unambiguous here than to guess whether "125"
+/// means an integer or a double.
+fn parse_set(arg: &str) -> Result<(String, viserver::LvValue)> {
+    use viserver::LvValue;
+    let (name, rest) = arg
+        .split_once('=')
+        .with_context(|| format!("--set {arg:?}: expected name=type:value"))?;
+    let (ty, raw) = rest
+        .split_once(':')
+        .with_context(|| format!("--set {arg:?}: expected type:value with type bool|i32|dbl|str"))?;
+    let value = match ty {
+        "bool" => LvValue::Bool(raw.parse().with_context(|| format!("--set {arg:?}: not a bool"))?),
+        "i32" => LvValue::I32(raw.parse().with_context(|| format!("--set {arg:?}: not an i32"))?),
+        "dbl" => LvValue::Dbl(raw.parse().with_context(|| format!("--set {arg:?}: not a number"))?),
+        "str" => LvValue::Str(raw.to_string()),
+        other => bail!("--set {arg:?}: unknown type {other:?} (use bool|i32|dbl|str)"),
+    };
+    Ok((name.to_string(), value))
+}
+
+fn cmd_vi_run(
+    cli: &Cli,
+    vi: &std::path::Path,
+    sets: &[String],
+    gets: &[String],
+    get_all: bool,
+    timeout: u64,
+) -> Result<()> {
+    let roots = roots_for(cli)?;
+    let Some(t) = roots.target.clone() else {
+        bail!("vi-run needs a real LabVIEW target, not --prefix");
+    };
+    let sets: Vec<_> = sets.iter().map(|s| parse_set(s)).collect::<Result<_>>()?;
+    let port = viserver::check_vi_server(&t)?;
+
+    let mut conn =
+        viserver::Connection::connect("127.0.0.1", port, std::time::Duration::from_secs(timeout))?;
+    let vi_ref = conn.open_vi_reference(vi)?;
+
+    // Everything after the open must not leak the reference on failure, so
+    // collect the result and release before reporting it.
+    let result = (|| -> Result<()> {
+        for (name, value) in &sets {
+            conn.ctrl_val_set(vi_ref, name, value.clone())?;
+            println!("  set  {name} = {value}");
+        }
+        let t0 = std::time::Instant::now();
+        conn.run_vi(vi_ref)?;
+        println!("  ran  {} in {:.0} ms", vi.file_name().unwrap_or_default().to_string_lossy(),
+            t0.elapsed().as_secs_f64() * 1000.0);
+        if get_all {
+            for (name, value) in conn.ctrl_val_get_all(vi_ref, false)? {
+                println!("  get  {name} = {value}");
+            }
+        }
+        for name in gets {
+            let value = conn.ctrl_val_get(vi_ref, name)?;
+            println!("  get  {name} = {value}");
+        }
+        Ok(())
+    })();
+
+    conn.release(vi_ref)?;
+    conn.close();
+    result
+}
+
+/// Time one VI load on its own connection, returning milliseconds.
+fn time_one_load(port: u16, vi: &std::path::Path) -> Result<f64> {
+    let t0 = std::time::Instant::now();
+    let mut conn =
+        viserver::Connection::connect("127.0.0.1", port, std::time::Duration::from_secs(120))?;
+    let r = conn.open_vi_reference(vi)?;
+    let ms = t0.elapsed().as_secs_f64() * 1000.0;
+    conn.release(r)?;
+    conn.close();
+    Ok(ms)
 }
 
 fn read_spec(zip: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>) -> Result<String> {
