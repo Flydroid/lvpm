@@ -455,6 +455,59 @@ impl Method for CtrlValSet<'_> {
     }
 }
 
+/// Frame a single-descriptor return-type section:
+/// `u32 inner length | u32 count (1) | descriptor | selector`.
+fn single_return_type(td: Vec<u8>) -> Vec<u8> {
+    let inner = 4 + td.len() + SINGLE_TD.len();
+    let mut out = Vec::with_capacity(4 + inner);
+    out.extend_from_slice(&(inner as u32).to_be_bytes());
+    out.extend_from_slice(&1u32.to_be_bytes());
+    out.extend_from_slice(&td);
+    out.extend_from_slice(&SINGLE_TD);
+    out
+}
+
+/// Slice the returned data out of a reply that declared return types: it sits
+/// between the echoed return-type section and the parameter echo, padded to
+/// even length as a whole.
+fn reply_data(body: &[u8]) -> Result<&[u8]> {
+    ensure!(body.len() >= 16, "reply too short ({} bytes)", body.len());
+    let section = u32::from_be_bytes(body[8..12].try_into().unwrap()) as usize;
+    let types = u32::from_be_bytes(body[12..16].try_into().unwrap()) as usize;
+    let (start, end) = (12 + 4 + types, 12 + section);
+    ensure!(start <= end && end <= body.len(), "malformed method reply");
+    Ok(&body[start..end])
+}
+
+/// `VI: Ctrl Val.Get` — read one front-panel object by label.
+///
+/// The value only comes back because the request declares its return type
+/// (a variant named after the method's output terminal). LabVIEW's own client
+/// omits that section when the output terminal is unwired — and then the
+/// reply is an empty echo, err=0 and no data.
+pub struct CtrlValGet<'a> {
+    pub control: &'a str,
+}
+
+impl Method for CtrlValGet<'_> {
+    type Output = LvValue;
+    const ID: u32 = 1052; // lvcore_lvprop_vi_get_cont_valuevrnt
+    const NAME: &'static str = "Ctrl Val.Get";
+
+    fn encode_args(&self) -> Result<Vec<u8>> {
+        Ok(method_args(
+            &[param(type_desc(TD_STRING, Some("Control Name"))?, &lv_string(self.control.as_bytes()))],
+            Some(&single_return_type(type_desc(TD_VARIANT, Some("Get Control Value Variant"))?)),
+        ))
+    }
+
+    fn decode_reply(&self, body: &[u8]) -> Result<LvValue> {
+        Reader::new(reply_data(body)?)
+            .variant()
+            .with_context(|| format!("decoding control {:?}", self.control))
+    }
+}
+
 /// The return-type section `Ctrl Val.Get All` must declare: an array of
 /// cluster{Name: String, Variant Data: Variant} named "Get All Control Values
 /// Variant". Reproduced from a capture because the array and cluster
@@ -476,11 +529,6 @@ const GET_ALL_RETURN_TYPES: [u8; 98] = [
 
 /// `VI: Ctrl Val.Get All` — read every control and indicator in one call,
 /// as (label, value) pairs.
-///
-/// This is the *only* way we can read values back: a plain `Ctrl Val.Get`
-/// request as LabVIEW's own client sends it declares no return type, and its
-/// reply carries none — err=0 and no data (verified on the wire). Get All
-/// declares its return type, so LabVIEW flattens the values into the reply.
 pub struct CtrlValGetAll {
     /// True limits the result to controls; false includes indicators too.
     pub controls_only: bool,
@@ -499,15 +547,7 @@ impl Method for CtrlValGetAll {
     }
 
     fn decode_reply(&self, body: &[u8]) -> Result<Vec<(String, LvValue)>> {
-        // Prologue as we sent it; the length at +8 grows to cover the data,
-        // which sits between the return-type section and the parameter echo.
-        ensure!(body.len() >= 16, "reply too short ({} bytes)", body.len());
-        let section = u32::from_be_bytes(body[8..12].try_into().unwrap()) as usize;
-        let types = u32::from_be_bytes(body[12..16].try_into().unwrap()) as usize;
-        let (start, end) = (12 + 4 + types, 12 + section);
-        ensure!(start <= end && end <= body.len(), "malformed Get All reply");
-
-        let mut r = Reader::new(&body[start..end]);
+        let mut r = Reader::new(reply_data(body)?);
         let n = r.u32()?;
         let mut out = Vec::with_capacity(n as usize);
         for _ in 0..n {
@@ -807,18 +847,9 @@ impl Connection {
         self.invoke(vi, &CtrlValGetAll { controls_only })
     }
 
-    /// Read one front-panel object by label.
-    ///
-    /// Implemented over `Ctrl Val.Get All` because a plain `Ctrl Val.Get`
-    /// returns no data over TCP (see [`CtrlValGetAll`]). One extra round trip
-    /// of flattening is irrelevant against the ~10 ms a method call costs.
+    /// Read one front-panel object by label. See [`CtrlValGet`].
     pub fn ctrl_val_get(&mut self, vi: VIRef, control: &str) -> Result<LvValue> {
-        let all = self.ctrl_val_get_all(vi, false)?;
-        let names = || all.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", ");
-        match all.iter().find(|(n, _)| n == control) {
-            Some((_, v)) => Ok(v.clone()),
-            None => bail!("no control or indicator named {control:?} (found: {})", names()),
-        }
+        self.invoke(vi, &CtrlValGet { control })
     }
 
     /// Release a reference. LabVIEW sends no reply, so this must not wait.
@@ -1022,6 +1053,54 @@ mod tests {
                 ("String out".to_string(), LvValue::Str("Hello_aString".into())),
             ]
         );
+    }
+
+    /// `Ctrl Val.Get` with the return type declared, byte-for-byte the request
+    /// LabVIEW's own client sent once the output terminal was wired.
+    #[test]
+    fn ctrl_val_get_matches_the_captured_invocation() {
+        let got = CtrlValGet { control: "Double out" }.encode_args().unwrap();
+        let want: &[u8] = b"\x00\x00\x00\x02\x00\x00\x00\x21\x00\x00\x00\x2a\
+\x00\x00\x00\x26\x00\x00\x00\x01\x00\x1e\x40\x53\x19Get Control Value Variant\x00\x01\x00\x00\
+\x00\x00\x00\x10\x00\x00\x00\x30\x00\x00\x00\x1e\x00\x00\x00\x01\x00\x16\x40\x30\
+\xff\xff\xff\xff\x0cControl Name\x00\x00\x01\x00\x00\x00\x00\x00\x0aDouble out";
+        assert_eq!(got, want);
+    }
+
+    /// Two captured `Ctrl Val.Get` replies: the variant sits between the
+    /// echoed return-type section and the parameter echo, padded to even.
+    #[test]
+    fn ctrl_val_get_decodes_the_captured_replies() {
+        let head: &[u8] = b"\x00\x00\x00\x02\x00\x00\x00\x21";
+        let types: &[u8] = b"\x00\x00\x00\x26\x00\x00\x00\x01\
+\x00\x1e\x40\x53\x19Get Control Value Variant\x00\x01\x00\x00";
+        let echo: &[u8] = b"\x00\x00\x00\x10\x00\x00\x00\x22\x00\x00\x00\x1e\x00\x00\x00\x01\
+\x00\x16\x40\x30\xff\xff\xff\xff\x0cControl Name\x00\x00\x01\x00\x00";
+        let cases: [(&[u8], u8, LvValue); 2] = [
+            (
+                // "Double out" = 126.0, one pad byte after the attributes.
+                b"\x26\x00\x80\x00\x00\x00\x00\x01\x00\x11\x40\x0a\x00\x0aDouble out\x00\
+\x00\x01\x00\x00\x40\x5f\x80\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
+                0x54,
+                LvValue::Dbl(126.0),
+            ),
+            (
+                // "Boolean out" = false.
+                b"\x26\x00\x80\x00\x00\x00\x00\x01\x00\x10\x40\x21\x0bBoolean out\
+\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00",
+                0x4c,
+                LvValue::Bool(false),
+            ),
+        ];
+        for (data, section, want) in cases {
+            let mut reply = head.to_vec();
+            reply.extend_from_slice(&(section as u32).to_be_bytes());
+            reply.extend_from_slice(types);
+            reply.extend_from_slice(data);
+            reply.extend_from_slice(echo);
+            let got = CtrlValGet { control: "x" }.decode_reply(&reply).unwrap();
+            assert_eq!(got, want);
+        }
     }
 
     /// Values of odd flattened length must pad to even inside a parameter

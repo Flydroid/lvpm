@@ -498,18 +498,6 @@ fn cmd_vi_run(
     result
 }
 
-/// Time one VI load on its own connection, returning milliseconds.
-fn time_one_load(port: u16, vi: &std::path::Path) -> Result<f64> {
-    let t0 = std::time::Instant::now();
-    let mut conn =
-        viserver::Connection::connect("127.0.0.1", port, std::time::Duration::from_secs(120))?;
-    let r = conn.open_vi_reference(vi)?;
-    let ms = t0.elapsed().as_secs_f64() * 1000.0;
-    conn.release(r)?;
-    conn.close();
-    Ok(ms)
-}
-
 fn read_spec(zip: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>) -> Result<String> {
     // Almost always literally "spec" at the archive root.
     let idx = (0..zip.len()).find(|i| {

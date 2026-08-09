@@ -200,22 +200,32 @@ Variants carry no padding of their own — any padding belongs to the enclosing
 parameter block. Observed: Dbl `40 5F 40 00…` = 125.0, I32 `00 00 00 7d`
 = 125, Boolean `01` = TRUE, String `u32 len + "Hello"`.
 
-### Reading values back — Get vs Get All
+### Reading values back — declare the return type
 
 **A method only returns data if the request declares the type it expects.**
-LabVIEW's own client sends `Ctrl Val.Get` with flags `0x01` and no return-type
-section, and the reply comes back err=0 with the parameter echo and *no value*
-— all four observed Get replies are byte-identical 54-byte shells. `Ctrl
-Val.Get All` sends flags `0x21` plus a return-type section declaring an array
-of cluster{`Name`: String, `Variant Data`: Variant}, and its reply carries all
-values. lvpm therefore reads single controls through Get All.
+LabVIEW's own client derives that from the diagram: with the method's output
+terminal unwired it sends flags `0x01` and no return-type section, and the
+reply comes back err=0 with the parameter echo and *no value* — four such Get
+replies were byte-identical 54-byte shells, which looked like "Get doesn't
+work over TCP" until the terminal was wired. Wired, the same call sends flags
+`0x21` plus a return-type section and the value comes back.
+
+`Ctrl Val.Get` declares a single variant named after its output terminal:
+
+```
+u32 38 | u32 1 | td: Variant "Get Control Value Variant" | 00 01 00 00
+```
+
+`Ctrl Val.Get All` declares an array of cluster{`Name`: String, `Variant
+Data`: Variant} — a four-entry descriptor table selected by index.
 
 In the reply the declared section's length field grows to cover the returned
-data, which sits between the return types and the parameter echo:
+data, which sits between the return types and the parameter echo, padded to
+even length as a whole (elements inside an array are not padded):
 
 ```
 u32 slots | u32 flags | u32 types+data length | <return types as sent>
-<data: u32 element count, then per element an lv-string name and a variant>
+<data — Get: one variant; Get All: u32 count, then lv-string name + variant each>
 <parameter echoes, values stripped>
 ```
 
