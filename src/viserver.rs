@@ -28,7 +28,7 @@
 use crate::target::LvTarget;
 use anyhow::{Context, Result, bail, ensure};
 use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::path::Path;
 use std::time::Duration;
 
@@ -87,17 +87,34 @@ const RET_GET_VI_REF: u32 = 13;
 const RET_CALL: u32 = 14;
 const RET_VI_DO_METHOD: u32 = 16;
 
-/// The handshake payload LabVIEW's own client sends. Captured rather than
-/// derived: it embeds a user name ("(Nobody)" when unauthenticated) and the
-/// host address, and we have no specification for the remaining fields. Sending
-/// it verbatim is honest about that — every byte here was observed working
-/// against a live LabVIEW 2026, and if a future version rejects it we want a
-/// loud failure rather than a subtly wrong guess.
-const HELLO_PAYLOAD: [u8; 36] = [
-    0x26, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x1c, 0x1c, 0x00, 0x00, 0x00, 0x29, 0x00, 0x00, 0x00,
-    0x08, 0x00, 0x00, 0x00, b'(', b'N', b'o', b'b', b'o', b'd', b'y', b')', 0xc0, 0xa8, 0x02, 0xfb,
-    0x65, 0x00, 0x53, 0x00,
-];
+/// The handshake payload LabVIEW's own client sends, with our own address
+/// spliced in at +28. Captured rather than derived: it embeds a user name
+/// ("(Nobody)" when unauthenticated) and the host address, and we have no
+/// specification for the remaining fields.
+///
+/// **LabVIEW validates the address field.** It must be one this machine
+/// actually holds; otherwise the server answers err=1379 and closes the
+/// connection. Bisected against a live 2026 server: `127.0.0.1` and each of
+/// this host's interface addresses handshake fine, while `0.0.0.0` and an
+/// address the machine no longer holds are both rejected. So it cannot be a
+/// constant — the value originally captured here was a DHCP lease, and the
+/// handshake broke the moment the lease moved. Taking it from the connected
+/// socket is correct for loopback and stays correct if we ever point this at
+/// a LabVIEW on another host.
+///
+/// Bytes +32..+35 lie beyond the length declared at +4 (`0x1c` = 28) and are
+/// ignored: all-zero, all-ones and two separately observed values were each
+/// accepted. They are padding, so we send zeros rather than replay a capture's
+/// uninitialised bytes.
+fn hello_payload(local: Ipv4Addr) -> [u8; 36] {
+    let mut p: [u8; 36] = [
+        0x26, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x1c, 0x1c, 0x00, 0x00, 0x00, 0x29, 0x00, 0x00,
+        0x00, 0x08, 0x00, 0x00, 0x00, b'(', b'N', b'o', b'b', b'o', b'd', b'y', b')', 0, 0, 0, 0,
+        0x00, 0x00, 0x00, 0x00,
+    ];
+    p[28..32].copy_from_slice(&local.octets());
+    p
+}
 
 /// Options word in a `GetVIRef` request, as sent by LabVIEW's client.
 const GET_VI_REF_FLAGS: u32 = 0x8020_0000;
@@ -527,11 +544,18 @@ const GET_ALL_RETURN_TYPES: [u8; 98] = [
     0x00, 0x01, 0x00, 0x03, // one top-level type: descriptor 3, the array
 ];
 
-/// `VI: Ctrl Val.Get All` — read every control and indicator in one call,
-/// as (label, value) pairs.
+/// `VI: Ctrl Val.Get All` — read one whole half of a front panel in a single
+/// call, as (label, value) pairs.
+///
+/// Despite the name it does not return everything. `Controls` is a **selector,
+/// not a filter**: TRUE gives the controls, FALSE gives the indicators, and
+/// neither gives both. Verified against a live 2026 server on a panel with four
+/// of each — TRUE returned exactly the four `… in`, FALSE exactly the four
+/// `… out`. Reading a whole panel therefore costs two calls; see
+/// [`Connection::ctrl_val_get_panel`].
 pub struct CtrlValGetAll {
-    /// True limits the result to controls; false includes indicators too.
-    pub controls_only: bool,
+    /// TRUE selects the controls, FALSE the indicators.
+    pub controls: bool,
 }
 
 impl Method for CtrlValGetAll {
@@ -541,7 +565,7 @@ impl Method for CtrlValGetAll {
 
     fn encode_args(&self) -> Result<Vec<u8>> {
         Ok(method_args(
-            &[param(type_desc(TD_BOOL, Some("Controls"))?, &[self.controls_only as u8])],
+            &[param(type_desc(TD_BOOL, Some("Controls"))?, &[self.controls as u8])],
             Some(&GET_ALL_RETURN_TYPES),
         ))
     }
@@ -691,6 +715,7 @@ fn describe_error(code: i32) -> &'static str {
         1026 => " (VI reference is invalid — released, or auto-disposed by Run VI?)",
         1031 => " (connector pane does not match)",
         1032 => " (VI Server access denied)",
+        1379 => " (the address claimed in the handshake is not one this machine holds)",
         _ => "",
     }
 }
@@ -704,10 +729,17 @@ impl Connection {
         sock.set_write_timeout(Some(timeout))?;
         sock.set_nodelay(true)?;
 
+        // Our own address, which the handshake has to claim truthfully — see
+        // `hello_payload`. Loopback for anything that is not IPv4.
+        let local = match sock.local_addr() {
+            Ok(SocketAddr::V4(a)) => *a.ip(),
+            _ => Ipv4Addr::LOCALHOST,
+        };
+
         let mut conn = Connection { sock, next_uid: 0x0010_0000 };
         // The hello uses a fixed id, and LabVIEW answers with an id of its own
         // choosing rather than echoing ours, so this one cannot be paired.
-        conn.send(OP_HELLO, 0x0000_0006, &HELLO_PAYLOAD)?;
+        conn.send(OP_HELLO, 0x0000_0006, &hello_payload(local))?;
         let reply = conn.recv()?;
         if reply.opcode != RET_HELLO {
             bail!(
@@ -715,6 +747,16 @@ impl Connection {
                  The VI Server protocol is undocumented and may differ on this \
                  LabVIEW version.",
                 reply.opcode
+            );
+        }
+        // A rejected handshake still answers with opcode 10 and then closes the
+        // socket, so without this the failure surfaces much later as a connection
+        // reset on some unrelated request.
+        if reply.err != 0 {
+            bail!(
+                "VI Server refused the handshake: error {}{}",
+                reply.err,
+                describe_error(reply.err)
             );
         }
         Ok(conn)
@@ -842,9 +884,21 @@ impl Connection {
         self.invoke(vi, &CtrlValSet { control, value })
     }
 
-    /// Read every control and indicator as (label, value) pairs.
-    pub fn ctrl_val_get_all(&mut self, vi: VIRef, controls_only: bool) -> Result<Vec<(String, LvValue)>> {
-        self.invoke(vi, &CtrlValGetAll { controls_only })
+    /// Read one half of a front panel: the controls when `controls` is true,
+    /// the indicators when it is false. See [`CtrlValGetAll`] — the method's
+    /// name promises more than it delivers.
+    pub fn ctrl_val_get_all(&mut self, vi: VIRef, controls: bool) -> Result<Vec<(String, LvValue)>> {
+        self.invoke(vi, &CtrlValGetAll { controls })
+    }
+
+    /// Read a whole front panel — controls *and* indicators, in that order.
+    ///
+    /// Two calls, because `Ctrl Val.Get All` selects one half at a time. Labels
+    /// are unique within a panel, so the two halves cannot collide.
+    pub fn ctrl_val_get_panel(&mut self, vi: VIRef) -> Result<Vec<(String, LvValue)>> {
+        let mut out = self.ctrl_val_get_all(vi, true)?;
+        out.extend(self.ctrl_val_get_all(vi, false)?);
+        Ok(out)
     }
 
     /// Read one front-panel object by label. See [`CtrlValGet`].
@@ -877,6 +931,24 @@ impl std::fmt::Display for VIRef {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The address at +28 is the only field of the handshake that varies, and
+    /// LabVIEW rejects a wrong one with 1379 — so pin where it lands and that
+    /// nothing else moves with it.
+    #[test]
+    fn hello_payload_carries_our_own_address() {
+        let p = hello_payload(Ipv4Addr::LOCALHOST);
+        assert_eq!(&p[28..32], &[127, 0, 0, 1]);
+        assert_eq!(&p[0..4], &[0x26, 0x00, 0x80, 0x00], "version stamp");
+        assert_eq!(&p[20..28], b"(Nobody)", "unauthenticated user name");
+        // Beyond the length declared at +4 (0x1c = 28); LabVIEW ignores it.
+        assert_eq!(&p[32..36], &[0, 0, 0, 0]);
+
+        let q = hello_payload(Ipv4Addr::new(192, 168, 2, 11));
+        assert_eq!(&q[28..32], &[192, 168, 2, 11]);
+        assert_eq!(p[..28], q[..28], "only the address field may vary");
+        assert_eq!(p[32..], q[32..], "only the address field may vary");
+    }
 
     #[test]
     fn encodes_a_windows_path_as_pth0() {
@@ -1009,7 +1081,7 @@ mod tests {
     /// this really pins down is the framing and the Controls parameter.
     #[test]
     fn ctrl_val_get_all_matches_the_captured_invocation() {
-        let got = CtrlValGetAll { controls_only: false }.encode_args().unwrap();
+        let got = CtrlValGetAll { controls: false }.encode_args().unwrap();
         let mut want = vec![0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x21, 0x00, 0x00, 0x00, 0x62];
         want.extend_from_slice(&GET_ALL_RETURN_TYPES);
         want.extend_from_slice(
@@ -1043,7 +1115,7 @@ mod tests {
             assert_eq!(r.len(), 366, "reply reconstruction");
             r
         };
-        let got = CtrlValGetAll { controls_only: false }.decode_reply(reply).unwrap();
+        let got = CtrlValGetAll { controls: false }.decode_reply(reply).unwrap();
         assert_eq!(
             got,
             vec![

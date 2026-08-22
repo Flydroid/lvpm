@@ -482,7 +482,7 @@ fn cmd_vi_run(
         println!("  ran  {} in {:.0} ms", vi.file_name().unwrap_or_default().to_string_lossy(),
             t0.elapsed().as_secs_f64() * 1000.0);
         if get_all {
-            for (name, value) in conn.ctrl_val_get_all(vi_ref, false)? {
+            for (name, value) in conn.ctrl_val_get_panel(vi_ref)? {
                 println!("  get  {name} = {value}");
             }
         }

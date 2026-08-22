@@ -47,7 +47,7 @@ assume ordering.
 
 | Send | Name | Return | Notes |
 |---:|---|---:|---|
-| 0 | `ClientSaysHeaveno` | 10 | handshake; reply carries its own uID, not ours |
+| 0 | `ClientSaysHeaveno` | 10 | handshake; the reply's uID is a version stamp, not our id |
 | 1 | `AppAttrVector` | 11 | Application property get/set |
 | 2 | `VIAttrVector` | 12 | VI property get/set |
 | 3 | `GetVIRef` | 13 | path → refnum |
@@ -67,15 +67,51 @@ exercises only the ten above. Unused families include `kTSProj*` (projects),
 
 ## Handshake
 
-36-byte payload, sent with `uID = 6`. It embeds the user name (`(Nobody)` when
-unauthenticated) and the host address, and the remaining fields are unexplained,
-so `lvpm` replays it verbatim rather than guessing.
+36-byte payload, sent with `uID = 6`. It embeds a version stamp, the user name
+(`(Nobody)` when unauthenticated) and the client's own host address.
 
 ```
 26 00 80 00  00 00 00 1c  1c 00 00 00  29 00 00 00
-08 00 00 00  "(Nobody)"   c0 a8 02 fb  65 00 53 00
-                          ^^ host IP
+^^ version   ^^ length 28
+08 00 00 00  "(Nobody)"   c0 a8 02 0b  00 00 00 00
+                          ^^ host IP   ^^ past the declared length; ignored
 ```
+
+Only two fields matter, and both were established by bisecting single fields
+against a live 2026 server rather than by replaying a capture:
+
+**The host address at +28 is validated.** It must be an address the client
+machine actually holds. `127.0.0.1` and each of the host's interface addresses
+handshake with `err=0`; `0.0.0.0`, and any address the machine does not hold,
+come back **1379** — after which the server sends FIN and drops the connection.
+This is why it cannot be a constant: the address originally captured here was a
+DHCP lease, and the handshake broke silently the day the lease moved. Take it
+from the connected socket (`TcpStream::local_addr`), which is right for loopback
+and stays right against a remote LabVIEW.
+
+**Bytes +32..+35 are padding.** They fall beyond the length declared at +4
+(`0x1c` = 28). All-zeros, all-ones and two separately observed values are all
+accepted, so send zeros rather than replaying a capture's uninitialised bytes.
+
+**A rejected handshake still replies with opcode 10**, carrying the error in the
+usual `err` field, and only then closes. A client that checks the opcode but not
+`err` sails past the rejection and fails later on an unrelated read — the visible
+symptom being a connection reset with no obvious cause. Check both.
+
+### The version stamp
+
+The stamp at +0 is LabVIEW's major/minor/fix/stage encoding — `0x26008000` is
+2026 — and the same encoding appears on every flattened variant.
+
+The server does **not** report its own version back: the hello reply's `uID`
+echoes whatever stamp the client sent (claim `0x15008000` and `0x15008000` comes
+back), so it is not a passive version oracle. But sending `0x00000000` is
+rejected with **1037**, and *that* reply carries the server's real stamp in its
+`uID`. So the server's version can be probed with one throwaway connection.
+
+A 2026 server accepted clients stamping themselves 2025 and 2015, both `err=0`.
+The stamp is tolerated downward, so one old stamp may serve several targets
+rather than needing a table per release.
 
 ## Paths — `PTH0`
 
@@ -219,6 +255,15 @@ u32 38 | u32 1 | td: Variant "Get Control Value Variant" | 00 01 00 00
 `Ctrl Val.Get All` declares an array of cluster{`Name`: String, `Variant
 Data`: Variant} — a four-entry descriptor table selected by index.
 
+**`Ctrl Val.Get All` does not return everything.** Its single `Controls`
+parameter is a *selector, not a filter*: TRUE returns the controls, FALSE the
+indicators, and neither returns both. Confirmed by replaying one captured
+request against a live 2026 server with only that value byte flipped, on a panel
+holding four of each — TRUE gave exactly the four `… in`, FALSE exactly the four
+`… out`. Reading a whole panel is two calls. (Watch the byte you flip: the
+parameter's value is one byte padded to even length, so it sits at *−2* from the
+end of the block, not −1.)
+
 In the reply the declared section's length field grows to cover the returned
 data, which sits between the return types and the parameter echo, padded to
 even length as a whole (elements inside an array are not padded):
@@ -255,6 +300,11 @@ decide whether a VI needs saving lives here — tokens
 | 1026 | VI Reference is invalid | see Auto Dispose below |
 | 1031 | reference type ≠ connector pane | `LabVIEWCLI RunVI` on a VI with the wrong pane |
 | 1032 | VI Server access denied | access list / `server.tcp.enabled` |
+| 1037 | version stamp not accepted | a zero stamp in the handshake; the reply's `uID` then carries the server's own |
+| 1379 | claimed host address is not one this machine holds | handshake; the server closes the connection straight after |
+
+The last two arrive on the *handshake* reply, which still uses opcode 10 — so a
+client that only checks the opcode will miss them.
 
 ## Gotchas
 
@@ -293,6 +343,32 @@ documented API, which NI does keep stable. Re-check on a new version with:
 lvpm vi-probe --labview-version <year> <some.vi>     # transport
 python tools/decode_viserver_pcap.py new.pcapng      # opcode + id tables
 ```
+
+### Conformance against LabVIEW's own client
+
+The strongest check available is a differential one, and it needs no new tooling:
+capture LabVIEW's own client driving a VI, then drive the same VI with the same
+values through `lvpm vi-run` and diff the request bodies past the refnum in
+bytes 0..4. On 2026, over four `Ctrl Val.Set`, one `Run VI`, one `Ctrl
+Val.Get All` and four `Ctrl Val.Get`, eight of ten were byte-identical. The two
+that were not are both understood:
+
+- `Run VI` differs in one byte — `Wait until done`, which `lvpm` deliberately
+  sends TRUE where the captured diagram had the terminal wired FALSE.
+- `Ctrl Val.Set` of a **string** differs by 14 bytes: LabVIEW names the variant's
+  inner type descriptor (`00 16 40 30 ffffffff 0c "Control Name" 00`) where
+  `lvpm` leaves it unnamed (`00 08 00 30 ffffffff`). The server accepts both —
+  the value lands either way — so the name is optional here. Numeric and Boolean
+  variants are byte-identical, so this is specific to the string case.
+
+Two runs of the same client are byte-identical to each other once the refnum is
+excluded, which is what makes the diff meaningful in the first place.
+
+Note the failure mode this catches and `err` does not: a request can be accepted,
+answered `err=0`, and still be wrong. A `Ctrl Val.Get` with no return-type
+section, and a `Save:Instrument` that writes nothing, both return `err=0`. Every
+live check needs an out-of-band oracle — the file's mtime, a value read back, the
+panel's contents — never the error code alone.
 
 The file format (`PTH0`, RSRC blocks) is a *different* risk class — far more
 stable, since every VI ever saved depends on it, and byte-exactly verifiable
