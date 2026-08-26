@@ -205,7 +205,7 @@ u16 len | u16 flags|code     0x40 flag = named
 ```
 
 Codes seen: `0x21` Boolean, `0x30` String, `0x32` Path, `0x53` Variant,
-`0x03` I32, `0x0a` Dbl, `0x40` Cluster, `0x50` Array — matching `LvTypeCode`
+`0x03` I32, `0x0a` Dbl, `0x40` Array, `0x50` Cluster — matching `LvTypeCode`
 in the `Rust-LabVIEW-Interop` crate. Beware the dialect gap, though: that
 crate's `typedesc` serializer targets in-memory *type strings*, whose real
 LabVIEW golden vector encodes a named Dbl **without** the reserved byte
@@ -224,10 +224,11 @@ variant is flattened data with its descriptor inline:
 u32 version        0x26008000 — LabVIEW 2026 release, in LabVIEW's own
                    major/minor/fix/stage encoding (the handshake reuses it);
                    older stamps are accepted
-u32 count          type descriptors, 1
+u32 count          type descriptors; 1 for a scalar, 2 for an array
 <type descriptor>  unnamed when a client flattens a bare value; named with the
                    control's label when LabVIEW flattens a front-panel object
-00 01 00 00        descriptor selector
+00 01 | u16 root   one top-level type, and which descriptor the data
+                   conforms to: 0 for a scalar, 1 for an array (see below)
 <value>
 u32 attributes     0 in everything observed
 ```
@@ -235,6 +236,74 @@ u32 attributes     0 in everything observed
 Variants carry no padding of their own — any padding belongs to the enclosing
 parameter block. Observed: Dbl `40 5F 40 00…` = 125.0, I32 `00 00 00 7d`
 = 125, Boolean `01` = TRUE, String `u32 len + "Hello"`.
+
+#### Arrays — a second descriptor and a root index
+
+A variant whose value is an array sends **two** descriptors: the element's,
+then the array's, which names no element type of its own but points back into
+the same table by index. The trailer after the table is not a constant — the
+second u16 is the index of the descriptor the data conforms to:
+
+```
+u16 len | u16 flags|0x40    array; 0x40 flag = named
+u16 dims                    dimension count
+u32 * dims                  each dimension's size; ffffffff = variable
+u16 elem                    index of the element's descriptor in the table
+[pascal name, pad to even]
+```
+
+Captured for a two-element string array (`String Array out` on the E2E test
+VI), with `00 01 00 01` where a scalar sends `00 01 00 00`:
+
+```
+26008000 00000002
+  0016 4030 ffffffff 0c "String out 2" 00        element: variable-size string
+  001e 4040 0001 ffffffff 0000 10 "String Array out" 00
+                                                 array: 1 dim, variable, elem=0
+00 01 00 01                                      one top-level type: index 1
+00000002                                         element count
+00000007 "Hello 1" 00000007 "Hello 2"            packed, no padding between
+00000000                                         attributes
+```
+
+The element descriptor's **name is stale** — LabVIEW ignores it. The Get reply
+above carried `"String out 2"` (a different control), and the Set request
+carried `"Control Name"`; the array descriptor holds the real label. Unnamed
+element descriptors are accepted, and are what lvpm writes.
+
+Because the array descriptor is element-agnostic, a Dbl or Boolean array
+differs only in the element descriptor and the flattened data — unnamed, the
+array descriptor is the same twelve bytes every time
+(`000c 0040 0001 ffffffff 0000`). Element data packs with no per-element
+header beyond what the element type already carries: strings keep their `u32`
+length, numerics are bare big-endian, Booleans one byte each. String and I32
+elements are captured; Dbl and Boolean array elements are derived from them
+and from the scalar descriptors in the same captures, and
+`numeric_arrays_reuse_the_string_array_framing` in `src/viserver.rs` pins that
+derivation.
+
+#### More than one dimension
+
+`dims` really is a count, and the data carries one `u32` length per dimension
+before the elements, row-major. Captured from `Int32 2D Array out` holding
+`[[2, 3], [12, 23]]`:
+
+```
+26008000 00000002
+  0019 4003 00 12 "Int32 2D Array out" 00        element: I32
+  0024 4040 0002 ffffffff ffffffff 0000 12 "Int32 2D Array out" 00
+                                                 array: 2 dims, both variable
+00 01 00 01
+00000002 00000002                                one length per dimension
+00000002 00000003 0000000c 00000017              row-major
+00000000
+```
+
+The matching **Set**, sent by LabVIEW's own client for `Int32 2D Array in`, is
+the useful one: it shows what a *client* is expected to write, and it writes
+the array descriptor **unnamed** — `0010 0040 0002 ffffffff ffffffff 0000` —
+naming only the element (`000d 4003 00 07 "Numeric"`, a label LabVIEW then
+ignores). lvpm writes both descriptors unnamed and LabVIEW accepts it.
 
 ### Reading values back — declare the return type
 

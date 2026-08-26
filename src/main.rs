@@ -588,7 +588,10 @@ fn cmd_vi_save(cli: &Cli, vi: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-/// Parse a `--set` argument: `name=type:value` with type bool|i32|dbl|str.
+/// Parse a `--set` argument: `name=type:value` with type bool|i32|dbl|str,
+/// or `type[]` for a one-dimensional array of that type, whose value is a
+/// comma-separated list (`names=str[]:alpha,beta`). There is no escape for a
+/// comma inside an array element; `type[]:` on its own is the empty array.
 ///
 /// The type is explicit because LabVIEW rejects a mismatched variant with
 /// error 91 — better to be unambiguous here than to guess whether "125"
@@ -601,14 +604,36 @@ fn parse_set(arg: &str) -> Result<(String, viserver::LvValue)> {
     let (ty, raw) = rest
         .split_once(':')
         .with_context(|| format!("--set {arg:?}: expected type:value with type bool|i32|dbl|str"))?;
-    let value = match ty {
-        "bool" => LvValue::Bool(raw.parse().with_context(|| format!("--set {arg:?}: not a bool"))?),
-        "i32" => LvValue::I32(raw.parse().with_context(|| format!("--set {arg:?}: not an i32"))?),
-        "dbl" => LvValue::Dbl(raw.parse().with_context(|| format!("--set {arg:?}: not a number"))?),
-        "str" => LvValue::Str(raw.to_string()),
-        other => bail!("--set {arg:?}: unknown type {other:?} (use bool|i32|dbl|str)"),
+    let value = match ty.strip_suffix("[]") {
+        // An empty array still has to name its element type, so it comes from
+        // the type word rather than from a value we could inspect.
+        Some(elem) if raw.is_empty() => LvValue::empty_array(element_code(elem, arg)?),
+        Some(elem) => {
+            LvValue::array(raw.split(',').map(|v| scalar(elem, v, arg)).collect::<Result<_>>()?)?
+        }
+        None => scalar(ty, raw, arg)?,
     };
     Ok((name.to_string(), value))
+}
+
+/// One scalar of `--set`'s named type. `arg` only ever appears in errors.
+fn scalar(ty: &str, raw: &str, arg: &str) -> Result<viserver::LvValue> {
+    use viserver::LvValue;
+    Ok(match ty {
+        "bool" => LvValue::Bool(raw.parse().with_context(|| format!("--set {arg:?}: {raw:?} is not a bool"))?),
+        "i32" => LvValue::I32(raw.parse().with_context(|| format!("--set {arg:?}: {raw:?} is not an i32"))?),
+        "dbl" => LvValue::Dbl(raw.parse().with_context(|| format!("--set {arg:?}: {raw:?} is not a number"))?),
+        "str" => LvValue::Str(raw.to_string()),
+        other => bail!("--set {arg:?}: unknown type {other:?} (use bool|i32|dbl|str, or type[])"),
+    })
+}
+
+/// The type code `--set`'s type word names, without a value to go with it.
+fn element_code(ty: &str, arg: &str) -> Result<u16> {
+    scalar(ty, "0", arg)
+        .or_else(|_| scalar(ty, "false", arg))
+        .with_context(|| format!("--set {arg:?}: unknown array element type {ty:?}"))?
+        .type_code()
 }
 
 /// Poll `watch` on a VI that is already running, printing every change, until

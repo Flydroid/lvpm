@@ -135,6 +135,7 @@ const TD_I32: u16 = 0x03;
 const TD_DBL: u16 = 0x0a;
 const TD_BOOL: u16 = 0x21;
 const TD_STRING: u16 = 0x30;
+const TD_ARRAY: u16 = 0x40;
 const TD_PATH: u16 = 0x32;
 const TD_VARIANT: u16 = 0x53;
 
@@ -162,18 +163,55 @@ pub enum LvValue {
     I32(i32),
     Dbl(f64),
     Str(String),
+    /// An array. `elem` is the element's type code, kept separately so an
+    /// empty array still knows what it is; `shape` is one length per
+    /// dimension and `items` holds the elements in row-major order.
+    Array { elem: u16, shape: Vec<u32>, items: Vec<LvValue> },
     Other { code: u16, data: Vec<u8> },
 }
 
 impl LvValue {
-    fn type_code(&self) -> Result<u16> {
+    /// The type descriptor code this value flattens under.
+    pub fn type_code(&self) -> Result<u16> {
         Ok(match self {
             LvValue::Bool(_) => TD_BOOL,
             LvValue::I32(_) => TD_I32,
             LvValue::Dbl(_) => TD_DBL,
             LvValue::Str(_) => TD_STRING,
+            LvValue::Array { .. } => TD_ARRAY,
             LvValue::Other { code, .. } => bail!("cannot encode an undecoded value (type {code:#04x})"),
         })
+    }
+
+    /// Build a one-dimensional array from values that must all share a type.
+    pub fn array(items: Vec<LvValue>) -> Result<LvValue> {
+        let shape = vec![items.len() as u32];
+        LvValue::array_nd(shape, items)
+    }
+
+    /// Build an array of `shape.len()` dimensions from row-major `items`.
+    pub fn array_nd(shape: Vec<u32>, items: Vec<LvValue>) -> Result<LvValue> {
+        ensure!(!shape.is_empty(), "an array needs at least one dimension");
+        let want: u64 = shape.iter().map(|d| *d as u64).product();
+        ensure!(
+            want == items.len() as u64,
+            "shape {shape:?} needs {want} elements, got {}",
+            items.len()
+        );
+        let elem = match items.first() {
+            Some(first) => first.type_code()?,
+            None => bail!("an empty array has no element type; build it with LvValue::empty_array"),
+        };
+        for v in &items {
+            ensure!(v.type_code()? == elem, "array elements have mixed types");
+        }
+        ensure!(elem != TD_ARRAY, "arrays of arrays are unsupported (use a shape instead)");
+        Ok(LvValue::Array { elem, shape, items })
+    }
+
+    /// An empty one-dimensional array of the given element type code.
+    pub fn empty_array(elem: u16) -> LvValue {
+        LvValue::Array { elem, shape: vec![0], items: Vec::new() }
     }
 
     /// The value's flattened bytes, without any container padding.
@@ -183,6 +221,23 @@ impl LvValue {
             LvValue::I32(i) => i.to_be_bytes().to_vec(),
             LvValue::Dbl(d) => d.to_be_bytes().to_vec(),
             LvValue::Str(s) => lv_string(s.as_bytes()),
+            // Arrays flatten as one `u32` length per dimension, then the
+            // elements row-major. No padding between them, and strings keep
+            // their own length prefix.
+            LvValue::Array { elem, shape, items } => {
+                let mut out = Vec::with_capacity(4 * shape.len() + 8 * items.len());
+                for d in shape {
+                    out.extend_from_slice(&d.to_be_bytes());
+                }
+                for v in items {
+                    ensure!(
+                        v.type_code()? == *elem,
+                        "array element does not match the array's type {elem:#04x}"
+                    );
+                    out.extend_from_slice(&v.flattened()?);
+                }
+                out
+            }
             LvValue::Other { code, .. } => bail!("cannot encode an undecoded value (type {code:#04x})"),
         })
     }
@@ -195,6 +250,7 @@ impl std::fmt::Display for LvValue {
             LvValue::I32(i) => write!(f, "{i}"),
             LvValue::Dbl(d) => write!(f, "{d}"),
             LvValue::Str(s) => write!(f, "{s:?}"),
+            LvValue::Array { shape, items, .. } => fmt_rows(f, shape, items),
             LvValue::Other { code, data } => {
                 write!(f, "<type {code:#04x}:")?;
                 for b in data {
@@ -204,6 +260,36 @@ impl std::fmt::Display for LvValue {
             }
         }
     }
+}
+
+/// Print row-major `items` with one bracket level per dimension.
+fn fmt_rows(
+    f: &mut std::fmt::Formatter<'_>,
+    shape: &[u32],
+    items: &[LvValue],
+) -> std::fmt::Result {
+    write!(f, "[")?;
+    match shape {
+        // Innermost dimension (or a shape we cannot trust): print the values.
+        [] | [_] => {
+            for (i, v) in items.iter().enumerate() {
+                if i > 0 {
+                    write!(f, ", ")?;
+                }
+                write!(f, "{v}")?;
+            }
+        }
+        [outer, rest @ ..] => {
+            let stride = items.len() / (*outer).max(1) as usize;
+            for (i, row) in items.chunks(stride.max(1)).take(*outer as usize).enumerate() {
+                if i > 0 {
+                    write!(f, ", ")?;
+                }
+                fmt_rows(f, rest, row)?;
+            }
+        }
+    }
+    write!(f, "]")
 }
 
 /// A LabVIEW string: `u32 length | bytes`, no padding of its own.
@@ -258,6 +344,38 @@ fn type_desc(code: u16, name: Option<&str>) -> Result<Vec<u8>> {
     Ok(td)
 }
 
+/// Build a flattened array type descriptor. It carries no element type of its
+/// own — it points at another entry of the same descriptor table by index:
+///
+/// ```text
+/// u16 len          total descriptor length, itself included
+/// u16 flags|0x40   0x40 flag = named
+/// u16 dims         dimension count
+/// u32 * dims       each dimension's size; ff ff ff ff = variable
+/// u16 elem         index of the element's descriptor in the table
+/// [pascal name]    padded to even length, when named
+/// ```
+///
+/// Nothing in it depends on the element type, so a DBL, I32 or Boolean array
+/// differs from a String array only in the descriptor it points at.
+fn array_desc(elem: u16, dims: u16, name: Option<&str>) -> Result<Vec<u8>> {
+    ensure!(dims >= 1, "an array descriptor needs at least one dimension");
+    let flags: u16 = if name.is_some() { 0x40 } else { 0x00 };
+    let mut td = vec![0, 0];
+    td.extend_from_slice(&((flags << 8) | TD_ARRAY).to_be_bytes());
+    td.extend_from_slice(&dims.to_be_bytes());
+    for _ in 0..dims {
+        td.extend_from_slice(&[0xff, 0xff, 0xff, 0xff]); // each of variable size
+    }
+    td.extend_from_slice(&elem.to_be_bytes());
+    if let Some(n) = name {
+        td.extend_from_slice(&pascal_padded(n)?);
+    }
+    let len = td.len() as u16;
+    td[0..2].copy_from_slice(&len.to_be_bytes());
+    Ok(td)
+}
+
 /// The flattening version stamped on variants we produce: LabVIEW 2026
 /// release, in LabVIEW's own major/minor/fix/stage encoding. LabVIEW accepts
 /// data flattened by older versions, so a fixed stamp is safe.
@@ -267,23 +385,48 @@ const FLATTEN_VERSION: u32 = 0x2600_8000;
 /// the data conforms to. Single-descriptor containers always carry this value.
 const SINGLE_TD: [u8; 4] = [0x00, 0x01, 0x00, 0x00];
 
+/// Build the type-descriptor table a value needs, returning the table and the
+/// index of the entry the flattened data itself conforms to.
+///
+/// A scalar needs one entry; an array needs its element's entry first and then
+/// its own, which references that element by index — the same shape LabVIEW's
+/// own client sends, unnamed descriptors included.
+fn td_table(v: &LvValue) -> Result<(Vec<Vec<u8>>, u16)> {
+    match v {
+        LvValue::Array { elem, shape, .. } => {
+            ensure!(*elem != TD_ARRAY, "arrays of arrays are unsupported");
+            let dims = u16::try_from(shape.len()).context("too many array dimensions")?;
+            let table = vec![type_desc(*elem, None)?, array_desc(0, dims, None)?];
+            Ok((table, 1))
+        }
+        other => Ok((vec![type_desc(other.type_code()?, None)?], 0)),
+    }
+}
+
 /// Flatten a value into a LabVIEW variant:
 ///
 /// ```text
-/// u32 version | u32 descriptor count (1) | type descriptor |
-/// 00 01 00 00 | flattened value | u32 attribute count (0)
+/// u32 version | u32 descriptor count | type descriptors... |
+/// 00 01 | u16 root | flattened value | u32 attribute count (0)
 /// ```
+///
+/// The `00 01` is the number of top-level types (always one); `root` selects
+/// which table entry the data conforms to — 0 for a scalar, the array's own
+/// index for an array. [`SINGLE_TD`] is exactly this pair for the scalar case.
 ///
 /// Variants carry no padding of their own; any padding belongs to whatever
 /// contains them.
 fn variant(v: &LvValue) -> Result<Vec<u8>> {
-    let td = type_desc(v.type_code()?, None)?;
+    let (table, root) = td_table(v)?;
     let value = v.flattened()?;
-    let mut out = Vec::with_capacity(16 + td.len() + value.len() + 4);
+    let mut out = Vec::with_capacity(16 + value.len());
     out.extend_from_slice(&FLATTEN_VERSION.to_be_bytes());
-    out.extend_from_slice(&1u32.to_be_bytes());
-    out.extend_from_slice(&td);
-    out.extend_from_slice(&SINGLE_TD);
+    out.extend_from_slice(&(table.len() as u32).to_be_bytes());
+    for td in &table {
+        out.extend_from_slice(td);
+    }
+    out.extend_from_slice(&1u16.to_be_bytes());
+    out.extend_from_slice(&root.to_be_bytes());
     out.extend_from_slice(&value);
     out.extend_from_slice(&0u32.to_be_bytes());
     Ok(out)
@@ -527,17 +670,17 @@ impl Method for CtrlValGet<'_> {
 
 /// The return-type section `Ctrl Val.Get All` must declare: an array of
 /// cluster{Name: String, Variant Data: Variant} named "Get All Control Values
-/// Variant". Reproduced from a capture because the array and cluster
-/// descriptors reference each other through fields we can skip but have not
-/// fully decoded; the surrounding framing is generated and understood.
+/// Variant". Reproduced from a capture: the framing is generated and
+/// understood, and so now is the array descriptor (see [`array_desc`]), but
+/// clusters are still only transcribed.
 const GET_ALL_RETURN_TYPES: [u8; 98] = [
     0x00, 0x00, 0x00, 0x5e, // section length, this field excluded
     0x00, 0x00, 0x00, 0x04, // four descriptors
     0x00, 0x0e, 0x40, 0x30, 0xff, 0xff, 0xff, 0xff, 0x04, b'N', b'a', b'm', b'e', 0x00, // String "Name"
     0x00, 0x12, 0x40, 0x53, 0x0c, b'V', b'a', b'r', b'i', b'a', b'n', b't', b' ', b'D', b'a',
     b't', b'a', 0x00, // Variant "Variant Data"
-    0x00, 0x0a, 0x00, 0x50, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01, // array (element: descriptor 2)
-    0x00, 0x2c, 0x40, 0x40, 0x00, 0x01, 0xff, 0xff, 0xff, 0xff, 0x00, 0x02, // cluster, 2 fields
+    0x00, 0x0a, 0x00, 0x50, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01, // cluster of descriptors 0 and 1
+    0x00, 0x2c, 0x40, 0x40, 0x00, 0x01, 0xff, 0xff, 0xff, 0xff, 0x00, 0x02, // array of descriptor 2
     0x1e, b'G', b'e', b't', b' ', b'A', b'l', b'l', b' ', b'C', b'o', b'n', b't', b'r', b'o',
     b'l', b' ', b'V', b'a', b'l', b'u', b'e', b's', b' ', b'V', b'a', b'r', b'i', b'a', b'n',
     b't', 0x00, // its name
@@ -583,6 +726,18 @@ impl Method for CtrlValGetAll {
     }
 }
 
+/// An upper bound on a variant's descriptor table, so a corrupt count cannot
+/// make us allocate wildly. Real panels stay in the single digits.
+const MAX_TYPE_DESCS: u32 = 64;
+
+/// What a flattened type descriptor tells us that decoding the data needs.
+/// `dims` and `elem` are meaningful only for arrays.
+struct TypeDesc {
+    code: u16,
+    dims: u16,
+    elem: u16,
+}
+
 /// A bounds-checked cursor over a reply.
 struct Reader<'a> {
     b: &'a [u8],
@@ -614,25 +769,89 @@ impl<'a> Reader<'a> {
         Ok(self.take(len)?.to_vec())
     }
 
-    /// Decode one variant. Variants inside a reply name their type descriptor
-    /// after the control's label; the descriptor's own length field lets us
-    /// skip whatever it carries.
+    /// Decode one variant.
+    ///
+    /// ```text
+    /// u32 version | u32 descriptor count | type descriptors... |
+    /// 00 01 | u16 root | flattened value | u32 attribute count
+    /// ```
+    ///
+    /// A scalar sends one descriptor and root 0. An array sends its element's
+    /// descriptor and its own, and roots the data at the array — so the count
+    /// is not a constant and the descriptors have to be kept, not skipped.
     fn variant(&mut self) -> Result<LvValue> {
         let _version = self.u32()?;
         let count = self.u32()?;
-        ensure!(count == 1, "variant with {count} type descriptors is unsupported");
-        let td_len = self.u16()? as usize;
-        let code = self.u16()? & 0x00ff;
-        ensure!(td_len >= 4, "malformed type descriptor");
-        self.take(td_len - 4)?; // the rest of the descriptor: reserved fields, name
-        let selector = self.take(4)?;
-        ensure!(selector == SINGLE_TD, "unexpected descriptor selector {selector:02x?}");
+        ensure!(count >= 1, "variant with no type descriptors");
+        ensure!(count <= MAX_TYPE_DESCS, "variant with {count} type descriptors is implausible");
+        let table: Vec<TypeDesc> =
+            (0..count).map(|_| self.type_desc()).collect::<Result<_>>()?;
+        let tops = self.u16()?;
+        ensure!(tops == 1, "variant with {tops} top-level types is unsupported");
+        let root = self.u16()?;
+        let value = self.value(&table, root, 0)?;
+        let attrs = self.u32()?;
+        ensure!(attrs == 0, "variant attributes are unsupported ({attrs} present)");
+        Ok(value)
+    }
 
-        let value = match code {
+    /// Read one type descriptor, keeping only what decoding the data needs.
+    /// Its own length field carries us past the name and any reserved fields.
+    fn type_desc(&mut self) -> Result<TypeDesc> {
+        let start = self.pos;
+        let len = self.u16()? as usize;
+        ensure!(len >= 4, "malformed type descriptor (length {len})");
+        let code = self.u16()? & 0x00ff; // the high byte is flags, not type
+        let (mut dims, mut elem) = (1u16, 0u16);
+        if code == TD_ARRAY {
+            dims = self.u16()?;
+            for _ in 0..dims {
+                self.u32()?; // each dimension's size; ff ff ff ff = variable
+            }
+            elem = self.u16()?;
+        }
+        let read = self.pos - start;
+        ensure!(read <= len, "type descriptor overruns its length ({read} > {len})");
+        self.take(len - read)?; // name and anything else we do not need
+        Ok(TypeDesc { code, dims, elem })
+    }
+
+    /// Decode the value at table entry `idx`. `depth` bounds the recursion: a
+    /// malformed table could otherwise point an array at itself.
+    fn value(&mut self, table: &[TypeDesc], idx: u16, depth: u32) -> Result<LvValue> {
+        ensure!(depth < 8, "type descriptors nest too deeply");
+        let td = table
+            .get(idx as usize)
+            .with_context(|| format!("type descriptor {idx} is outside the table"))?;
+        Ok(match td.code {
             TD_BOOL => LvValue::Bool(self.take(1)?[0] != 0),
             TD_I32 => LvValue::I32(i32::from_be_bytes(self.take(4)?.try_into().unwrap())),
             TD_DBL => LvValue::Dbl(f64::from_be_bytes(self.take(8)?.try_into().unwrap())),
             TD_STRING => LvValue::Str(String::from_utf8_lossy(&self.lv_string()?).into_owned()),
+            TD_ARRAY => {
+                // One `u32` length per dimension, then the elements row-major.
+                ensure!(td.dims >= 1, "array descriptor claims no dimensions");
+                let shape: Vec<u32> = (0..td.dims).map(|_| self.u32()).collect::<Result<_>>()?;
+                let n: u64 = shape.iter().map(|d| *d as u64).product();
+                // One element is at least one byte, so a count larger than
+                // what is left in the reply is corrupt, not merely truncated.
+                ensure!(
+                    n <= (self.b.len() - self.pos) as u64,
+                    "array of {n} elements does not fit in the remaining {} bytes",
+                    self.b.len() - self.pos
+                );
+                let elem = table
+                    .get(td.elem as usize)
+                    .with_context(|| format!("array element type {} is outside the table", td.elem))?;
+                let mut items = Vec::with_capacity(n as usize);
+                for i in 0..n {
+                    items.push(
+                        self.value(table, td.elem, depth + 1)
+                            .with_context(|| format!("decoding array element {i}"))?,
+                    );
+                }
+                LvValue::Array { elem: elem.code, shape, items }
+            }
             other => match numeric_size(other) {
                 // Recognised size: preserve the bytes so the rest of the
                 // reply stays parseable.
@@ -640,10 +859,7 @@ impl<'a> Reader<'a> {
                 // Unknown size means we cannot find the next element.
                 None => bail!("control type {other:#04x} is not supported"),
             },
-        };
-        let attrs = self.u32()?;
-        ensure!(attrs == 0, "variant attributes are unsupported ({attrs} present)");
-        Ok(value)
+        })
     }
 }
 
@@ -1090,6 +1306,209 @@ mod tests {
         let tail: &[u8] = b"\x26\x00\x80\x00\x00\x00\x00\x01\x00\x08\x00\x30\xff\xff\xff\xff\
 \x00\x01\x00\x00\x00\x00\x00\x05Hello\x00\x00\x00\x00\x00";
         assert!(got.ends_with(tail), "variant layout drifted");
+    }
+
+    /// The exact variant LabVIEW returned for a two-element string array, from
+    /// the loopback capture of `CTRL Val Set Get Test.vi`. Two descriptors:
+    /// the element's, then the array's, which points back at it by index. The
+    /// data is rooted at the array — the `00 01 00 01` a scalar sends as
+    /// `00 01 00 00`.
+    const CAPTURED_STRING_ARRAY: &[u8] = b"\x26\x00\x80\x00\x00\x00\x00\x02\
+\x00\x16\x40\x30\xff\xff\xff\xff\x0cString out 2\x00\
+\x00\x1e\x40\x40\x00\x01\xff\xff\xff\xff\x00\x00\x10String Array out\x00\
+\x00\x01\x00\x01\
+\x00\x00\x00\x02\x00\x00\x00\x07Hello 1\x00\x00\x00\x07Hello 2\
+\x00\x00\x00\x00";
+
+    #[test]
+    fn decodes_the_captured_string_array() {
+        let got = Reader::new(CAPTURED_STRING_ARRAY).variant().unwrap();
+        assert_eq!(
+            got,
+            LvValue::Array {
+                elem: TD_STRING,
+                shape: vec![2],
+                items: vec![LvValue::Str("Hello 1".into()), LvValue::Str("Hello 2".into())],
+            }
+        );
+        assert_eq!(got.to_string(), r#"["Hello 1", "Hello 2"]"#);
+    }
+
+    /// The descriptor names in the capture are stale — LabVIEW ignores them —
+    /// so our encoder writes unnamed ones. Everything else must match what the
+    /// capture showed: two descriptors, the array rooted at index 1, and the
+    /// data as a u32 count followed by the packed elements.
+    #[test]
+    fn encodes_a_string_array_the_way_the_capture_reads_it() {
+        let v = LvValue::array(vec![LvValue::Str("Hello 1".into()), LvValue::Str("Hello 2".into())])
+            .unwrap();
+        let want: &[u8] = b"\x26\x00\x80\x00\x00\x00\x00\x02\
+\x00\x08\x00\x30\xff\xff\xff\xff\
+\x00\x0c\x00\x40\x00\x01\xff\xff\xff\xff\x00\x00\
+\x00\x01\x00\x01\
+\x00\x00\x00\x02\x00\x00\x00\x07Hello 1\x00\x00\x00\x07Hello 2\
+\x00\x00\x00\x00";
+        assert_eq!(variant(&v).unwrap(), want);
+        assert_eq!(Reader::new(&variant(&v).unwrap()).variant().unwrap(), v);
+    }
+
+    /// The array descriptor carries no element type of its own, so a Dbl, I32
+    /// or Boolean array must differ from a String array only in the element
+    /// descriptor and the flattened data. Derived, not captured — the test VI
+    /// has no numeric array yet.
+    #[test]
+    fn numeric_arrays_reuse_the_string_array_framing() {
+        let cases: [(LvValue, &[u8], &[u8]); 3] = [
+            // element descriptor        flattened element
+            (LvValue::Dbl(1.0), b"\x00\x05\x00\x0a\x00", b"\x3f\xf0\x00\x00\x00\x00\x00\x00"),
+            (LvValue::I32(125), b"\x00\x05\x00\x03\x00", b"\x00\x00\x00\x7d"),
+            (LvValue::Bool(true), b"\x00\x04\x00\x21", b"\x01"),
+        ];
+        for (elem, td, data) in cases {
+            let v = LvValue::array(vec![elem.clone()]).unwrap();
+            let mut want = b"\x26\x00\x80\x00\x00\x00\x00\x02".to_vec();
+            want.extend_from_slice(td);
+            // The array descriptor is the same twelve bytes every time: unnamed,
+            // one dimension of variable size, element = descriptor 0.
+            want.extend_from_slice(b"\x00\x0c\x00\x40\x00\x01\xff\xff\xff\xff\x00\x00");
+            want.extend_from_slice(b"\x00\x01\x00\x01\x00\x00\x00\x01");
+            want.extend_from_slice(data);
+            want.extend_from_slice(b"\x00\x00\x00\x00");
+            assert_eq!(variant(&v).unwrap(), want, "{elem} array");
+            assert_eq!(Reader::new(&want).variant().unwrap(), v, "{elem} array round trip");
+        }
+    }
+
+    #[test]
+    fn empty_and_malformed_arrays() {
+        let empty = LvValue::empty_array(TD_I32);
+        assert_eq!(Reader::new(&variant(&empty).unwrap()).variant().unwrap(), empty);
+        assert!(LvValue::array(vec![]).is_err(), "an empty array needs its type stated");
+        assert!(
+            LvValue::array(vec![LvValue::I32(1), LvValue::Dbl(1.0)]).is_err(),
+            "mixed element types"
+        );
+        // A truncated element must fail, not panic.
+        let short = &CAPTURED_STRING_ARRAY[..CAPTURED_STRING_ARRAY.len() - 20];
+        assert!(Reader::new(short).variant().is_err());
+    }
+
+    /// The 2-D Int32 array LabVIEW returned for `Int32 2D Array out`, from the
+    /// same capture. The array descriptor carries one `ffffffff` per
+    /// dimension, and the data one `u32` length per dimension before the
+    /// elements, row-major.
+    const CAPTURED_2D_I32: &[u8] = b"\x26\x00\x80\x00\x00\x00\x00\x02\
+\x00\x19\x40\x03\x00\x12Int32 2D Array out\x00\
+\x00\x24\x40\x40\x00\x02\xff\xff\xff\xff\xff\xff\xff\xff\x00\x00\x12Int32 2D Array out\x00\
+\x00\x01\x00\x01\
+\x00\x00\x00\x02\x00\x00\x00\x02\
+\x00\x00\x00\x02\x00\x00\x00\x03\x00\x00\x00\x0c\x00\x00\x00\x17\
+\x00\x00\x00\x00";
+
+    #[test]
+    fn decodes_the_captured_2d_int32_array() {
+        let got = Reader::new(CAPTURED_2D_I32).variant().unwrap();
+        assert_eq!(
+            got,
+            LvValue::Array {
+                elem: TD_I32,
+                shape: vec![2, 2],
+                items: vec![LvValue::I32(2), LvValue::I32(3), LvValue::I32(12), LvValue::I32(23)],
+            }
+        );
+        assert_eq!(got.to_string(), "[[2, 3], [12, 23]]");
+    }
+
+    /// The variant LabVIEW's **own client** sent to write `Int32 2D Array in`.
+    /// It writes the array descriptor unnamed, which is what our encoder does,
+    /// so this pins the encoder against LabVIEW rather than against ourselves.
+    /// Only the element descriptor differs: LabVIEW names it `"Numeric"`.
+    #[test]
+    fn encodes_a_2d_int32_array_like_labviews_own_client() {
+        let theirs: &[u8] = b"\x26\x00\x80\x00\x00\x00\x00\x02\
+\x00\x0d\x40\x03\x00\x07Numeric\
+\x00\x10\x00\x40\x00\x02\xff\xff\xff\xff\xff\xff\xff\xff\x00\x00\
+\x00\x01\x00\x01\
+\x00\x00\x00\x02\x00\x00\x00\x02\
+\x00\x00\x00\x01\x00\x00\x00\x02\x00\x00\x00\x0b\x00\x00\x00\x16\
+\x00\x00\x00\x00";
+        let v = LvValue::array_nd(
+            vec![2, 2],
+            vec![LvValue::I32(1), LvValue::I32(2), LvValue::I32(11), LvValue::I32(22)],
+        )
+        .unwrap();
+        let ours = variant(&v).unwrap();
+
+        // Identical but for the element descriptor's name, which LabVIEW
+        // ignores: ours is the unnamed `00 05 00 03 00`, theirs the named
+        // `00 0d 40 03 00 07 "Numeric" 00`.
+        assert_eq!(&ours[..8], &theirs[..8], "version and descriptor count");
+        assert_eq!(&ours[8..13], b"\x00\x05\x00\x03\x00", "unnamed I32 element");
+        assert_eq!(&ours[13..], &theirs[21..], "array descriptor, root and data");
+
+        // And LabVIEW's own bytes decode back to the value it was sent.
+        assert_eq!(Reader::new(theirs).variant().unwrap(), v);
+        assert_eq!(Reader::new(&ours).variant().unwrap(), v);
+    }
+
+    #[test]
+    fn rejects_a_shape_that_does_not_match_its_elements() {
+        assert!(LvValue::array_nd(vec![2, 2], vec![LvValue::I32(1)]).is_err());
+        assert!(LvValue::array_nd(vec![], vec![]).is_err());
+        // A corrupt dimension count must not make us allocate for it.
+        let mut bad = CAPTURED_2D_I32.to_vec();
+        // The first dimension's length sits after both descriptors and the root
+        // index: 8 + 25 + 36 + 4.
+        bad[73..77].copy_from_slice(&0x00ff_ffff_u32.to_be_bytes());
+        assert!(Reader::new(&bad).variant().is_err());
+    }
+
+    /// The whole panel in one call, from the second capture: six controls
+    /// including a 1-D string array and a 2-D I32 array, exactly as LabVIEW
+    /// sent them. Unlike the reconstructed reply above this is the raw 604
+    /// bytes off the wire, so it pins `reply_data`'s slicing too.
+    #[test]
+    fn ctrl_val_get_all_decodes_a_panel_holding_arrays() {
+        let reply: &[u8] = b"\x00\x00\x00\x02\x00\x00\x00!\x00\x00\x02.\x00\x00\x00^\x00\x00\x00\x04\x00\x0e@0\xff\xff\
+\xff\xff\x04Name\x00\x00\x12@S\x0cVariant Data\x00\x00\x0a\x00P\x00\x02\x00\x00\x00\x01\x00,\
+@@\x00\x01\xff\xff\xff\xff\x00\x02\x1eGet All Control Values Variant\x00\x00\x01\x00\x03\x00\
+\x00\x00\x06\x00\x00\x00\x0aDouble out&\x00\x80\x00\x00\x00\x00\x01\x00\x11@\x0a\x00\x0aDoub\
+le out\x00\x00\x01\x00\x00@_\x80\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x09Int32 ou\
+t&\x00\x80\x00\x00\x00\x00\x01\x00\x0f@\x03\x00\x09Int32 out\x00\x01\x00\x00\x00\x00\x00~\
+\x00\x00\x00\x00\x00\x00\x00\x0bBoolean out&\x00\x80\x00\x00\x00\x00\x01\x00\x10@!\x0bBoolea\
+n out\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x0aString out&\x00\x80\x00\x00\x00\x00\
+\x01\x00\x14@0\xff\xff\xff\xff\x0aString out\x00\x00\x01\x00\x00\x00\x00\x00\x0dHello_aStrin\
+g\x00\x00\x00\x00\x00\x00\x00\x10String Array out&\x00\x80\x00\x00\x00\x00\x02\x00\x16@0\xff\
+\xff\xff\xff\x0cString out 2\x00\x00\x1e@@\x00\x01\xff\xff\xff\xff\x00\x00\x10String Array o\
+ut\x00\x00\x01\x00\x01\x00\x00\x00\x02\x00\x00\x00\x07Hello 1\x00\x00\x00\x07Hello 2\x00\x00\
+\x00\x00\x00\x00\x00\x12Int32 2D Array out&\x00\x80\x00\x00\x00\x00\x02\x00\x19@\x03\x00\x12\
+Int32 2D Array out\x00\x00$@@\x00\x02\xff\xff\xff\xff\xff\xff\xff\xff\x00\x00\x12Int32 2D Ar\
+ray out\x00\x00\x01\x00\x01\x00\x00\x00\x02\x00\x00\x00\x02\x00\x00\x00\x02\x00\x00\x00\x03\
+\x00\x00\x00\x0c\x00\x00\x00\x17\x00\x00\x00\x00\x00\x00\x00\x00\x10\x00\x00\x00\x1a\x00\x00\
+\x00\x16\x00\x00\x00\x01\x00\x0e@!\x08Controls\x00\x00\x01\x00\x00";
+        let got = CtrlValGetAll { controls: false }.decode_reply(reply).unwrap();
+        let names: Vec<&str> = got.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "Double out",
+                "Int32 out",
+                "Boolean out",
+                "String out",
+                "String Array out",
+                "Int32 2D Array out"
+            ]
+        );
+        assert_eq!(got[4].1.to_string(), r#"["Hello 1", "Hello 2"]"#);
+        assert_eq!(
+            got[5].1,
+            LvValue::Array {
+                elem: TD_I32,
+                shape: vec![2, 2],
+                items: vec![LvValue::I32(2), LvValue::I32(3), LvValue::I32(12), LvValue::I32(23)],
+            }
+        );
+        assert_eq!(got[5].1.to_string(), "[[2, 3], [12, 23]]");
     }
 
     /// `Ctrl Val.Get All` including indicators, byte-for-byte the captured
