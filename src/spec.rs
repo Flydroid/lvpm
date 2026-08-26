@@ -25,6 +25,13 @@ pub struct Spec {
     /// Non-empty `[Script VIs]` hooks, e.g. ("PostInstall", "install.vi").
     /// About a quarter of published packages have at least one.
     pub script_vis: Vec<(String, String)>,
+    /// `[Dependencies] Requires`, verbatim. Same syntax the indexes use for
+    /// `Dependencies.Requires`, which is what lets a package on disk be
+    /// resolved exactly like one from a feed.
+    pub requires: Option<String>,
+    /// `[Platform] Exclusive_LabVIEW_Version`, verbatim — e.g. `LabVIEW>=25.3`.
+    /// Some packages write it bare, as `>=8.6`.
+    pub lv_gate: Option<String>,
 }
 
 const HOOKS: &[&str] = &[
@@ -117,7 +124,14 @@ pub fn parse(text: &str) -> Result<Spec> {
         })
         .unwrap_or_default();
 
-    Ok(Spec { name, version, display_name, file_groups, script_vis })
+    let non_empty = |s: &HashMap<String, String>, k: &str| {
+        s.get(k).map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
+    };
+    let requires = sections.get("Dependencies").and_then(|s| non_empty(s, "Requires"));
+    let lv_gate =
+        sections.get("Platform").and_then(|s| non_empty(s, "Exclusive_LabVIEW_Version"));
+
+    Ok(Spec { name, version, display_name, file_groups, script_vis, requires, lv_gate })
 }
 
 #[cfg(test)]

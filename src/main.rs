@@ -2,11 +2,13 @@
 //!
 //! Resolves `.vip` packages by name from the public VIPM indexes, downloads
 //! them, verifies the MD5 and unpacks them — either into a scratch tree or
-//! into a real LabVIEW installation. No VIPM, no VI Server, no LabVIEW
-//! process. Script VIs are reported but never run.
+//! into a real LabVIEW installation. No VIPM. Copying the files is followed by
+//! a relink pass over VI Server (see [`relink`]), which a scratch install
+//! skips and `--no-relink` turns off. Script VIs are reported but never run.
 
 mod index;
 mod install;
+mod relink;
 mod spec;
 mod target;
 mod version;
@@ -47,6 +49,17 @@ struct Cli {
     cmd: Cmd,
 }
 
+/// Shared by `install` and `relink`, so the two cannot drift apart.
+#[derive(clap::Args, Clone)]
+struct RelinkArgs {
+    /// Give up on a single folder after this many seconds.
+    #[arg(long = "relink-timeout", value_name = "SECS", default_value_t = 900)]
+    timeout: u64,
+    /// Echo this indicator on the relink VI's front panel while it works.
+    #[arg(long = "relink-progress", value_name = "NAME")]
+    progress: Option<String>,
+}
+
 #[derive(Subcommand)]
 enum Cmd {
     /// List detected LabVIEW installations.
@@ -60,6 +73,21 @@ enum Cmd {
         /// Do not install dependencies.
         #[arg(long)]
         no_deps: bool,
+        /// Copy the files but skip the relink pass.
+        #[arg(long)]
+        no_relink: bool,
+        #[command(flatten)]
+        relink: RelinkArgs,
+    },
+    /// Relink an already-installed package, without reinstalling it.
+    ///
+    /// The install manifest records what went where, so this is the same pass
+    /// `install` runs — useful after `--no-relink`, or after LabVIEW was not
+    /// running when the install happened.
+    Relink {
+        package: String,
+        #[command(flatten)]
+        relink: RelinkArgs,
     },
     /// Remove a previously installed package.
     Uninstall { package: String },
@@ -91,6 +119,15 @@ enum Cmd {
         /// Seconds to wait for the VI to finish.
         #[arg(long, default_value_t = 120)]
         timeout: u64,
+        /// Start the VI without waiting and poll this indicator while it runs.
+        #[arg(long, value_name = "NAME")]
+        watch: Option<String>,
+        /// How often to poll --watch, in milliseconds.
+        #[arg(long, default_value_t = 250)]
+        poll_ms: u64,
+        /// Boolean indicator that goes true when the VI is finished.
+        #[arg(long, value_name = "NAME", default_value = "Done")]
+        done: String,
     },
     /// Show what lvpm has installed into the selected target.
     List,
@@ -102,12 +139,15 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match &cli.cmd {
         Cmd::Targets => cmd_targets(),
-        Cmd::Install { package, dry_run, no_deps } => cmd_install(&cli, package, *dry_run, *no_deps),
+        Cmd::Install { package, dry_run, no_deps, no_relink, relink } => {
+            cmd_install(&cli, package, *dry_run, *no_deps, *no_relink, relink)
+        }
+        Cmd::Relink { package, relink } => cmd_relink(&cli, package, relink),
         Cmd::Uninstall { package } => cmd_uninstall(&cli, package),
         Cmd::ViProbe { vi } => cmd_vi_probe(&cli, vi),
         Cmd::ViSave { vi } => cmd_vi_save(&cli, vi),
-        Cmd::ViRun { vi, sets, gets, get_all, timeout } => {
-            cmd_vi_run(&cli, vi, sets, gets, *get_all, *timeout)
+        Cmd::ViRun { vi, sets, gets, get_all, timeout, watch, poll_ms, done } => {
+            cmd_vi_run(&cli, vi, sets, gets, *get_all, *timeout, watch.as_deref(), *poll_ms, done)
         }
         Cmd::List => cmd_list(&cli),
         Cmd::Search { query } => cmd_search(&cli, query),
@@ -187,10 +227,11 @@ fn cmd_list(cli: &Cli) -> Result<()> {
     }
     for m in &installed {
         println!(
-            "{:<52} {:<14} {:>5} files{}",
+            "{:<52} {:<14} {:>5} files  {:<12}{}",
             m.name,
             m.version,
             m.files.len(),
+            if m.relinked { "relinked" } else { "NOT relinked" },
             if m.skipped_hooks.is_empty() {
                 String::new()
             } else {
@@ -214,7 +255,14 @@ fn cmd_uninstall(cli: &Cli, package: &str) -> Result<()> {
     Ok(())
 }
 
-fn cmd_install(cli: &Cli, package: &str, dry_run: bool, no_deps: bool) -> Result<()> {
+fn cmd_install(
+    cli: &Cli,
+    package: &str,
+    dry_run: bool,
+    no_deps: bool,
+    no_relink: bool,
+    relink_args: &RelinkArgs,
+) -> Result<()> {
     let roots = roots_for(cli)?;
     let lv_gate = roots.target.as_ref().map(|t| t.version);
 
@@ -284,7 +332,10 @@ fn cmd_install(cli: &Cli, package: &str, dry_run: bool, no_deps: bool) -> Result
 
     let mut total_writes = 0usize;
     let mut hook_warnings: Vec<String> = Vec::new();
-    let mut installed_files: Vec<String> = Vec::new();
+    // Per package, in install order: the folders its files landed in. Relinking
+    // happens after every package is on disk, so no package can be relinked
+    // against a dependency that is not there yet.
+    let mut relink_work: Vec<(String, Vec<PathBuf>)> = Vec::new();
 
     for e in &plan {
         if install::is_installed(&roots, &e.name) {
@@ -294,13 +345,19 @@ fn cmd_install(cli: &Cli, package: &str, dry_run: bool, no_deps: bool) -> Result
         print!("{} {} {} ... ", if dry_run { "?" } else { "+" }, e.name, e.version);
         std::io::stdout().flush().ok();
 
-        let bytes = client
-            .get(&e.url)
-            .send()
-            .with_context(|| format!("downloading {}", e.url))?
-            .error_for_status()?
-            .bytes()?
-            .to_vec();
+        // A local repo's entries carry a path, not a URL, and their bytes never
+        // travel — so there is no MD5 to check either.
+        let bytes = if index::is_local_url(&e.url) {
+            std::fs::read(&e.url).with_context(|| format!("reading {}", e.url))?
+        } else {
+            client
+                .get(&e.url)
+                .send()
+                .with_context(|| format!("downloading {}", e.url))?
+                .error_for_status()?
+                .bytes()?
+                .to_vec()
+        };
 
         if let Some(want) = &e.md5 {
             let got = index::md5_hex(&bytes);
@@ -323,10 +380,11 @@ fn cmd_install(cli: &Cli, package: &str, dry_run: bool, no_deps: bool) -> Result
             if p.writes.len() > 6 {
                 println!("      ... and {} more", p.writes.len() - 6);
             }
+            relink_work.push((e.name.clone(), relink::folders_for_spec(&roots, &spec)?));
         } else {
             let m = install::apply(&roots, &spec, &mut zip, &p)?;
             println!("{} files", m.files.len());
-            installed_files.extend(m.files.iter().cloned());
+            relink_work.push((e.name.clone(), m.relink_folders.iter().map(PathBuf::from).collect()));
         }
 
         if p.skipped_existing > 0 {
@@ -349,9 +407,26 @@ fn cmd_install(cli: &Cli, package: &str, dry_run: bool, no_deps: bool) -> Result
         println!("\ndone. {total_writes} files written.");
     }
 
-    if !dry_run && roots.target.is_some() {
-        println!("note: LabVIEW will resolve these VIs' links when it first loads them,");
-        println!("      but will not persist that unless something saves them.");
+    // Relink is the second phase, and only a real LabVIEW installation has a
+    // LabVIEW to do it: a scratch tree has no VI Server to talk to.
+    let folders: usize = relink_work.iter().map(|(_, f)| f.len()).sum();
+    let target = roots.target.clone();
+    if folders == 0 {
+        // Nothing with linker tables was installed — palettes and docs only.
+    } else if target.is_none() {
+        println!("\nrelink: skipped — a scratch tree has no LabVIEW to relink with");
+    } else if no_relink {
+        println!("\nrelink: skipped (--no-relink). These VIs still declare the paths their");
+        println!("      build machine wrote, so run `lvpm relink <package>` before using them.");
+    } else if dry_run {
+        println!("\nrelink: {folders} folder(s) across {} package(s):", relink_work.len());
+        for (pkg, dirs) in &relink_work {
+            for d in dirs {
+                println!("      {pkg}: {}", d.display());
+            }
+        }
+    } else {
+        run_relink(&roots, &target.unwrap(), relink_args, &relink_work)?;
     }
     if !hook_warnings.is_empty() {
         println!("\npackages with script VIs that were skipped:");
@@ -360,6 +435,91 @@ fn cmd_install(cli: &Cli, package: &str, dry_run: bool, no_deps: bool) -> Result
         }
     }
     Ok(())
+}
+
+/// Drive `Relink Package.vi` over every folder, one package at a time.
+///
+/// One LabVIEW session for the whole run: the relink VI is loaded once, and
+/// each folder is a fresh call into it. A folder that fails is reported and the
+/// rest still run — the alternative is that one bad package leaves the others
+/// copied but unlinked, which is the state this pass exists to get out of.
+fn run_relink(
+    roots: &Roots,
+    target: &target::LvTarget,
+    args: &RelinkArgs,
+    work: &[(String, Vec<PathBuf>)],
+) -> Result<()> {
+    let vi = relink::locate_vi()?;
+    let folders: usize = work.iter().map(|(_, f)| f.len()).sum();
+
+    println!("\nrelinking {folders} folder(s) with {}", vi.display());
+    let mut r = relink::Relinker::open(target, &vi, std::time::Duration::from_secs(args.timeout))
+        .with_context(|| {
+            format!(
+                "cannot reach LabVIEW to relink — is {} running with VI Server enabled?\n\
+                 the files are installed; `lvpm relink <package>` retries just this pass",
+                target.label()
+            )
+        })?;
+    r.watch(args.progress.as_deref());
+
+    let mut failed: Vec<String> = Vec::new();
+    for (pkg, dirs) in work {
+        for d in dirs {
+            print!("  {pkg}\n      {} ... ", d.display());
+            std::io::stdout().flush().ok();
+            match r.run(d) {
+                Ok(o) => {
+                    println!("{:.1}s", o.took.as_secs_f64());
+                    // The VI's own account of what it saved. Worth printing
+                    // even when it is empty: "walked 283, saved 0" and no log
+                    // at all look identical from out here otherwise.
+                    for line in o.log.lines().filter(|l| !l.trim().is_empty()) {
+                        println!("        {line}");
+                    }
+                }
+                Err(e) => {
+                    println!("FAILED");
+                    println!("      {e:#}");
+                    failed.push(pkg.clone());
+                }
+            }
+        }
+        if !failed.iter().any(|f| f == pkg) {
+            install::mark_relinked(roots, pkg)?;
+        }
+    }
+    r.close();
+
+    if !failed.is_empty() {
+        failed.dedup();
+        bail!(
+            "relink failed for: {}\nthe files are installed; fix the cause and run \
+             `lvpm relink <package>`",
+            failed.join(", ")
+        );
+    }
+    Ok(())
+}
+
+fn cmd_relink(cli: &Cli, package: &str, args: &RelinkArgs) -> Result<()> {
+    let roots = roots_for(cli)?;
+    let Some(t) = roots.target.clone() else {
+        bail!("relink needs a real LabVIEW target, not --prefix");
+    };
+    let m = install::read_manifest(&roots, package)?;
+    // Manifests from before the folders were recorded fall back to the
+    // per-file approximation, which is all they can support.
+    let folders: Vec<PathBuf> = if m.relink_folders.is_empty() {
+        relink::folders_for(&m.files)
+    } else {
+        m.relink_folders.iter().map(PathBuf::from).collect()
+    };
+    if folders.is_empty() {
+        println!("{} {} installed no VIs, libraries or LLBs — nothing to relink", m.name, m.version);
+        return Ok(());
+    }
+    run_relink(&roots, &t, args, &[(m.name, folders)])
 }
 
 fn cmd_vi_probe(cli: &Cli, vi: &std::path::Path) -> Result<()> {
@@ -451,6 +611,83 @@ fn parse_set(arg: &str) -> Result<(String, viserver::LvValue)> {
     Ok((name.to_string(), value))
 }
 
+/// Poll `watch` on a VI that is already running, printing every change, until
+/// `done` reads true or the budget runs out.
+///
+/// The point of the interval statistics is that LabVIEW runs one VI Server per
+/// process and serialises calls against it, so a busy VI could in principle
+/// starve the polls. Reporting the gaps says whether that happens rather than
+/// leaving it to assumption.
+fn poll_progress(
+    conn: &mut viserver::Connection,
+    vi_ref: viserver::VIRef,
+    watch: &str,
+    done: &str,
+    poll_ms: u64,
+    timeout: u64,
+) -> Result<()> {
+    let started = std::time::Instant::now();
+    let budget = std::time::Duration::from_secs(timeout);
+    let mut last = String::new();
+    let mut gaps: Vec<f64> = Vec::new();
+    let mut prev = started;
+    let mut done_readable = true;
+
+    loop {
+        let value = conn.ctrl_val_get(vi_ref, watch)?;
+        let now = std::time::Instant::now();
+        gaps.push(now.duration_since(prev).as_secs_f64() * 1000.0);
+        prev = now;
+
+        let shown = value.to_string();
+        if shown != last {
+            println!("  {:>7.0} ms  {watch} = {shown}", started.elapsed().as_secs_f64() * 1000.0);
+            last = shown;
+        }
+
+        // A running VI answers reads exactly as a finished one does, so the VI
+        // has to tell us itself.
+        if done_readable {
+            match conn.ctrl_val_get(vi_ref, done) {
+                Ok(viserver::LvValue::Bool(true)) => {
+                    println!("  {:>7.0} ms  {done} = true", started.elapsed().as_secs_f64() * 1000.0);
+                    break;
+                }
+                Ok(viserver::LvValue::Bool(false)) => {}
+                Ok(other) => {
+                    eprintln!("  note: {done} is {other}, not a boolean — polling until timeout");
+                    done_readable = false;
+                }
+                Err(e) => {
+                    eprintln!("  note: cannot read {done} ({e}) — polling until timeout");
+                    done_readable = false;
+                }
+            }
+        }
+
+        if started.elapsed() >= budget {
+            println!("  timeout after {timeout}s with {done} still false");
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(poll_ms));
+    }
+
+    if !gaps.is_empty() {
+        let mut sorted = gaps.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let sum: f64 = gaps.iter().sum();
+        println!(
+            "  {} polls, interval min/median/max {:.0}/{:.0}/{:.0} ms (asked for {poll_ms})",
+            gaps.len(),
+            sorted[0],
+            sorted[sorted.len() / 2],
+            sorted[sorted.len() - 1],
+        );
+        let _ = sum;
+    }
+    Ok(())
+}
+
 fn cmd_vi_run(
     cli: &Cli,
     vi: &std::path::Path,
@@ -458,6 +695,9 @@ fn cmd_vi_run(
     gets: &[String],
     get_all: bool,
     timeout: u64,
+    watch: Option<&str>,
+    poll_ms: u64,
+    done: &str,
 ) -> Result<()> {
     let roots = roots_for(cli)?;
     let Some(t) = roots.target.clone() else {
@@ -478,9 +718,19 @@ fn cmd_vi_run(
             println!("  set  {name} = {value}");
         }
         let t0 = std::time::Instant::now();
-        conn.run_vi(vi_ref)?;
-        println!("  ran  {} in {:.0} ms", vi.file_name().unwrap_or_default().to_string_lossy(),
-            t0.elapsed().as_secs_f64() * 1000.0);
+        let name = vi.file_name().unwrap_or_default().to_string_lossy().to_string();
+        match watch {
+            // Start it and read the front panel while it works.
+            Some(w) => {
+                conn.run_vi_async(vi_ref)?;
+                println!("  started {name} in {:.0} ms (not waiting)", t0.elapsed().as_secs_f64() * 1000.0);
+                poll_progress(&mut conn, vi_ref, w, done, poll_ms, timeout)?;
+            }
+            None => {
+                conn.run_vi(vi_ref)?;
+                println!("  ran  {name} in {:.0} ms", t0.elapsed().as_secs_f64() * 1000.0);
+            }
+        }
         if get_all {
             for (name, value) in conn.ctrl_val_get_panel(vi_ref)? {
                 println!("  get  {name} = {value}");

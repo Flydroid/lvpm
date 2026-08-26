@@ -229,6 +229,44 @@ impl Roots {
         }
     }
 
+    /// Is this directory a root that packages share, rather than one package's
+    /// own folder?
+    ///
+    /// `vi.lib` holds every add-on ever installed, and the install dir holds
+    /// LabVIEW itself. Anything that walks a directory tree — relinking, say —
+    /// has to know the difference, because handed one of these it would work on
+    /// code no install of ours ever touched.
+    pub fn is_shared_root(&self, dir: &Path) -> bool {
+        // Above the install dir is shared by definition.
+        if self.application.starts_with(dir) {
+            return true;
+        }
+        [
+            "<vi.lib>",
+            "<user.lib>",
+            "<instr.lib>",
+            "<menus>",
+            "<resource>",
+            "<help>",
+            "<project>",
+            "<templates>",
+            "<examples>",
+            "<fonts>",
+            "<temp>",
+            "<OS Public Application Data>",
+            "<OS Application Files>",
+            "<OS Public Documents>",
+            "<OS User Documents>",
+            "<OS User Desktop>",
+            "<OS User Application Data>",
+            "<OS Boot Volume Root>",
+            "<OS System Core Libraries>",
+        ]
+        .iter()
+        .filter_map(|t| self.expand(t).ok())
+        .any(|root| root == dir)
+    }
+
     /// Guard against a package writing outside the sandbox in scratch mode.
     pub fn check_contained(&self, p: &Path) -> Result<()> {
         if let Some(root) = &self.scratch

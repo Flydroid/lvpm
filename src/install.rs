@@ -24,6 +24,16 @@ pub struct Manifest {
     pub files: Vec<String>,
     /// Hooks the package declares that we did not run.
     pub skipped_hooks: Vec<String>,
+    /// Whether the relink pass has run over these files since they were
+    /// copied. Defaults to false so manifests written before relinking existed
+    /// read as "not relinked", which is what they are.
+    #[serde(default)]
+    pub relinked: bool,
+    /// The package's own folders, as the spec asked for them — what the relink
+    /// pass walks. Recorded here because the file list alone cannot say where
+    /// the package boundary was.
+    #[serde(default)]
+    pub relink_folders: Vec<String>,
 }
 
 /// What an install *would* do. Produced first so `--dry-run` and the real run
@@ -178,13 +188,36 @@ pub fn apply(roots: &Roots, spec: &Spec, zip: &mut Archive, plan: &Plan) -> Resu
         },
         files: written,
         skipped_hooks: spec.script_vis.iter().map(|(h, v)| format!("{h}={v}")).collect(),
+        relinked: false,
+        relink_folders: crate::relink::folders_for_spec(roots, spec)?
+            .iter()
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .collect(),
     };
 
-    let mp = manifest_path(roots, &spec.name);
-    std::fs::create_dir_all(mp.parent().unwrap())?;
-    std::fs::write(&mp, serde_json::to_string_pretty(&manifest)?)?;
-
+    write_manifest(roots, &manifest)?;
     Ok(manifest)
+}
+
+fn write_manifest(roots: &Roots, m: &Manifest) -> Result<()> {
+    let mp = manifest_path(roots, &m.name);
+    std::fs::create_dir_all(mp.parent().unwrap())?;
+    std::fs::write(&mp, serde_json::to_string_pretty(m)?)?;
+    Ok(())
+}
+
+/// Record that the relink pass has run over this package.
+///
+/// Separate from `apply` because the two happen in different phases: every
+/// package is copied before any is relinked, so the manifest is written once
+/// with `relinked: false` and amended if and when the relink succeeds.
+pub fn mark_relinked(roots: &Roots, name: &str) -> Result<()> {
+    let mut m = read_manifest(roots, name)?;
+    if m.relinked {
+        return Ok(());
+    }
+    m.relinked = true;
+    write_manifest(roots, &m)
 }
 
 /// Remove every file the manifest recorded, then prune directories this

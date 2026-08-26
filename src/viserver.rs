@@ -874,6 +874,23 @@ impl Connection {
         self.invoke(vi, &RunVi { wait_until_done: true, auto_dispose_ref: false })
     }
 
+    /// Start a VI and return as soon as LabVIEW acknowledges the request,
+    /// leaving it running. The reference is kept (auto dispose off), which is
+    /// what makes the front panel readable while it works — `ctrl_val_get`
+    /// against a still-running VI is how progress gets out of a long job
+    /// without the caller blocking for the whole runtime.
+    ///
+    /// Only the `Wait until done` byte differs from [`Connection::run_vi`];
+    /// everything else is the same captured invocation.
+    ///
+    /// Two consequences worth knowing. The read timeout no longer has to cover
+    /// the VI's runtime, only a round trip. And nothing here reports completion
+    /// — the VI needs a front-panel flag of its own for that, since a running
+    /// VI answers polls exactly as a finished one does.
+    pub fn run_vi_async(&mut self, vi: VIRef) -> Result<()> {
+        self.invoke(vi, &RunVi { wait_until_done: false, auto_dispose_ref: false })
+    }
+
     /// Save a VI to a path — an ordinary in-place save. See [`SaveInstrument`].
     pub fn save_instrument(&mut self, vi: VIRef, path: &Path) -> Result<()> {
         self.invoke(vi, &SaveInstrument { path })
@@ -1005,8 +1022,7 @@ mod tests {
     }
 
     /// The hook pattern — wait for the VI, keep the reference alive — as
-    /// captured from the E2E test after the auto-dispose bug was fixed. Only
-    /// two value bytes differ from the VIPM form.
+    /// captured from the E2E test after the auto-dispose bug was fixed.
     #[test]
     fn run_vi_matches_the_captured_wait_no_dispose_invocation() {
         let got = RunVi { wait_until_done: true, auto_dispose_ref: false }.encode_args().unwrap();

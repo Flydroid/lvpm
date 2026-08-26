@@ -101,6 +101,65 @@ fn cache_name(url: &str) -> String {
     md5_hex(url.as_bytes()).to_uppercase()
 }
 
+/// True for a `--repo` that names a directory on this machine rather than an
+/// HTTP folder. A local repo has no index file to fetch — the packages are the
+/// index, so each one's own `spec` is read instead.
+pub fn is_local_repo(repo: &str) -> bool {
+    !repo.starts_with("http://") && !repo.starts_with("https://") && Path::new(repo).is_dir()
+}
+
+/// An entry's download location, once resolved: a URL to fetch or a file to read.
+pub fn is_local_url(url: &str) -> bool {
+    !url.starts_with("http://") && !url.starts_with("https://")
+}
+
+/// Index every `.vip` in a directory, straight from each package's own `spec`.
+///
+/// A published index carries exactly what a `spec` carries — name, version,
+/// dependency ranges, LabVIEW gate — so a folder of packages resolves like any
+/// feed, dependencies included. There is no MD5: the bytes never travel, so
+/// there is nothing to verify them against.
+fn scan_local_repo(dir: &Path, out: &mut Vec<Entry>) -> Result<()> {
+    let mut vips: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+        .with_context(|| format!("reading repo directory {}", dir.display()))?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("vip")))
+        .collect();
+    vips.sort();
+
+    for path in vips {
+        // A package that will not open or parse is reported and skipped: one
+        // bad file in a folder must not make the other packages unresolvable.
+        match entry_from_vip(&path) {
+            Ok(e) => out.push(e),
+            Err(e) => eprintln!("  ! ignoring {}: {e:#}", path.display()),
+        }
+    }
+    Ok(())
+}
+
+fn entry_from_vip(path: &Path) -> Result<Entry> {
+    let bytes = std::fs::read(path)?;
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;
+    let idx = (0..zip.len())
+        .find(|i| zip.by_index(*i).map(|f| f.name().eq_ignore_ascii_case("spec")).unwrap_or(false))
+        .context("no `spec` member")?;
+    let mut buf = Vec::new();
+    std::io::Read::read_to_end(&mut zip.by_index(idx)?, &mut buf)?;
+    let spec = crate::spec::parse(&String::from_utf8_lossy(&buf))?;
+
+    Ok(Entry {
+        name: spec.name,
+        version: Version::parse(&spec.version),
+        url: path.to_string_lossy().into_owned(),
+        md5: None,
+        display_name: spec.display_name,
+        requires: spec.requires.as_deref().map(parse_requires).unwrap_or_default(),
+        lv_min: spec.lv_gate.as_deref().and_then(parse_lv_gate),
+    })
+}
+
 pub fn load(cache_dir: &Path, refresh: bool, extra: &[String]) -> Result<Index> {
     std::fs::create_dir_all(cache_dir)?;
     let mut entries = Vec::new();
@@ -110,6 +169,10 @@ pub fn load(cache_dir: &Path, refresh: bool, extra: &[String]) -> Result<Index> 
         .map(|(a, b)| (a.to_string(), b.to_string()))
         .collect();
     for repo in extra {
+        if is_local_repo(repo) {
+            scan_local_repo(Path::new(repo), &mut entries)?;
+            continue;
+        }
         let base = if repo.ends_with('/') { repo.clone() } else { format!("{repo}/") };
         sources.push((format!("{base}index.vipr"), base));
     }
