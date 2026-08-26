@@ -136,7 +136,7 @@ const TD_DBL: u16 = 0x0a;
 const TD_BOOL: u16 = 0x21;
 const TD_STRING: u16 = 0x30;
 const TD_ARRAY: u16 = 0x40;
-const TD_PATH: u16 = 0x32;
+pub const TD_PATH: u16 = 0x32;
 const TD_VARIANT: u16 = 0x53;
 
 /// Flattened sizes of the fixed-size numeric family (codes 0x01..=0x0b:
@@ -163,6 +163,13 @@ pub enum LvValue {
     I32(i32),
     Dbl(f64),
     Str(String),
+    /// A path, rendered with the platform's separator. LabVIEW flattens these
+    /// as `PTH0` records, not as strings.
+    Path(String),
+    /// A variant carrying its own value and named attributes — what VIPM
+    /// hands a hook VI's `Variant` control (Quiet Mode, Files Installed, ...).
+    /// The inner value is usually unremarkable; the attributes are the point.
+    Variant { value: Box<LvValue>, attrs: Vec<(String, LvValue)> },
     /// An array. `elem` is the element's type code, kept separately so an
     /// empty array still knows what it is; `shape` is one length per
     /// dimension and `items` holds the elements in row-major order.
@@ -178,6 +185,8 @@ impl LvValue {
             LvValue::I32(_) => TD_I32,
             LvValue::Dbl(_) => TD_DBL,
             LvValue::Str(_) => TD_STRING,
+            LvValue::Path(_) => TD_PATH,
+            LvValue::Variant { .. } => TD_VARIANT,
             LvValue::Array { .. } => TD_ARRAY,
             LvValue::Other { code, .. } => bail!("cannot encode an undecoded value (type {code:#04x})"),
         })
@@ -221,6 +230,10 @@ impl LvValue {
             LvValue::I32(i) => i.to_be_bytes().to_vec(),
             LvValue::Dbl(d) => d.to_be_bytes().to_vec(),
             LvValue::Str(s) => lv_string(s.as_bytes()),
+            LvValue::Path(p) => encode_pth0(Path::new(p))?,
+            // A variant's flattened form is a complete flattened variant of
+            // its own — version header, descriptor table and all.
+            LvValue::Variant { .. } => variant(self)?,
             // Arrays flatten as one `u32` length per dimension, then the
             // elements row-major. No padding between them, and strings keep
             // their own length prefix.
@@ -250,6 +263,14 @@ impl std::fmt::Display for LvValue {
             LvValue::I32(i) => write!(f, "{i}"),
             LvValue::Dbl(d) => write!(f, "{d}"),
             LvValue::Str(s) => write!(f, "{s:?}"),
+            LvValue::Path(p) => write!(f, "{p}"),
+            LvValue::Variant { value, attrs } => {
+                write!(f, "variant({value}")?;
+                for (k, v) in attrs {
+                    write!(f, ", {k}={v}")?;
+                }
+                write!(f, ")")
+            }
             LvValue::Array { shape, items, .. } => fmt_rows(f, shape, items),
             LvValue::Other { code, data } => {
                 write!(f, "<type {code:#04x}:")?;
@@ -417,8 +438,15 @@ fn td_table(v: &LvValue) -> Result<(Vec<Vec<u8>>, u16)> {
 /// Variants carry no padding of their own; any padding belongs to whatever
 /// contains them.
 fn variant(v: &LvValue) -> Result<Vec<u8>> {
-    let (table, root) = td_table(v)?;
-    let value = v.flattened()?;
+    // An LvValue::Variant IS a flattened variant: its inner value provides
+    // the descriptors and data, its attributes go where a bare value writes
+    // the zero count — each as `lv-string name | flattened variant`.
+    let (inner, attrs): (&LvValue, &[(String, LvValue)]) = match v {
+        LvValue::Variant { value, attrs } => (value, attrs),
+        other => (other, &[]),
+    };
+    let (table, root) = td_table(inner)?;
+    let value = inner.flattened()?;
     let mut out = Vec::with_capacity(16 + value.len());
     out.extend_from_slice(&FLATTEN_VERSION.to_be_bytes());
     out.extend_from_slice(&(table.len() as u32).to_be_bytes());
@@ -428,7 +456,11 @@ fn variant(v: &LvValue) -> Result<Vec<u8>> {
     out.extend_from_slice(&1u16.to_be_bytes());
     out.extend_from_slice(&root.to_be_bytes());
     out.extend_from_slice(&value);
-    out.extend_from_slice(&0u32.to_be_bytes());
+    out.extend_from_slice(&(attrs.len() as u32).to_be_bytes());
+    for (name, av) in attrs {
+        out.extend_from_slice(&lv_string(name.as_bytes()));
+        out.extend_from_slice(&variant(av)?);
+    }
     Ok(out)
 }
 
@@ -790,9 +822,18 @@ impl<'a> Reader<'a> {
         ensure!(tops == 1, "variant with {tops} top-level types is unsupported");
         let root = self.u16()?;
         let value = self.value(&table, root, 0)?;
-        let attrs = self.u32()?;
-        ensure!(attrs == 0, "variant attributes are unsupported ({attrs} present)");
-        Ok(value)
+        let n = self.u32()?;
+        ensure!(n <= MAX_TYPE_DESCS, "variant with {n} attributes is implausible");
+        if n == 0 {
+            return Ok(value);
+        }
+        let mut attrs = Vec::with_capacity(n as usize);
+        for _ in 0..n {
+            let name = String::from_utf8_lossy(&self.lv_string()?).into_owned();
+            let av = self.variant().with_context(|| format!("decoding attribute {name:?}"))?;
+            attrs.push((name, av));
+        }
+        Ok(LvValue::Variant { value: Box::new(value), attrs })
     }
 
     /// Read one type descriptor, keeping only what decoding the data needs.
@@ -816,6 +857,37 @@ impl<'a> Reader<'a> {
         Ok(TypeDesc { code, dims, elem })
     }
 
+    /// Read one flattened `PTH0` record — the inverse of [`encode_pth0`]:
+    /// `"PTH0" | u32 length | u16 kind | u16 levels | pascal components`,
+    /// where the components carry no padding. `kind` is 0 for an absolute
+    /// path, 1 for a relative one and 2 for LabVIEW's "not a path".
+    fn pth0(&mut self) -> Result<String> {
+        let magic = self.take(4)?;
+        ensure!(magic == b"PTH0", "expected a PTH0 record, got {magic:02x?}");
+        let len = self.u32()? as usize;
+        ensure!(len >= 4, "PTH0 length {len} is too small");
+        let mut body = Reader::new(self.take(len)?);
+        let kind = body.u16()?;
+        let levels = body.u16()?;
+        if kind == 2 {
+            return Ok("<Not A Path>".to_string());
+        }
+        let mut parts: Vec<String> = Vec::with_capacity(levels as usize);
+        for _ in 0..levels {
+            let n = body.take(1)?[0] as usize;
+            parts.push(String::from_utf8_lossy(body.take(n)?).into_owned());
+        }
+        // A drive letter comes back as a bare component: "C" is "C:".
+        if kind == 0
+            && let Some(first) = parts.first_mut()
+            && first.len() == 1
+            && first.chars().all(|c| c.is_ascii_alphabetic())
+        {
+            first.push(':');
+        }
+        Ok(parts.join("\\"))
+    }
+
     /// Decode the value at table entry `idx`. `depth` bounds the recursion: a
     /// malformed table could otherwise point an array at itself.
     fn value(&mut self, table: &[TypeDesc], idx: u16, depth: u32) -> Result<LvValue> {
@@ -828,6 +900,9 @@ impl<'a> Reader<'a> {
             TD_I32 => LvValue::I32(i32::from_be_bytes(self.take(4)?.try_into().unwrap())),
             TD_DBL => LvValue::Dbl(f64::from_be_bytes(self.take(8)?.try_into().unwrap())),
             TD_STRING => LvValue::Str(String::from_utf8_lossy(&self.lv_string()?).into_owned()),
+            TD_PATH => LvValue::Path(self.pth0()?),
+            // A variant nested in other data is a complete flattened variant.
+            TD_VARIANT => self.variant()?,
             TD_ARRAY => {
                 // One `u32` length per dimension, then the elements row-major.
                 ensure!(td.dims >= 1, "array descriptor claims no dimensions");
@@ -866,6 +941,27 @@ impl<'a> Reader<'a> {
 // ---------------------------------------------------------------------------
 // Transport
 // ---------------------------------------------------------------------------
+
+/// An error the server itself reported, kept typed so a caller can act on the
+/// code — error 1000 in particular, which says the reference has gone stale
+/// rather than that the operation was wrong.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ViError {
+    pub code: i32,
+}
+
+impl std::fmt::Display for ViError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "VI Server returned error {}{}", self.code, describe_error(self.code))
+    }
+}
+
+impl std::error::Error for ViError {}
+
+/// The server-reported code behind an error, when there is one.
+pub fn error_code(e: &anyhow::Error) -> Option<i32> {
+    e.downcast_ref::<ViError>().map(|v| v.code)
+}
 
 /// A message as it appears on the wire.
 #[derive(Debug)]
@@ -1023,7 +1119,7 @@ impl Connection {
                 continue;
             }
             if reply.err != 0 {
-                bail!("VI Server returned error {}{}", reply.err, describe_error(reply.err));
+                return Err(ViError { code: reply.err }.into());
             }
             if reply.opcode != expect {
                 bail!("expected reply opcode {expect}, got {}", reply.opcode);
@@ -1332,6 +1428,64 @@ mod tests {
             }
         );
         assert_eq!(got.to_string(), r#"["Hello 1", "Hello 2"]"#);
+    }
+
+    /// `encode_pth0` is already pinned against a capture, so decoding is
+    /// checked by round-tripping the very record LabVIEW's own client sent.
+    #[test]
+    fn decodes_a_pth0_record() {
+        let path = r"C:\Git\lvpm\tools\Set VI Server Logging.vi";
+        let encoded = encode_pth0(Path::new(path)).unwrap();
+        assert_eq!(Reader::new(&encoded).pth0().unwrap(), path);
+
+        // "Not A Path" carries kind 2 and no components.
+        let nap: &[u8] = b"PTH0\x00\x00\x00\x04\x00\x02\x00\x00";
+        assert_eq!(Reader::new(nap).pth0().unwrap(), "<Not A Path>");
+
+        // And anything that is not a PTH0 fails rather than being guessed at.
+        assert!(Reader::new(b"XXXX\x00\x00\x00\x04\x00\x00\x00\x00").pth0().is_err());
+    }
+
+    /// The action-info variant a hook VI's `Variant` control receives: named
+    /// attributes after the data, each an lv-string name and a complete
+    /// flattened variant. Derived from LabVIEW's flattened-data layout; the
+    /// live check is the DQMH hook pair actually honouring `Quiet Mode`.
+    #[test]
+    fn round_trips_a_variant_with_attributes() {
+        let v = LvValue::Variant {
+            value: Box::new(LvValue::Str("lvpm".into())),
+            attrs: vec![
+                ("Quiet Mode".into(), LvValue::Bool(true)),
+                ("Package Name".into(), LvValue::Str("delacor_lib_dqmh_documentation".into())),
+                (
+                    "Files Installed".into(),
+                    LvValue::array(vec![LvValue::Path(r"C:\lv\vi.lib\a.vi".into())]).unwrap(),
+                ),
+            ],
+        };
+        let flat = variant(&v).unwrap();
+        // Attribute count sits where a bare value writes zero.
+        assert_eq!(Reader::new(&flat).variant().unwrap(), v);
+
+        // And a bare value still ends in a zero attribute count.
+        let bare = variant(&LvValue::I32(7)).unwrap();
+        assert_eq!(&bare[bare.len() - 4..], &[0, 0, 0, 0]);
+    }
+
+    /// The relink VI reports the files it touched as an array of paths, which
+    /// is a `TD_PATH` element inside the array framing the captures pinned.
+    #[test]
+    fn round_trips_an_array_of_paths() {
+        let v = LvValue::array(vec![
+            LvValue::Path(r"C:\Program Files\National Instruments\LabVIEW 2026\vi.lib\a.vi".into()),
+            LvValue::Path(r"C:\Program Files\National Instruments\LabVIEW 2026\vi.lib\b.vi".into()),
+        ])
+        .unwrap();
+        let flat = variant(&v).unwrap();
+        // Two descriptors, the array rooted at index 1, exactly as for strings.
+        assert_eq!(&flat[4..8], b"\x00\x00\x00\x02", "element + array descriptors");
+        assert_eq!(&flat[8..16], b"\x00\x08\x00\x32\xff\xff\xff\xff", "unnamed Path element");
+        assert_eq!(Reader::new(&flat).variant().unwrap(), v);
     }
 
     /// The descriptor names in the capture are stale — LabVIEW ignores them —
