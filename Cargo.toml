@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "Open-source package manager for LabVIEW (.vip) packages"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/novatron-fusion/lvpm"
+repository = "https://github.com/Flydroid/lvpm"
 [dependencies]
 anyhow = "1.0.104"
 clap = { version = "4.6.6", features = ["derive"] }
