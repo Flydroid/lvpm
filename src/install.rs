@@ -46,6 +46,13 @@ pub struct Manifest {
     /// and so uninstall can clean it up.
     #[serde(default)]
     pub pre_install_vi: Option<String>,
+    /// Where `PreUninstall.vi` / `PostUninstall.vi` were extracted to, when
+    /// the package ships them. Extracted at install time — the archive is
+    /// long gone by the time uninstall needs them.
+    #[serde(default)]
+    pub pre_uninstall_vi: Option<String>,
+    #[serde(default)]
+    pub post_uninstall_vi: Option<String>,
 }
 
 /// What an install *would* do. Produced first so `--dry-run` and the real run
@@ -182,14 +189,15 @@ pub fn apply(
     // A declared PostInstall hook ships as `PostInstall.vi` at the archive
     // root. Extract it next to the manifests so it survives until the relink
     // pass has made it runnable.
-    let post_install_vi = match spec
-        .script_vis
-        .iter()
-        .any(|(h, v)| h == "PostInstall" && !v.is_empty())
-    {
-        true => extract_hook(roots, &spec.name, zip, "PostInstall.vi")?,
-        false => None,
+    let mut hook = |name: &str, member: &str| -> Result<Option<PathBuf>> {
+        match spec.script_vis.iter().any(|(h, v)| h == name && !v.is_empty()) {
+            true => extract_hook(roots, &spec.name, zip, member),
+            false => Ok(None),
+        }
     };
+    let post_install_vi = hook("PostInstall", "PostInstall.vi")?;
+    let pre_uninstall_vi = hook("PreUninstall", "PreUninstall.vi")?;
+    let post_uninstall_vi = hook("PostUninstall", "PostUninstall.vi")?;
 
     for w in &plan.writes {
         if let Some(parent) = w.dest.parent() {
@@ -221,6 +229,8 @@ pub fn apply(
         relinked: false,
         post_install_vi: post_install_vi.map(|p| p.to_string_lossy().replace('\\', "/")),
         pre_install_vi: pre_install_vi.map(|p| p.to_string_lossy().replace('\\', "/")),
+        pre_uninstall_vi: pre_uninstall_vi.map(|p| p.to_string_lossy().replace('\\', "/")),
+        post_uninstall_vi: post_uninstall_vi.map(|p| p.to_string_lossy().replace('\\', "/")),
         relink_folders: crate::relink::folders_for_spec(roots, spec)?
             .iter()
             .map(|p| p.to_string_lossy().replace('\\', "/"))
@@ -309,7 +319,15 @@ pub fn uninstall(roots: &Roots, name: &str) -> Result<(usize, Manifest)> {
     }
 
     // The extracted hook VIs go with the package they belonged to.
-    for hook in [&manifest.post_install_vi, &manifest.pre_install_vi].into_iter().flatten() {
+    for hook in [
+        &manifest.post_install_vi,
+        &manifest.pre_install_vi,
+        &manifest.pre_uninstall_vi,
+        &manifest.post_uninstall_vi,
+    ]
+    .into_iter()
+    .flatten()
+    {
         let _ = std::fs::remove_file(hook);
     }
     std::fs::remove_file(manifest_path(roots, name))?;

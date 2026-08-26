@@ -257,16 +257,71 @@ fn cmd_list(cli: &Cli) -> Result<()> {
 
 fn cmd_uninstall(cli: &Cli, package: &str) -> Result<()> {
     let roots = roots_for(cli)?;
+    let before = install::read_manifest(&roots, package)?;
+    let mut conn: Option<viserver::Connection> = None;
+
+    // PreUninstall runs while the package's files are still on disk. Both
+    // uninstall hooks are best-effort: a hook needs a running LabVIEW, and a
+    // hook failure must not leave the package half-present.
+    if let (Some(hook), Some(t)) = (&before.pre_uninstall_vi, &roots.target) {
+        let info = hook_action_info(&before.name, before.display_name.as_deref(), t, &before.files);
+        match run_hook_vi(&mut conn, t, HOOK_TIMEOUT_SECS, Path::new(hook), &info) {
+            Ok(took) => println!("pre-uninstall ok ({:.1}s)", took.as_secs_f64()),
+            Err(e) => println!("pre-uninstall FAILED: {e:#} — uninstalling anyway"),
+        }
+    }
+
+    // PostUninstall runs after the files are gone — including the extracted
+    // hook VI itself, so it runs from a copy that outlives the uninstall.
+    let post = match &before.post_uninstall_vi {
+        Some(hook) => {
+            let tmp = std::env::temp_dir().join(format!("lvpm-{}-PostUninstall.vi", before.name));
+            std::fs::copy(hook, &tmp)
+                .map(|_| tmp)
+                .map_err(|e| println!("note: cannot stage PostUninstall.vi ({e}) — not running it"))
+                .ok()
+        }
+        None => None,
+    };
+
     let (removed, m) = install::uninstall(&roots, package)?;
     println!("removed {} {} ({removed} files)", m.name, m.version);
-    if !m.skipped_hooks.is_empty() {
+
+    if let (Some(tmp), Some(t)) = (&post, &roots.target) {
+        let info = hook_action_info(&m.name, m.display_name.as_deref(), t, &m.files);
+        match run_hook_vi(&mut conn, t, HOOK_TIMEOUT_SECS, tmp, &info) {
+            Ok(took) => println!("post-uninstall ok ({:.1}s)", took.as_secs_f64()),
+            Err(e) => println!("post-uninstall FAILED: {e:#}"),
+        }
+        let _ = std::fs::remove_file(tmp);
+    }
+    if let Some(c) = conn {
+        c.close();
+    }
+
+    // Hooks we still do not run, and hooks we could not run here: an install
+    // made before uninstall hooks were extracted has nothing on disk to run.
+    let unrun: Vec<&String> = m
+        .skipped_hooks
+        .iter()
+        .filter(|h| {
+            let ran_pre = m.pre_uninstall_vi.is_some() && h.starts_with("PreUninstall=");
+            let ran_post = post.is_some() && h.starts_with("PostUninstall=");
+            !(ran_pre || ran_post)
+                && (h.starts_with("PreUninstall=") || h.starts_with("PostUninstall="))
+        })
+        .collect();
+    if !unrun.is_empty() {
         println!(
-            "note: package declares {} — not run on uninstall either",
-            m.skipped_hooks.join(", ")
+            "note: declared but not run (installed before uninstall hooks existed): {}",
+            unrun.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
         );
     }
     Ok(())
 }
+
+/// Uninstall has no --relink-timeout to borrow, and a hook is one VI run.
+const HOOK_TIMEOUT_SECS: u64 = 300;
 
 fn cmd_install(
     cli: &Cli,
@@ -470,7 +525,7 @@ fn cmd_install(
                     p.writes.iter().map(|w| w.dest.to_string_lossy().into_owned()).collect();
                 let info =
                     hook_action_info(&e.name, e.display_name.as_deref(), t, &planned);
-                match run_hook_vi(&mut hook_conn, t, relink_args, vi, &info) {
+                match run_hook_vi(&mut hook_conn, t, relink_args.timeout, vi, &info) {
                     Ok(took) => print!("[pre-install ok, {:.1}s] ", took.as_secs_f64()),
                     Err(err) => print!("[pre-install FAILED: {err:#}] "),
                 }
@@ -587,7 +642,7 @@ running {} post-install hook(s)", hooks.len());
         print!("  {pkg} ... ");
         std::io::stdout().flush().ok();
         let info = hook_action_info(pkg, None, target, files);
-        match run_hook_vi(&mut conn, target, args, vi, &info) {
+        match run_hook_vi(&mut conn, target, args.timeout, vi, &info) {
             Ok(took) => println!("ok ({:.1}s)", took.as_secs_f64()),
             Err(e) => println!("FAILED: {e:#}"),
         }
@@ -634,11 +689,11 @@ fn hook_action_info(
 fn run_hook_vi(
     conn: &mut Option<viserver::Connection>,
     target: &target::LvTarget,
-    args: &RelinkArgs,
+    timeout_secs: u64,
     vi: &Path,
     action_info: &viserver::LvValue,
 ) -> Result<std::time::Duration> {
-    let timeout = std::time::Duration::from_secs(args.timeout);
+    let timeout = std::time::Duration::from_secs(timeout_secs);
     if conn.is_none() {
         let port = viserver::check_vi_server(target)?;
         *conn = Some(viserver::Connection::connect("127.0.0.1", port, timeout)?);
