@@ -108,7 +108,9 @@ with:
 - `lvpm vi-save <VI>` — load and save one VI, the relink primitive
 
 Relinking and hooks need a running LabVIEW with VI Server (TCP) enabled;
-everything else runs without any LabVIEW process.
+everything else runs without any LabVIEW process. The bundled
+`Relink Package.vi` is saved for LabVIEW 2020, so any LabVIEW from 2020 on
+can load it.
 
 Verified end to end: a 46-dependency project manifest resolved to 48
 packages / 8766 files, installed, relinked in one deduplicated pass and its
@@ -166,4 +168,4 @@ Working, in active development. Not affiliated with JKI or NI.
 
 ## License
 
-MIT AND Apache-2.0
+MIT OR Apache-2.0
