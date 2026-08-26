@@ -8,17 +8,18 @@
 
 mod index;
 mod install;
+mod project;
 mod relink;
 mod spec;
 mod target;
 mod version;
 mod viserver;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use clap::{Parser, Subcommand};
 use std::collections::HashSet;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use target::Roots;
 use version::Version;
 
@@ -64,9 +65,17 @@ struct RelinkArgs {
 enum Cmd {
     /// List detected LabVIEW installations.
     Targets,
-    /// Install a package by name, or name@version.
+    /// Install a package by name, or name@version — or every dependency a
+    /// project manifest lists, with `--manifest`.
     Install {
-        package: String,
+        /// Package to install. Omit when using --manifest.
+        package: Option<String>,
+        /// Install every package listed in a `vipm.toml`'s [dependencies].
+        ///
+        /// All of them resolve into one plan and relink as one pass, so no
+        /// package is relinked before a later one's files are on disk.
+        #[arg(long, value_name = "FILE", conflicts_with = "package")]
+        manifest: Option<PathBuf>,
         /// Show what would be written, then stop.
         #[arg(long)]
         dry_run: bool,
@@ -85,7 +94,11 @@ enum Cmd {
     /// `install` runs — useful after `--no-relink`, or after LabVIEW was not
     /// running when the install happened.
     Relink {
-        package: String,
+        /// Package to relink. Omit when using --all.
+        package: Option<String>,
+        /// Relink every package installed in this target, in one pass.
+        #[arg(long, conflicts_with = "package")]
+        all: bool,
         #[command(flatten)]
         relink: RelinkArgs,
     },
@@ -139,10 +152,10 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match &cli.cmd {
         Cmd::Targets => cmd_targets(),
-        Cmd::Install { package, dry_run, no_deps, no_relink, relink } => {
-            cmd_install(&cli, package, *dry_run, *no_deps, *no_relink, relink)
+        Cmd::Install { package, manifest, dry_run, no_deps, no_relink, relink } => {
+            cmd_install(&cli, package.as_deref(), manifest.as_deref(), *dry_run, *no_deps, *no_relink, relink)
         }
-        Cmd::Relink { package, relink } => cmd_relink(&cli, package, relink),
+        Cmd::Relink { package, all, relink } => cmd_relink(&cli, package.as_deref(), *all, relink),
         Cmd::Uninstall { package } => cmd_uninstall(&cli, package),
         Cmd::ViProbe { vi } => cmd_vi_probe(&cli, vi),
         Cmd::ViSave { vi } => cmd_vi_save(&cli, vi),
@@ -257,7 +270,8 @@ fn cmd_uninstall(cli: &Cli, package: &str) -> Result<()> {
 
 fn cmd_install(
     cli: &Cli,
-    package: &str,
+    package: Option<&str>,
+    manifest: Option<&Path>,
     dry_run: bool,
     no_deps: bool,
     no_relink: bool,
@@ -266,10 +280,42 @@ fn cmd_install(
     let roots = roots_for(cli)?;
     let lv_gate = roots.target.as_ref().map(|t| t.version);
 
-    let (name, pinned) = match package.split_once('@') {
-        Some((n, v)) => (n.to_string(), Some(Version::parse(v))),
-        None => (package.to_string(), None),
+    // What the user asked for, before any dependency is considered. A manifest
+    // names many; a bare argument names one. Either way they are all roots, and
+    // a version written next to a root is an exact pin, not a floor.
+    let (wanted, from_manifest) = match (package, manifest) {
+        (Some(p), _) => {
+            let w = match p.split_once('@') {
+                Some((n, v)) => vec![(n.to_string(), Some(Version::parse(v)))],
+                None => vec![(p.to_string(), None)],
+            };
+            (w, None)
+        }
+        (None, Some(path)) => {
+            let proj = project::read(path)?;
+            let w = proj
+                .dependencies
+                .iter()
+                .map(|(n, v)| (n.clone(), Some(v.clone())))
+                .collect::<Vec<_>>();
+            (w, Some(proj))
+        }
+        (None, None) => bail!("give a package name, or --manifest <FILE>"),
     };
+    ensure!(!wanted.is_empty(), "the manifest lists no [dependencies]");
+
+    if let Some(proj) = &from_manifest {
+        eprintln!(
+            "manifest: {}{} — {} dependenc{}",
+            manifest.unwrap().display(),
+            proj.name.as_deref().map(|n| format!(" ({n})")).unwrap_or_default(),
+            wanted.len(),
+            if wanted.len() == 1 { "y" } else { "ies" }
+        );
+        if let Some(v) = &proj.labview_version {
+            eprintln!("      manifest says labview-version = {v:?}");
+        }
+    }
 
     match &roots.target {
         Some(t) => eprintln!("target: {}  ({})", t.label(), t.path.display()),
@@ -280,42 +326,56 @@ fn cmd_install(
     let idx = load_index(cli)?;
     eprintln!("  {} package versions known", idx.entries.len());
 
-    // Breadth-first over the dependency graph. No conflict resolution: the
-    // newest version satisfying each constraint wins, which is enough to show
-    // the shape of the problem.
-    let mut queue = vec![(name.clone(), pinned.clone())];
+    // Depth-first over the dependency graph, from every root at once. No
+    // conflict resolution: the first resolution of a name wins, and a floor
+    // resolves to the newest version satisfying it. Roots are seeded in
+    // reverse so the plan comes out in the order they were written.
+    //
+    // A version written next to a root is an exact pin; one carried by a
+    // dependency is a floor.
+    let mut queue: Vec<(String, Option<Version>, bool)> =
+        wanted.iter().rev().map(|(n, v)| (n.clone(), v.clone(), true)).collect();
     let mut done: HashSet<String> = HashSet::new();
     let mut plan: Vec<index::Entry> = Vec::new();
+    let mut unresolved: Vec<String> = Vec::new();
 
-    while let Some((n, min)) = queue.pop() {
+    while let Some((n, want, is_root)) = queue.pop() {
         if !done.insert(n.to_lowercase()) {
             continue;
         }
-        let is_root = n.eq_ignore_ascii_case(&name);
-        let entry = if is_root && pinned.is_some() {
-            // An explicit @version is an exact pin, not a floor.
-            let want = pinned.as_ref().unwrap();
-            idx.versions_of(&n).into_iter().find(|e| &e.version == want).cloned()
-        } else {
-            idx.best(&n, min.as_ref(), lv_gate).cloned()
+        let entry = match (&want, is_root) {
+            (Some(exact), true) => {
+                idx.versions_of(&n).into_iter().find(|e| &e.version == exact).cloned()
+            }
+            (min, _) => idx.best(&n, min.as_ref(), lv_gate).cloned(),
         };
 
         let Some(entry) = entry else {
             if is_root {
-                bail!(
-                    "package {n:?} not found in the configured indexes\n\
-                     hint: `lvpm search {n}` to see what is available"
-                );
+                // One missing root must not throw away fifty good ones:
+                // collect them all and fail once, with the whole list.
+                let pin = want.map(|v| format!("@{}", v.raw)).unwrap_or_default();
+                unresolved.push(format!("{n}{pin}"));
+            } else {
+                eprintln!("  ! dependency {n} unresolved, skipping");
             }
-            eprintln!("  ! dependency {n} unresolved, skipping");
             continue;
         };
         if !no_deps {
             for r in &entry.requires {
-                queue.push((r.name.clone(), r.min.clone()));
+                queue.push((r.name.clone(), r.min.clone(), false));
             }
         }
         plan.push(entry);
+    }
+
+    if !unresolved.is_empty() {
+        bail!(
+            "not found in the configured indexes:\n  {}\n\
+             hint: `lvpm search <name>` to see what is available, and `--repo <URL>` \
+             to add a repository",
+            unresolved.join("\n  ")
+        );
     }
 
     plan.reverse(); // dependencies before dependents
@@ -326,12 +386,30 @@ fn cmd_install(
     }
     println!();
 
+    if let Some(proj) = &from_manifest
+        && !proj.nipm.is_empty()
+    {
+        println!(
+            "note: the manifest also lists {} [nipm.dependencies] — those are NI Package",
+            proj.nipm.len()
+        );
+        println!("      Manager packages and lvpm does not install them.
+");
+    }
+
     let client = reqwest::blocking::Client::builder()
         .user_agent(concat!("lvpm/", env!("CARGO_PKG_VERSION")))
         .build()?;
 
     let mut total_writes = 0usize;
     let mut hook_warnings: Vec<String> = Vec::new();
+    // PostInstall hooks extracted during this run, executed only after the
+    // relink pass has made them runnable.
+    let mut hook_runs: Vec<(String, PathBuf, Vec<String>)> = Vec::new();
+    // PreInstall hooks run inline instead, before their package's files are
+    // copied — that is the contract their PostInstall counterparts rely on
+    // (DQMH's pair passes a marker file between them).
+    let mut hook_conn: Option<viserver::Connection> = None;
     // Per package, in install order: the folders its files landed in. Relinking
     // happens after every package is on disk, so no package can be relinked
     // against a dependency that is not there yet.
@@ -382,9 +460,28 @@ fn cmd_install(
             }
             relink_work.push((e.name.clone(), relink::folders_for_spec(&roots, &spec)?));
         } else {
-            let m = install::apply(&roots, &spec, &mut zip, &p)?;
+            let pre = match spec.script_vis.iter().any(|(h, v)| h == "PreInstall" && !v.is_empty())
+            {
+                true => install::extract_hook(&roots, &e.name, &mut zip, "PreInstall.vi")?,
+                false => None,
+            };
+            if let (Some(vi), Some(t)) = (&pre, &roots.target) {
+                let planned: Vec<String> =
+                    p.writes.iter().map(|w| w.dest.to_string_lossy().into_owned()).collect();
+                let info =
+                    hook_action_info(&e.name, e.display_name.as_deref(), t, &planned);
+                match run_hook_vi(&mut hook_conn, t, relink_args, vi, &info) {
+                    Ok(took) => print!("[pre-install ok, {:.1}s] ", took.as_secs_f64()),
+                    Err(err) => print!("[pre-install FAILED: {err:#}] "),
+                }
+                std::io::stdout().flush().ok();
+            }
+            let m = install::apply(&roots, &spec, &mut zip, &p, pre.as_deref())?;
             println!("{} files", m.files.len());
             relink_work.push((e.name.clone(), m.relink_folders.iter().map(PathBuf::from).collect()));
+            if let Some(hook) = &m.post_install_vi {
+                hook_runs.push((e.name.clone(), PathBuf::from(hook), m.files.clone()));
+            }
         }
 
         if p.skipped_existing > 0 {
@@ -393,11 +490,19 @@ fn cmd_install(
         for miss in &p.missing_from_archive {
             println!("      ! listed in spec but absent from archive: {miss}");
         }
-        if !spec.script_vis.is_empty() {
-            let hooks: Vec<String> =
-                spec.script_vis.iter().map(|(h, v)| format!("{h}={v}")).collect();
-            println!("      warning: declares {} — NOT run (needs LabVIEW)", hooks.join(", "));
-            hook_warnings.push(format!("{}: {}", e.name, hooks.join(", ")));
+        // PostInstall runs after the relink pass; everything else is still
+        // only reported.
+        let skipped: Vec<String> = spec
+            .script_vis
+            .iter()
+            .filter(|(h, _)| {
+                (h != "PostInstall" || !hook_runs.iter().any(|(n, _, _)| n == &e.name)) && h != "PreInstall"
+            })
+            .map(|(h, v)| format!("{h}={v}"))
+            .collect();
+        if !skipped.is_empty() {
+            println!("      warning: declares {} — NOT run", skipped.join(", "));
+            hook_warnings.push(format!("{}: {}", e.name, skipped.join(", ")));
         }
     }
 
@@ -405,6 +510,10 @@ fn cmd_install(
         println!("\ndry run: {total_writes} files would be written, nothing changed");
     } else {
         println!("\ndone. {total_writes} files written.");
+    }
+
+    if let Some(c) = hook_conn.take() {
+        c.close();
     }
 
     // Relink is the second phase, and only a real LabVIEW installation has a
@@ -426,7 +535,24 @@ fn cmd_install(
             }
         }
     } else {
-        run_relink(&roots, &target.unwrap(), relink_args, &relink_work)?;
+        run_relink(&roots, &target.as_ref().unwrap().clone(), relink_args, &relink_work)?;
+    }
+
+    // PostInstall hooks, after relinking so the hook VI and whatever it loads
+    // are runnable. Failures are reported, not fatal: the files are installed.
+    if !hook_runs.is_empty() {
+        if dry_run {
+            println!("
+post-install hooks that would run:");
+            for (pkg, vi, _) in &hook_runs {
+                println!("  {pkg}: {}", vi.display());
+            }
+        } else if let Some(t) = &target {
+            run_post_install_hooks(t, relink_args, &hook_runs);
+        } else {
+            println!("
+post-install hooks: skipped — a scratch tree has no LabVIEW to run them");
+        }
     }
     if !hook_warnings.is_empty() {
         println!("\npackages with script VIs that were skipped:");
@@ -443,6 +569,91 @@ fn cmd_install(
 /// each folder is a fresh call into it. A folder that fails is reported and the
 /// rest still run — the alternative is that one bad package leaves the others
 /// copied but unlinked, which is the state this pass exists to get out of.
+/// Run each package's extracted `PostInstall.vi`, one at a time, and report.
+///
+/// The hook VIs VIPM ships are self-contained: no controls, everything derived
+/// from App properties (the common template repairs palette menus). So the run
+/// is open, run to completion, release. A failure is printed and counted but
+/// does not fail the install — the package's files are already in place.
+fn run_post_install_hooks(
+    target: &target::LvTarget,
+    args: &RelinkArgs,
+    hooks: &[(String, PathBuf, Vec<String>)],
+) {
+    println!("
+running {} post-install hook(s)", hooks.len());
+    let mut conn: Option<viserver::Connection> = None;
+    for (pkg, vi, files) in hooks {
+        print!("  {pkg} ... ");
+        std::io::stdout().flush().ok();
+        let info = hook_action_info(pkg, None, target, files);
+        match run_hook_vi(&mut conn, target, args, vi, &info) {
+            Ok(took) => println!("ok ({:.1}s)", took.as_secs_f64()),
+            Err(e) => println!("FAILED: {e:#}"),
+        }
+    }
+    if let Some(c) = conn {
+        c.close();
+    }
+}
+
+/// The action-info variant VIPM hands a hook VI's `Variant` control. The
+/// attribute names are the ones hook VIs read back with Get Variant Attribute
+/// (observed in the DQMH hooks); `Quiet Mode` is the one that matters — FALSE
+/// is what turns a hook error into a modal dialog parked over the install.
+fn hook_action_info(
+    package: &str,
+    display_name: Option<&str>,
+    target: &target::LvTarget,
+    files: &[String],
+) -> viserver::LvValue {
+    use viserver::LvValue;
+    let paths: Vec<LvValue> =
+        files.iter().map(|f| LvValue::Path(f.replace('/', "\\"))).collect();
+    let files_installed = LvValue::array(paths)
+        .unwrap_or_else(|_| LvValue::empty_array(viserver::TD_PATH));
+    LvValue::Variant {
+        value: Box::new(LvValue::Str(String::new())),
+        attrs: vec![
+            ("Package Name".into(), LvValue::Str(package.into())),
+            (
+                "Package Display Name".into(),
+                LvValue::Str(display_name.unwrap_or(package).into()),
+            ),
+            ("LabVIEW Target Version".into(), LvValue::Str(format!("{}", target.version))),
+            ("VIPM Version".into(), LvValue::Str(format!("lvpm {}", env!("CARGO_PKG_VERSION")))),
+            ("Quiet Mode".into(), LvValue::Bool(true)),
+            ("Mass Compile On".into(), LvValue::Bool(false)),
+            ("Files Installed".into(), files_installed),
+            ("Folders Created".into(), LvValue::empty_array(viserver::TD_PATH)),
+        ],
+    }
+}
+
+/// Run one hook VI to completion over a lazily opened, shared connection.
+fn run_hook_vi(
+    conn: &mut Option<viserver::Connection>,
+    target: &target::LvTarget,
+    args: &RelinkArgs,
+    vi: &Path,
+    action_info: &viserver::LvValue,
+) -> Result<std::time::Duration> {
+    let timeout = std::time::Duration::from_secs(args.timeout);
+    if conn.is_none() {
+        let port = viserver::check_vi_server(target)?;
+        *conn = Some(viserver::Connection::connect("127.0.0.1", port, timeout)?);
+    }
+    let c = conn.as_mut().unwrap();
+    let r = c.open_vi_reference(vi)?;
+    let t0 = std::time::Instant::now();
+    // Best-effort: the standard hook template has this control, but a hook is
+    // free not to — running it matters more than parameterising it.
+    let _ = c.ctrl_val_set(r, "Variant", action_info.clone());
+    let run = c.run_vi(r);
+    let _ = c.release(r);
+    run.map(|()| t0.elapsed())
+}
+
 fn run_relink(
     roots: &Roots,
     target: &target::LvTarget,
@@ -450,9 +661,17 @@ fn run_relink(
     work: &[(String, Vec<PathBuf>)],
 ) -> Result<()> {
     let vi = relink::locate_vi()?;
-    let folders: usize = work.iter().map(|(_, f)| f.len()).sum();
+    // One walk covers every folder nested under it, so overlapping packages
+    // share a run instead of relinking the same tree twice — 18 of the first
+    // pass's 109 folders were nested repeats costing 17 of its 61 minutes.
+    let asked: usize = work.iter().map(|(_, f)| f.len()).sum();
+    let plan = relink::collapse_work(work);
 
-    println!("\nrelinking {folders} folder(s) with {}", vi.display());
+    print!("\nrelinking {} folder(s) with {}", plan.len(), vi.display());
+    if plan.len() < asked {
+        print!("  ({} covered by a parent)", asked - plan.len());
+    }
+    println!();
     let mut r = relink::Relinker::open(target, &vi, std::time::Duration::from_secs(args.timeout))
         .with_context(|| {
             format!(
@@ -464,27 +683,28 @@ fn run_relink(
     r.watch(args.progress.as_deref());
 
     let mut failed: Vec<String> = Vec::new();
-    for (pkg, dirs) in work {
-        for d in dirs {
-            print!("  {pkg}\n      {} ... ", d.display());
-            std::io::stdout().flush().ok();
-            match r.run(d) {
-                Ok(o) => {
-                    println!("{:.1}s", o.took.as_secs_f64());
-                    // The VI's own account of what it saved. Worth printing
-                    // even when it is empty: "walked 283, saved 0" and no log
-                    // at all look identical from out here otherwise.
-                    for line in o.log.lines().filter(|l| !l.trim().is_empty()) {
-                        println!("        {line}");
-                    }
-                }
-                Err(e) => {
-                    println!("FAILED");
-                    println!("      {e:#}");
-                    failed.push(pkg.clone());
+    for (d, pkgs) in &plan {
+        print!("  {}\n      {} ... ", pkgs.join(", "), d.display());
+        std::io::stdout().flush().ok();
+        match r.run(d) {
+            Ok(o) => {
+                println!("{:.1}s", o.took.as_secs_f64());
+                // The VI's own account of what it saved. Worth printing
+                // even when it is empty: "walked 283, saved 0" and no log
+                // at all look identical from out here otherwise.
+                for line in o.log.lines().filter(|l| !l.trim().is_empty()) {
+                    println!("        {line}");
                 }
             }
+            Err(e) => {
+                println!("FAILED");
+                println!("      {e:#}");
+                // The folder may have been walking for several packages.
+                failed.extend(pkgs.iter().cloned());
+            }
         }
+    }
+    for (pkg, _) in work {
         if !failed.iter().any(|f| f == pkg) {
             install::mark_relinked(roots, pkg)?;
         }
@@ -492,6 +712,7 @@ fn run_relink(
     r.close();
 
     if !failed.is_empty() {
+        failed.sort();
         failed.dedup();
         bail!(
             "relink failed for: {}\nthe files are installed; fix the cause and run \
@@ -502,24 +723,43 @@ fn run_relink(
     Ok(())
 }
 
-fn cmd_relink(cli: &Cli, package: &str, args: &RelinkArgs) -> Result<()> {
+fn cmd_relink(cli: &Cli, package: Option<&str>, all: bool, args: &RelinkArgs) -> Result<()> {
     let roots = roots_for(cli)?;
     let Some(t) = roots.target.clone() else {
         bail!("relink needs a real LabVIEW target, not --prefix");
     };
-    let m = install::read_manifest(&roots, package)?;
-    // Manifests from before the folders were recorded fall back to the
-    // per-file approximation, which is all they can support.
-    let folders: Vec<PathBuf> = if m.relink_folders.is_empty() {
-        relink::folders_for(&m.files)
-    } else {
-        m.relink_folders.iter().map(PathBuf::from).collect()
+    let manifests = match (package, all) {
+        (Some(p), _) => vec![install::read_manifest(&roots, p)?],
+        // Same one pass `install` runs, over everything already installed:
+        // one VI reference, every folder, no package relinked before another
+        // package's files are on disk.
+        (None, true) => install::list_installed(&roots)?,
+        (None, false) => bail!("give a package name, or --all"),
     };
-    if folders.is_empty() {
-        println!("{} {} installed no VIs, libraries or LLBs — nothing to relink", m.name, m.version);
+    ensure!(!manifests.is_empty(), "no packages are installed in this target");
+
+    let mut work: Vec<(String, Vec<PathBuf>)> = Vec::new();
+    for m in manifests {
+        // Manifests from before the folders were recorded fall back to the
+        // per-file approximation, which is all they can support.
+        let folders: Vec<PathBuf> = if m.relink_folders.is_empty() {
+            relink::folders_for(&m.files)
+        } else {
+            m.relink_folders.iter().map(PathBuf::from).collect()
+        };
+        if folders.is_empty() {
+            println!(
+                "{} {} installed no VIs, libraries or LLBs — nothing to relink",
+                m.name, m.version
+            );
+            continue;
+        }
+        work.push((m.name, folders));
+    }
+    if work.is_empty() {
         return Ok(());
     }
-    run_relink(&roots, &t, args, &[(m.name, folders)])
+    run_relink(&roots, &t, args, &work)
 }
 
 fn cmd_vi_probe(cli: &Cli, vi: &std::path::Path) -> Result<()> {

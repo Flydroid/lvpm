@@ -34,6 +34,18 @@ pub struct Manifest {
     /// the package boundary was.
     #[serde(default)]
     pub relink_folders: Vec<String>,
+    /// Where the package's `PostInstall.vi` was extracted to, when it ships
+    /// one. The archive carries hook VIs at its root under the hook's own
+    /// name — the path in `[Script VIs]` is only where the VI lived on the
+    /// build machine. Recorded so the run can happen after the relink pass,
+    /// and be retried.
+    #[serde(default)]
+    pub post_install_vi: Option<String>,
+    /// Where `PreInstall.vi` was extracted to, when the package ships one. It
+    /// has already run by the time this manifest exists — kept for the record
+    /// and so uninstall can clean it up.
+    #[serde(default)]
+    pub pre_install_vi: Option<String>,
 }
 
 /// What an install *would* do. Produced first so `--dry-run` and the real run
@@ -158,8 +170,26 @@ pub fn plan(roots: &Roots, spec: &Spec, zip: &mut Archive) -> Result<Plan> {
 }
 
 /// Execute a plan and record the manifest.
-pub fn apply(roots: &Roots, spec: &Spec, zip: &mut Archive, plan: &Plan) -> Result<Manifest> {
+pub fn apply(
+    roots: &Roots,
+    spec: &Spec,
+    zip: &mut Archive,
+    plan: &Plan,
+    pre_install_vi: Option<&Path>,
+) -> Result<Manifest> {
     let mut written = Vec::new();
+
+    // A declared PostInstall hook ships as `PostInstall.vi` at the archive
+    // root. Extract it next to the manifests so it survives until the relink
+    // pass has made it runnable.
+    let post_install_vi = match spec
+        .script_vis
+        .iter()
+        .any(|(h, v)| h == "PostInstall" && !v.is_empty())
+    {
+        true => extract_hook(roots, &spec.name, zip, "PostInstall.vi")?,
+        false => None,
+    };
 
     for w in &plan.writes {
         if let Some(parent) = w.dest.parent() {
@@ -189,6 +219,8 @@ pub fn apply(roots: &Roots, spec: &Spec, zip: &mut Archive, plan: &Plan) -> Resu
         files: written,
         skipped_hooks: spec.script_vis.iter().map(|(h, v)| format!("{h}={v}")).collect(),
         relinked: false,
+        post_install_vi: post_install_vi.map(|p| p.to_string_lossy().replace('\\', "/")),
+        pre_install_vi: pre_install_vi.map(|p| p.to_string_lossy().replace('\\', "/")),
         relink_folders: crate::relink::folders_for_spec(roots, spec)?
             .iter()
             .map(|p| p.to_string_lossy().replace('\\', "/"))
@@ -197,6 +229,27 @@ pub fn apply(roots: &Roots, spec: &Spec, zip: &mut Archive, plan: &Plan) -> Resu
 
     write_manifest(roots, &manifest)?;
     Ok(manifest)
+}
+
+/// Pull one hook VI out of the archive root into the target's `hooks` store.
+/// A declared hook missing from the archive is a warning-level oddity, not an
+/// error — the files themselves installed fine.
+pub fn extract_hook(
+    roots: &Roots,
+    package: &str,
+    zip: &mut Archive,
+    member: &str,
+) -> Result<Option<PathBuf>> {
+    let Ok(mut src) = zip.by_name(member) else {
+        return Ok(None);
+    };
+    let dir = roots.store_dir().parent().map(|p| p.join("hooks")).unwrap_or_default();
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let dest = dir.join(format!("{package}-{member}"));
+    let mut buf = Vec::with_capacity(src.size() as usize);
+    src.read_to_end(&mut buf)?;
+    std::fs::write(&dest, &buf).with_context(|| format!("writing {}", dest.display()))?;
+    Ok(Some(dest))
 }
 
 fn write_manifest(roots: &Roots, m: &Manifest) -> Result<()> {
@@ -255,6 +308,10 @@ pub fn uninstall(roots: &Roots, name: &str) -> Result<(usize, Manifest)> {
         }
     }
 
+    // The extracted hook VIs go with the package they belonged to.
+    for hook in [&manifest.post_install_vi, &manifest.pre_install_vi].into_iter().flatten() {
+        let _ = std::fs::remove_file(hook);
+    }
     std::fs::remove_file(manifest_path(roots, name))?;
     Ok((removed, manifest))
 }
