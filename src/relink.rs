@@ -34,6 +34,18 @@ const DONE_INDICATOR: &str = "Done";
 /// in that string parses fine on this side.
 const LOG_INDICATOR: &str = "report log out";
 
+/// A folder as LabVIEW must receive it: separators native, no trailing one.
+///
+/// LabVIEW splits a Windows path on backslashes only — a forward slash is an
+/// ordinary filename character. So `C:/vi.lib/Foo` arrives as a single
+/// unparseable component, the relink walks nothing, and it reports success
+/// over an empty list. Install manifests store forward slashes, which is how
+/// a whole relink pass came back reporting nothing at all.
+fn lv_folder(folder: &Path) -> String {
+    let s = folder.to_string_lossy().replace('/', "\\");
+    s.trim_end_matches('\\').to_string()
+}
+
 /// Extensions worth relinking. Anything else a package ships — documentation,
 /// palettes, DLLs — has no linker tables to fix.
 const LV_EXTENSIONS: &[&str] =
@@ -88,6 +100,42 @@ fn collapse(dirs: Vec<PathBuf>) -> Vec<PathBuf> {
     for d in dirs {
         if !out.iter().any(|kept| d.starts_with(kept)) {
             out.push(d);
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Collapse many packages' folder lists into one work list, keeping track of
+/// which packages each kept folder covers.
+///
+/// [`collapse`] already stops one package from walking the same tree twice;
+/// this is the same rule across the whole plan. Packages overlap constantly —
+/// one installs into `vi.lib/addons/Foo` while another owns `vi.lib/addons`,
+/// and the parent's walk covers the child. Measured on the 109-folder pass
+/// that prompted this: 18 nested folders cost 17.7 of 61 minutes, and 1113 of
+/// 6163 saved files were saved by more than one folder.
+///
+/// Shallowest first, so a parent is always kept before anything it covers; a
+/// covered folder contributes its package name to the parent instead of a
+/// walk of its own. Exact duplicates merge the same way.
+pub fn collapse_work(work: &[(String, Vec<PathBuf>)]) -> Vec<(PathBuf, Vec<String>)> {
+    let mut flat: Vec<(PathBuf, &str)> = Vec::new();
+    for (pkg, dirs) in work {
+        for d in dirs {
+            flat.push((d.components().collect(), pkg));
+        }
+    }
+    flat.sort_by_key(|(d, _)| d.components().count());
+    let mut out: Vec<(PathBuf, Vec<String>)> = Vec::new();
+    for (d, pkg) in flat {
+        match out.iter_mut().find(|(kept, _)| d.starts_with(kept)) {
+            Some((_, pkgs)) => {
+                if !pkgs.iter().any(|p| p == pkg) {
+                    pkgs.push(pkg.to_string());
+                }
+            }
+            None => out.push((d, vec![pkg.to_string()])),
         }
     }
     out.sort();
@@ -153,6 +201,8 @@ pub fn folders_for(files: &[String]) -> Vec<PathBuf> {
 /// JSONtext), so paying that once per install rather than once per folder is
 /// worth the reference being held.
 pub struct Relinker {
+    /// Kept so the reference can be opened again: saving VIs invalidates it.
+    vi: std::path::PathBuf,
     conn: Connection,
     vi_ref: VIRef,
     timeout: Duration,
@@ -191,6 +241,7 @@ impl Relinker {
         };
         Ok(Relinker {
             conn,
+            vi: vi.to_path_buf(),
             vi_ref,
             timeout,
             poll: Duration::from_millis(500),
@@ -217,12 +268,9 @@ impl Relinker {
     /// reusable across folders. It is cleared from here as well, before the run
     /// rather than after it: both writes agree, and doing it first closes the
     /// gap where a poll could still read the previous folder's `true`.
-    pub fn run(&mut self, folder: &Path) -> Result<Outcome> {
-        self.conn.ctrl_val_set(
-            self.vi_ref,
-            FOLDER_CONTROL,
-            LvValue::Str(folder.to_string_lossy().to_string()),
-        )?;
+    /// Point the VI at one folder and set it going.
+    fn start(&mut self, folder: &Path) -> Result<()> {
+        self.conn.ctrl_val_set(self.vi_ref, FOLDER_CONTROL, LvValue::Str(lv_folder(folder)))?;
 
         if self.can_reset_done
             && let Err(e) = self.conn.ctrl_val_set(self.vi_ref, DONE_INDICATOR, LvValue::Bool(false))
@@ -232,9 +280,59 @@ impl Relinker {
             );
             self.can_reset_done = false;
         }
+        self.conn.run_vi_async(self.vi_ref)
+    }
 
+    /// Start the VI, working around error 1000 — "not in a state compatible
+    /// with this operation".
+    ///
+    /// Two things provoke it, and both clear on their own. The VI relinks by
+    /// saving VIs, and saving one from its own hierarchy invalidates the
+    /// reference we hold; and `Done` going true is the diagram finishing, not
+    /// the VI leaving the running state, so the next folder can arrive while
+    /// LabVIEW still considers it busy. A fresh reference covers the first, a
+    /// short wait the second, so each attempt does both and waits longer.
+    fn start_with_retries(&mut self, folder: &Path) -> Result<()> {
+        const WAITS_MS: [u64; 3] = [500, 2_000, 5_000];
+        let mut last = match self.start(folder) {
+            Ok(()) => return Ok(()),
+            Err(e) if viserver::error_code(&e) == Some(1000) => e,
+            Err(e) => return Err(e),
+        };
+        for (attempt, wait) in WAITS_MS.iter().enumerate() {
+            std::thread::sleep(Duration::from_millis(*wait));
+            if let Err(e) = self.reopen() {
+                return Err(e.context("reopening the relink VI after error 1000"));
+            }
+            match self.start(folder) {
+                Ok(()) => return Ok(()),
+                Err(e) if viserver::error_code(&e) == Some(1000) => last = e,
+                Err(e) => return Err(e),
+            }
+            if attempt + 1 == WAITS_MS.len() {
+                break;
+            }
+        }
+        Err(last).with_context(|| {
+            format!(
+                "the relink VI stayed busy across {} attempts over {}ms",
+                WAITS_MS.len() + 1,
+                WAITS_MS.iter().sum::<u64>()
+            )
+        })
+    }
+
+    /// Trade the reference in for a new one. The old one is released
+    /// best-effort: it may be exactly what LabVIEW has already invalidated.
+    fn reopen(&mut self) -> Result<()> {
+        let _ = self.conn.release(self.vi_ref);
+        self.vi_ref = self.conn.open_vi_reference(&self.vi)?;
+        Ok(())
+    }
+
+    pub fn run(&mut self, folder: &Path) -> Result<Outcome> {
         let started = Instant::now();
-        self.conn.run_vi_async(self.vi_ref)?;
+        self.start_with_retries(folder)?;
         let mut last = String::new();
         loop {
             std::thread::sleep(self.poll);
@@ -300,6 +398,42 @@ impl Relinker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The cross-package version of `collapse`: a folder covered by another
+    /// package's folder joins that folder's run instead of getting its own,
+    /// and exact duplicates merge. Order and per-folder attribution both
+    /// matter — a failure has to be pinned on every package it walked for.
+    #[test]
+    fn collapse_work_merges_overlapping_packages() {
+        let work = vec![
+            ("caraya".to_string(), vec![PathBuf::from(r"C:\lv\vi.lib\addons\Caraya")]),
+            ("h5".to_string(), vec![PathBuf::from(r"C:\lv\vi.lib\addons")]),
+            ("caraya_cli".to_string(), vec![PathBuf::from(r"C:\lv\vi.lib\addons\Caraya")]),
+            ("dqmh".to_string(), vec![PathBuf::from(r"C:\lv\project\DQMH")]),
+        ];
+        let plan = collapse_work(&work);
+        assert_eq!(plan.len(), 2);
+        assert_eq!(plan[0].0, PathBuf::from(r"C:\lv\project\DQMH"));
+        assert_eq!(plan[0].1, ["dqmh"]);
+        assert_eq!(plan[1].0, PathBuf::from(r"C:\lv\vi.lib\addons"));
+        assert_eq!(plan[1].1, ["h5", "caraya", "caraya_cli"]);
+    }
+
+    /// Install manifests store forward slashes; LabVIEW needs backslashes, or
+    /// it takes the whole path for one filename and relinks nothing while
+    /// reporting success. A whole 101-folder pass came back empty this way.
+    #[test]
+    fn folders_reach_labview_with_native_separators() {
+        let m = "C:/Program Files/National Instruments/LabVIEW 2026/vi.lib/Delacor/Libraries";
+        assert_eq!(
+            lv_folder(Path::new(m)),
+            r"C:\Program Files\National Instruments\LabVIEW 2026\vi.lib\Delacor\Libraries"
+        );
+        // Already native, mixed, and trailing separators all land the same way.
+        assert_eq!(lv_folder(Path::new(r"C:\vi.lib\Foo")), r"C:\vi.lib\Foo");
+        assert_eq!(lv_folder(Path::new(r"C:\vi.lib/Foo\")), r"C:\vi.lib\Foo");
+        assert_eq!(lv_folder(Path::new("C:/vi.lib/Foo/")), r"C:\vi.lib\Foo");
+    }
 
     fn f(paths: &[&str]) -> Vec<String> {
         paths.iter().map(|s| s.to_string()).collect()
