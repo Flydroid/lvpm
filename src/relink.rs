@@ -228,7 +228,7 @@ pub struct Outcome {
 
 impl Relinker {
     pub fn open(target: &LvTarget, vi: &Path, timeout: Duration) -> Result<Relinker> {
-        let port = viserver::check_vi_server(target)?;
+        let port = viserver::ensure_vi_server(target, Duration::from_secs(120))?;
         // Polling only needs a round trip, but the initial load of the relink
         // VI itself can take a while, so give reads the full budget.
         let mut conn = Connection::connect("127.0.0.1", port, timeout)?;

@@ -70,6 +70,58 @@ pub fn check_vi_server(target: &LvTarget) -> Result<u16> {
     Ok(vi_server_port(target))
 }
 
+/// Is anything answering on the target's VI Server port right now?
+pub fn is_listening(target: &LvTarget) -> bool {
+    let port = vi_server_port(target);
+    std::net::TcpStream::connect_timeout(
+        &std::net::SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+        Duration::from_millis(500),
+    )
+    .is_ok()
+}
+
+/// Make sure the target's LabVIEW is running and its VI Server answers,
+/// starting the IDE when it is not, and return the port.
+///
+/// Starting an IDE is visible to whoever is at the machine — exactly what a
+/// package install needs (VIPM does the same), and never done silently: the
+/// launch is announced on stderr. The wait is generous because a cold LabVIEW
+/// start loads vi.lib before it listens; the port answering is what ends it.
+pub fn ensure_vi_server(target: &LvTarget, wait: Duration) -> Result<u16> {
+    let port = check_vi_server(target)?;
+    if is_listening(target) {
+        return Ok(port);
+    }
+
+    let exe = target.path.join("LabVIEW.exe");
+    if !exe.is_file() {
+        bail!("no LabVIEW.exe in {}", target.path.display());
+    }
+    eprintln!("starting {} and waiting for VI Server on port {port}...", target.label());
+    // Detached child: LabVIEW outlives lvpm by design.
+    std::process::Command::new(&exe)
+        .spawn()
+        .with_context(|| format!("launching {}", exe.display()))?;
+
+    let started = std::time::Instant::now();
+    while started.elapsed() < wait {
+        std::thread::sleep(Duration::from_secs(2));
+        if is_listening(target) {
+            // Listening is not yet serving: the socket opens a moment before
+            // the handshake works. One extra beat costs little and spares the
+            // first real connection a refused handshake.
+            std::thread::sleep(Duration::from_secs(2));
+            return Ok(port);
+        }
+    }
+    bail!(
+        "started {} but its VI Server never answered on port {port} within {}s\n\
+         (a dialog may be holding the IDE up — check its window)",
+        target.label(),
+        wait.as_secs()
+    );
+}
+
 // Request opcodes.
 const OP_HELLO: u32 = 0;
 const OP_GET_VI_REF: u32 = 3;

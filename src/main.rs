@@ -65,6 +65,13 @@ struct RelinkArgs {
 enum Cmd {
     /// List detected LabVIEW installations.
     Targets,
+    /// Start the selected LabVIEW and wait until its VI Server answers.
+    /// Already running: reports the port and does nothing.
+    Start {
+        /// Seconds to wait for the VI Server to come up.
+        #[arg(long, default_value_t = 120)]
+        wait: u64,
+    },
     /// Install a package by name, or name@version — or every dependency a
     /// project manifest lists, with `--manifest`.
     Install {
@@ -101,6 +108,21 @@ enum Cmd {
         all: bool,
         #[command(flatten)]
         relink: RelinkArgs,
+    },
+    /// Re-run a package's PostInstall hook, without reinstalling it.
+    ///
+    /// For retrying a hook that failed during install. Hooks are not
+    /// decoration: ni_lib_advanced_http_client_api's PostInstall is the only
+    /// thing that repairs the Call Library paths its builder broke.
+    RunHooks {
+        /// Package whose PostInstall hook to run. Omit when using --all.
+        package: Option<String>,
+        /// Run the PostInstall hook of every installed package that has one.
+        #[arg(long, conflicts_with = "package")]
+        all: bool,
+        /// Seconds to wait for one hook to finish.
+        #[arg(long, default_value_t = 300)]
+        timeout: u64,
     },
     /// Remove a previously installed package.
     Uninstall { package: String },
@@ -152,10 +174,14 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match &cli.cmd {
         Cmd::Targets => cmd_targets(),
+        Cmd::Start { wait } => cmd_start(&cli, *wait),
         Cmd::Install { package, manifest, dry_run, no_deps, no_relink, relink } => {
             cmd_install(&cli, package.as_deref(), manifest.as_deref(), *dry_run, *no_deps, *no_relink, relink)
         }
         Cmd::Relink { package, all, relink } => cmd_relink(&cli, package.as_deref(), *all, relink),
+        Cmd::RunHooks { package, all, timeout } => {
+            cmd_run_hooks(&cli, package.as_deref(), *all, *timeout)
+        }
         Cmd::Uninstall { package } => cmd_uninstall(&cli, package),
         Cmd::ViProbe { vi } => cmd_vi_probe(&cli, vi),
         Cmd::ViSave { vi } => cmd_vi_save(&cli, vi),
@@ -192,6 +218,21 @@ fn cache_dir() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|_| std::env::temp_dir());
     base.join("lvpm").join("cache")
+}
+
+fn cmd_start(cli: &Cli, wait: u64) -> Result<()> {
+    let roots = roots_for(cli)?;
+    let Some(t) = roots.target else {
+        bail!("start needs a real LabVIEW target, not --prefix");
+    };
+    let already = viserver::is_listening(&t);
+    let port = viserver::ensure_vi_server(&t, std::time::Duration::from_secs(wait))?;
+    println!(
+        "{} — VI Server answering on port {port}{}",
+        t.label(),
+        if already { " (was already running)" } else { "" }
+    );
+    Ok(())
 }
 
 fn cmd_targets() -> Result<()> {
@@ -624,6 +665,60 @@ post-install hooks: skipped — a scratch tree has no LabVIEW to run them");
 /// each folder is a fresh call into it. A folder that fails is reported and the
 /// rest still run — the alternative is that one bad package leaves the others
 /// copied but unlinked, which is the state this pass exists to get out of.
+/// Re-run PostInstall hooks for already-installed packages. The hook VI was
+/// extracted at install time; the package's files are not touched.
+fn cmd_run_hooks(cli: &Cli, package: Option<&str>, all: bool, timeout: u64) -> Result<()> {
+    let roots = roots_for(cli)?;
+    let Some(t) = roots.target.clone() else {
+        bail!("run-hooks needs a real LabVIEW target, not --prefix");
+    };
+
+    let manifests = if all {
+        install::list_installed(&roots)?
+    } else {
+        let Some(p) = package else { bail!("give a package name, or --all") };
+        vec![install::read_manifest(&roots, p)?]
+    };
+
+    let work: Vec<install::Manifest> =
+        manifests.into_iter().filter(|m| m.post_install_vi.is_some()).collect();
+    if work.is_empty() {
+        println!("nothing to do: no package with an extracted PostInstall hook");
+        return Ok(());
+    }
+
+    let args = RelinkArgs { timeout, progress: None };
+    let mut conn: Option<viserver::Connection> = None;
+    let mut failed = 0usize;
+
+    for m in &work {
+        let vi = PathBuf::from(m.post_install_vi.as_ref().unwrap());
+        if !vi.is_file() {
+            println!("{}: extracted hook is gone ({}) — reinstall the package", m.name, vi.display());
+            failed += 1;
+            continue;
+        }
+
+        print!("{} ... ", m.name);
+        std::io::stdout().flush().ok();
+        let info = hook_action_info(&m.name, m.display_name.as_deref(), &t, &m.files);
+        match run_hook_vi(&mut conn, &t, args.timeout, &vi, &info) {
+            Ok(took) => println!("ok ({:.1}s)", took.as_secs_f64()),
+            Err(e) => {
+                println!("FAILED: {e:#}");
+                failed += 1;
+            }
+        }
+    }
+    if let Some(c) = conn {
+        c.close();
+    }
+    if failed > 0 {
+        bail!("{failed} hook(s) failed");
+    }
+    Ok(())
+}
+
 /// Run each package's extracted `PostInstall.vi`, one at a time, and report.
 ///
 /// The hook VIs VIPM ships are self-contained: no controls, everything derived
@@ -695,7 +790,7 @@ fn run_hook_vi(
 ) -> Result<std::time::Duration> {
     let timeout = std::time::Duration::from_secs(timeout_secs);
     if conn.is_none() {
-        let port = viserver::check_vi_server(target)?;
+        let port = viserver::ensure_vi_server(target, std::time::Duration::from_secs(120))?;
         *conn = Some(viserver::Connection::connect("127.0.0.1", port, timeout)?);
     }
     let c = conn.as_mut().unwrap();
