@@ -18,14 +18,14 @@ use anyhow::{Context, Result, anyhow, bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// The venv directory, beside `vipm.toml`.
+/// The venv directory, beside `lvpm.toml`.
 pub const DIR: &str = ".project";
 /// `LVAddons.AdditionalLocations` exists from LabVIEW 2024 Q1 on.
 const MIN_LV: f64 = 24.0;
 
 #[derive(Debug, Clone)]
 pub struct Venv {
-    /// The repo root — where `vipm.toml` lives.
+    /// The repo root — where `lvpm.toml` lives.
     pub repo: PathBuf,
     /// `repo/.project`, the LVAddons location.
     pub dir: PathBuf,
@@ -84,7 +84,7 @@ impl Venv {
 }
 
 /// The repo whose venv a command run from `cwd` means: the nearest ancestor
-/// holding a created venv. A `vipm.toml` with no venv beside it is an error
+/// holding a created venv. An `lvpm.toml` with no venv beside it is an error
 /// rather than a fall-through to the installation — installing globally when
 /// the user believes they are installing into a project is the one outcome
 /// that must never happen quietly.
@@ -160,22 +160,17 @@ pub fn create(start: &Path, labview_version: Option<&str>) -> Result<Venv> {
     }
 
     let manifest_path = repo.join(project::FILE_NAME);
-    if !manifest_path.is_file() {
-        let name = repo
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "project".to_string());
-        std::fs::write(&manifest_path, format!("[project]\nname = \"{name}\"\n\n[dependencies]\n"))
-            .with_context(|| format!("writing {}", manifest_path.display()))?;
-        eprintln!("wrote {}", manifest_path.display());
-    }
-    let proj = project::read(&manifest_path)?;
+    let proj = match manifest_path.is_file() {
+        true => Some(project::read(&manifest_path)?),
+        false => None,
+    };
+    let min_lv = proj.as_ref().and_then(|p| p.labview.as_deref());
 
     let targets = target::detect()?;
     ensure!(!targets.is_empty(), "no LabVIEW installations detected");
-    let want = labview_version.or(proj.labview_version.as_deref()).ok_or_else(|| {
+    let want = labview_version.or(min_lv).ok_or_else(|| {
         anyhow!(
-            "which LabVIEW? pass --labview-version <YYYY>, or set labview-version in {}\n\
+            "which LabVIEW? pass --labview-version <YYYY>, or set labview in {}\n\
              hint: `lvpm targets` lists what is installed",
             manifest_path.display()
         )
@@ -186,14 +181,29 @@ pub fn create(start: &Path, labview_version: Option<&str>) -> Result<Venv> {
         "{} cannot mount a venv: LVAddons.AdditionalLocations needs LabVIEW 2024 Q1 or later",
         target.label()
     );
-    if let Some(min) = proj.labview_version.as_deref().and_then(|v| v.trim().parse::<u32>().ok())
+    if let Some(min) = min_lv.and_then(|v| v.trim().parse::<u32>().ok())
         && target.year() < min
     {
         bail!(
-            "{} is older than the project's labview-version = {min} — a venv may bind to a newer \
-             LabVIEW than the project's minimum, not an older one",
+            "{} is older than the project's labview = {min} — a venv may bind to a newer LabVIEW \
+             than the project's minimum, not an older one",
             target.label()
         );
+    }
+
+    // A project that has no manifest yet gets one, pinned to the LabVIEW it
+    // was just bound to — that is what the minimum means from here on.
+    if proj.is_none() {
+        let name = repo
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "project".to_string());
+        std::fs::write(
+            &manifest_path,
+            format!("[project]\nname = \"{name}\"\nlabview = \"{}\"\n\n[dependencies]\n", target.year()),
+        )
+        .with_context(|| format!("writing {}", manifest_path.display()))?;
+        eprintln!("wrote {}", manifest_path.display());
     }
 
     std::fs::create_dir_all(dir.join(".lvpm")).with_context(|| format!("creating {}", dir.display()))?;

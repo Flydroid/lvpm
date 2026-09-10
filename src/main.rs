@@ -93,7 +93,7 @@ enum Cmd {
     Install {
         /// Package to install. Omit when using --manifest.
         package: Option<String>,
-        /// Install every package listed in a `vipm.toml`'s [dependencies].
+        /// Install every package listed in an `lvpm.toml`'s [dependencies].
         ///
         /// All of them resolve into one plan and relink as one pass, so no
         /// package is relinked before a later one's files are on disk.
@@ -377,12 +377,44 @@ fn cmd_targets() -> Result<()> {
     Ok(())
 }
 
-fn load_index(cli: &Cli) -> Result<index::Index> {
-    index::load(&cache_dir(), cli.refresh, &cli.repos)
+/// The manifest a command belongs to: `--manifest` names it; else the venv's
+/// repo when one is in effect; else `--project`'s; else the nearest
+/// `lvpm.toml` at or above the working directory. None is fine — a package
+/// can be installed without a project.
+fn manifest_for(
+    cli: &Cli,
+    explicit: Option<&Path>,
+    repo: Option<&Path>,
+) -> Result<Option<(PathBuf, project::Project)>> {
+    let path = match (explicit, repo, &cli.project) {
+        (Some(p), _, _) => Some(p.to_path_buf()),
+        (None, Some(r), _) => Some(r.join(project::FILE_NAME)),
+        (None, None, Some(dir)) => Some(dir.join(project::FILE_NAME)).filter(|p| p.is_file()),
+        (None, None, None) => project::find_manifest(&std::env::current_dir()?),
+    };
+    match path {
+        Some(p) => Ok(Some((std::path::absolute(&p)?, project::read(&p)?))),
+        None => Ok(None),
+    }
+}
+
+/// Every index the command should see: the manifest's `[sources]` (folders
+/// relative to the manifest) and `--repo`, on top of the public ones unless
+/// the manifest turns those off.
+fn load_index(cli: &Cli, manifest: Option<&(PathBuf, project::Project)>) -> Result<index::Index> {
+    let mut repos = cli.repos.clone();
+    let mut defaults = true;
+    if let Some((path, proj)) = manifest {
+        let dir = path.parent().unwrap_or(Path::new("."));
+        repos.extend(proj.resolved_sources(dir)?);
+        defaults = proj.default_sources;
+    }
+    index::load(&cache_dir(), cli.refresh, &repos, defaults)
 }
 
 fn cmd_search(cli: &Cli, query: &str) -> Result<()> {
-    let idx = load_index(cli)?;
+    let manifest = manifest_for(cli, None, None)?;
+    let idx = load_index(cli, manifest.as_ref())?;
     let hits = idx.search(query);
     if hits.is_empty() {
         println!("no packages matching {query:?}");
@@ -567,9 +599,33 @@ fn uninstall_one(
 /// Uninstall has no --relink-timeout to borrow, and a hook is one VI run.
 const HOOK_TIMEOUT_SECS: u64 = 300;
 
-/// A manifest's dependencies as install roots: every one an exact pin.
-fn deps_of(proj: &project::Project) -> Vec<(String, Option<Version>)> {
-    proj.dependencies.iter().map(|(n, v)| (n.clone(), Some(v.clone()))).collect()
+/// What one resolution step asks of the index.
+enum Req {
+    /// This version and no other — a root written as an exact pin.
+    Exact(Version),
+    /// The newest version not below the floor; no floor means the newest.
+    Floor(Option<Version>),
+}
+
+impl From<&project::Constraint> for Req {
+    fn from(c: &project::Constraint) -> Req {
+        use project::Constraint::*;
+        match c {
+            Exact(v) => Req::Exact(v.clone()),
+            AtLeast(v) => Req::Floor(Some(v.clone())),
+            Any => Req::Floor(None),
+        }
+    }
+}
+
+impl std::fmt::Display for Req {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Req::Exact(v) => write!(f, "@{}", v.raw),
+            Req::Floor(Some(v)) => write!(f, " >={}", v.raw),
+            Req::Floor(None) => Ok(()),
+        }
+    }
 }
 
 fn cmd_install(
@@ -592,31 +648,20 @@ fn cmd_install(
     };
     let lv_gate = store.target.as_ref().map(|t| t.version);
 
-    // What the user asked for, before any dependency is considered. A manifest
-    // names many; a bare argument names one. Either way they are all roots, and
-    // a version written next to a root is an exact pin, not a floor.
-    let (wanted, from_manifest) = match (package, manifest) {
+    // The project this install belongs to, if any: its `[sources]` count even
+    // when a single package is named. Inside a project a bare `lvpm install`
+    // means the manifest's dependencies — the way `npm install` does.
+    let found = manifest_for(cli, manifest, venv.as_ref().map(|v| v.repo.as_path()))?;
+    let (wanted, from_manifest): (Vec<(String, project::Constraint)>, _) = match (package, &found) {
         (Some(p), _) => {
             let w = match p.split_once('@') {
-                Some((n, v)) => vec![(n.to_string(), Some(Version::parse(v)))],
-                None => vec![(p.to_string(), None)],
+                Some((n, v)) => vec![(n.to_string(), project::Constraint::parse(v)?)],
+                None => vec![(p.to_string(), project::Constraint::Any)],
             };
             (w, None)
         }
-        (None, Some(path)) => {
-            let proj = project::read(path)?;
-            (deps_of(&proj), Some((path.to_path_buf(), proj)))
-        }
-        // Inside a project, a bare `lvpm install` means its manifest — the way
-        // `npm install` does.
-        (None, None) => match &venv {
-            Some(v) => {
-                let path = v.repo.join(project::FILE_NAME);
-                let proj = project::read(&path)?;
-                (deps_of(&proj), Some((path, proj)))
-            }
-            None => bail!("give a package name, or --manifest <FILE>"),
-        },
+        (None, Some((path, proj))) => (proj.dependencies.clone(), Some((path, proj))),
+        (None, None) => bail!("give a package name, or --manifest <FILE>"),
     };
     ensure!(!wanted.is_empty(), "the manifest lists no [dependencies]");
 
@@ -628,8 +673,8 @@ fn cmd_install(
             wanted.len(),
             if wanted.len() == 1 { "y" } else { "ies" }
         );
-        if let Some(v) = &proj.labview_version {
-            eprintln!("      manifest says labview-version = {v:?}");
+        if let Some(v) = &proj.labview {
+            eprintln!("      manifest says labview = {v:?} (minimum)");
         }
     }
 
@@ -639,7 +684,7 @@ fn cmd_install(
     }
 
     eprintln!("loading indexes...");
-    let idx = load_index(cli)?;
+    let idx = load_index(cli, found.as_ref())?;
     eprintln!("  {} package versions known", idx.entries.len());
 
     // Depth-first over the dependency graph, from every root at once. No
@@ -647,15 +692,15 @@ fn cmd_install(
     // resolves to the newest version satisfying it. Roots are seeded in
     // reverse so the plan comes out in the order they were written.
     //
-    // A version written next to a root is an exact pin; one carried by a
-    // dependency is a floor.
-    let mut queue: Vec<(String, Option<Version>, bool)> =
-        wanted.iter().rev().map(|(n, v)| (n.clone(), v.clone(), true)).collect();
+    // A root asks for what its constraint says; a dependency carried by a
+    // package is always a floor.
+    let mut queue: Vec<(String, Req, bool)> =
+        wanted.iter().rev().map(|(n, c)| (n.clone(), Req::from(c), true)).collect();
     let mut done: HashSet<String> = HashSet::new();
     let mut plan: Vec<index::Entry> = Vec::new();
     let mut unresolved: Vec<String> = Vec::new();
 
-    while let Some((n, want, is_root)) = queue.pop() {
+    while let Some((n, req, is_root)) = queue.pop() {
         if !done.insert(n.to_lowercase()) {
             continue;
         }
@@ -665,25 +710,23 @@ fn cmd_install(
         // version the index resolves, and the install loop decides whether
         // that is a no-op, an upgrade, or a refused downgrade.
         if !is_root
+            && let Req::Floor(min) = &req
             && let Ok(have) = install::read_manifest(&store, &n)
-            && want.as_ref().is_none_or(|min| &Version::parse(&have.version) >= min)
+            && min.as_ref().is_none_or(|m| &Version::parse(&have.version) >= m)
         {
             eprintln!("  = {} {} already installed, satisfies dependency", have.name, have.version);
             continue;
         }
-        let entry = match (&want, is_root) {
-            (Some(exact), true) => {
-                idx.versions_of(&n).into_iter().find(|e| &e.version == exact).cloned()
-            }
-            (min, _) => idx.best(&n, min.as_ref(), lv_gate).cloned(),
+        let entry = match &req {
+            Req::Exact(v) => idx.versions_of(&n).into_iter().find(|e| &e.version == v).cloned(),
+            Req::Floor(min) => idx.best(&n, min.as_ref(), lv_gate).cloned(),
         };
 
         let Some(entry) = entry else {
             if is_root {
                 // One missing root must not throw away fifty good ones:
                 // collect them all and fail once, with the whole list.
-                let pin = want.map(|v| format!("@{}", v.raw)).unwrap_or_default();
-                unresolved.push(format!("{n}{pin}"));
+                unresolved.push(format!("{n}{req}"));
             } else {
                 eprintln!("  ! dependency {n} unresolved, skipping");
             }
@@ -691,7 +734,7 @@ fn cmd_install(
         };
         if !no_deps {
             for r in &entry.requires {
-                queue.push((r.name.clone(), r.min.clone(), false));
+                queue.push((r.name.clone(), Req::Floor(r.min.clone()), false));
             }
         }
         plan.push(entry);
@@ -700,9 +743,10 @@ fn cmd_install(
     if !unresolved.is_empty() {
         bail!(
             "not found in the configured indexes:\n  {}\n\
-             hint: `lvpm search <name>` to see what is available, and `--repo <URL>` \
-             to add a repository",
-            unresolved.join("\n  ")
+             hint: `lvpm search <name>` to see what is available; `--repo <URL-or-DIR>` or \
+             a [sources] entry in {} adds a repository",
+            unresolved.join("\n  "),
+            project::FILE_NAME
         );
     }
 

@@ -160,14 +160,17 @@ fn entry_from_vip(path: &Path) -> Result<Entry> {
     })
 }
 
-pub fn load(cache_dir: &Path, refresh: bool, extra: &[String]) -> Result<Index> {
+/// Load every index: the public ones (unless `defaults` is off), then `extra`
+/// — `--repo` arguments and a manifest's `[sources]`, each an index URL or a
+/// local folder of packages.
+pub fn load(cache_dir: &Path, refresh: bool, extra: &[String], defaults: bool) -> Result<Index> {
     std::fs::create_dir_all(cache_dir)?;
     let mut entries = Vec::new();
 
-    let mut sources: Vec<(String, String)> = SOURCES
-        .iter()
-        .map(|(a, b)| (a.to_string(), b.to_string()))
-        .collect();
+    let mut sources: Vec<(String, String)> = match defaults {
+        true => SOURCES.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect(),
+        false => Vec::new(),
+    };
     for repo in extra {
         if is_local_repo(repo) {
             scan_local_repo(Path::new(repo), &mut entries)?;
