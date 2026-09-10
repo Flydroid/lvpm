@@ -670,8 +670,8 @@ fn cmd_install(
             }
         }
 
-        if p.skipped_existing > 0 {
-            println!("      {} existing file(s) left alone (Replace Mode = If Newer)", p.skipped_existing);
+        if !p.kept.is_empty() {
+            println!("      {} existing file(s) left alone (Replace Mode = If Newer)", p.kept.len());
         }
         for miss in &p.missing_from_archive {
             println!("      ! listed in spec but absent from archive: {miss}");

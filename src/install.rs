@@ -60,7 +60,10 @@ pub struct Manifest {
 #[derive(Debug)]
 pub struct Plan {
     pub writes: Vec<PlannedWrite>,
-    pub skipped_existing: usize,
+    /// Files the package ships that were already on disk and left alone
+    /// (`Replace Mode = If Newer`). Still part of its footprint: they go in
+    /// the manifest so uninstall takes them with everything else.
+    pub kept: Vec<PathBuf>,
     pub missing_from_archive: Vec<String>,
 }
 
@@ -139,7 +142,7 @@ pub fn plan(roots: &Roots, spec: &Spec, zip: &mut Archive) -> Result<Plan> {
     }
 
     let mut writes = Vec::new();
-    let mut skipped_existing = 0;
+    let mut kept = Vec::new();
     let mut missing = Vec::new();
 
     for group in &spec.file_groups {
@@ -166,14 +169,14 @@ pub fn plan(roots: &Roots, spec: &Spec, zip: &mut Archive) -> Result<Plan> {
                 // PoC simplification: `If Newer` only writes when absent.
                 // Doing it properly means comparing the archive timestamp
                 // against the file on disk.
-                skipped_existing += 1;
+                kept.push(dest);
                 continue;
             }
             writes.push(PlannedWrite { zip_index, dest, overwrites: exists });
         }
     }
 
-    Ok(Plan { writes, skipped_existing, missing_from_archive: missing })
+    Ok(Plan { writes, kept, missing_from_archive: missing })
 }
 
 /// Execute a plan and record the manifest.
@@ -210,6 +213,11 @@ pub fn apply(
         std::fs::write(&w.dest, &buf)
             .with_context(|| format!("writing {}", w.dest.display()))?;
         written.push(w.dest.to_string_lossy().replace('\\', "/"));
+    }
+    // The footprint is what the package ships, not what this run happened to
+    // copy — a file left alone today is still gone when the package goes.
+    for k in &plan.kept {
+        written.push(k.to_string_lossy().replace('\\', "/"));
     }
 
     let manifest = Manifest {
