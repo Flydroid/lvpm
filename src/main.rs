@@ -1410,13 +1410,28 @@ fn cmd_app_probe(cli: &Cli, ids: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// Which LabVIEW the `vi-*` primitives talk to: a venv's own instance when a
+/// venv is in effect (started if none is running — and left running, it is the
+/// user's to close), else the target's. Returns a label and the port.
+fn vi_server_for(cli: &Cli, what: &str) -> Result<(String, u16)> {
+    match destination(cli)? {
+        Destination::Venv(v) => {
+            let inst = launch::ensure_instance(&v, false, std::time::Duration::from_secs(180))?;
+            Ok((format!("{} on the venv", v.target.label()), inst.port))
+        }
+        Destination::Global(r) | Destination::Scratch(r) => {
+            let Some(t) = r.target else {
+                bail!("{what} needs a real LabVIEW target, not --prefix");
+            };
+            let port = viserver::check_vi_server(&t)?;
+            Ok((t.label(), port))
+        }
+    }
+}
+
 fn cmd_vi_probe(cli: &Cli, vi: &std::path::Path) -> Result<()> {
-    let roots = roots_for(cli)?;
-    let Some(t) = roots.target.clone() else {
-        bail!("vi-probe needs a real LabVIEW target, not --prefix");
-    };
-    let port = viserver::check_vi_server(&t)?;
-    println!("connecting to {} on port {port}", t.label());
+    let (label, port) = vi_server_for(cli, "vi-probe")?;
+    println!("connecting to {label} on port {port}");
 
     let started = std::time::Instant::now();
     let mut conn =
@@ -1438,15 +1453,11 @@ fn cmd_vi_probe(cli: &Cli, vi: &std::path::Path) -> Result<()> {
 }
 
 fn cmd_vi_save(cli: &Cli, vi: &std::path::Path) -> Result<()> {
-    let roots = roots_for(cli)?;
-    let Some(t) = roots.target.clone() else {
-        bail!("vi-save needs a real LabVIEW target, not --prefix");
-    };
+    let (_, port) = vi_server_for(cli, "vi-save")?;
     if !vi.is_file() {
         bail!("no such VI: {}", vi.display());
     }
     let before = std::fs::metadata(vi)?.modified()?;
-    let port = viserver::check_vi_server(&t)?;
 
     let mut conn =
         viserver::Connection::connect("127.0.0.1", port, std::time::Duration::from_secs(300))?;
@@ -1612,12 +1623,8 @@ fn cmd_vi_run(
     poll_ms: u64,
     done: &str,
 ) -> Result<()> {
-    let roots = roots_for(cli)?;
-    let Some(t) = roots.target.clone() else {
-        bail!("vi-run needs a real LabVIEW target, not --prefix");
-    };
+    let (_, port) = vi_server_for(cli, "vi-run")?;
     let sets: Vec<_> = sets.iter().map(|s| parse_set(s)).collect::<Result<_>>()?;
-    let port = viserver::check_vi_server(&t)?;
 
     let mut conn =
         viserver::Connection::connect("127.0.0.1", port, std::time::Duration::from_secs(timeout))?;
