@@ -137,7 +137,13 @@ enum Cmd {
         timeout: u64,
     },
     /// Remove a previously installed package.
-    Uninstall { package: String },
+    Uninstall {
+        /// Package to remove. Omit when using --all.
+        package: Option<String>,
+        /// Remove every package installed in this target.
+        #[arg(long, conflicts_with = "package")]
+        all: bool,
+    },
     /// Invoke parameterless Application-class methods by raw id, and report
     /// what LabVIEW says. Re-establishes method ids on a new LabVIEW: 1036
     /// means "no such method here", anything else means the id resolved.
@@ -205,7 +211,7 @@ fn main() -> Result<()> {
             cmd_run_hooks(&cli, package.as_deref(), *all, *timeout)
         }
         Cmd::Refresh { timeout } => cmd_refresh(&cli, *timeout),
-        Cmd::Uninstall { package } => cmd_uninstall(&cli, package),
+        Cmd::Uninstall { package, all } => cmd_uninstall(&cli, package.as_deref(), *all),
         Cmd::AppProbe { ids } => cmd_app_probe(&cli, ids),
         Cmd::ViProbe { vi } => cmd_vi_probe(&cli, vi),
         Cmd::ViSave { vi } => cmd_vi_save(&cli, vi),
@@ -329,17 +335,71 @@ fn cmd_refresh(cli: &Cli, timeout: u64) -> Result<()> {
     Ok(())
 }
 
-fn cmd_uninstall(cli: &Cli, package: &str) -> Result<()> {
+fn cmd_uninstall(cli: &Cli, package: Option<&str>, all: bool) -> Result<()> {
     let roots = roots_for(cli)?;
-    let before = install::read_manifest(&roots, package)?;
+    let names: Vec<String> = match (package, all) {
+        (Some(p), _) => vec![p.to_string()],
+        (None, true) => install::list_installed(&roots)?.into_iter().map(|m| m.name).collect(),
+        (None, false) => bail!("give a package name, or --all"),
+    };
+    ensure!(!names.is_empty(), "no packages are installed in this target");
+
+    // One VI Server connection for the whole sweep, and one palette refresh at
+    // the end — the hooks are per package, the rebuild is not.
     let mut conn: Option<viserver::Connection> = None;
+    let mut removed_any = false;
+    let mut failed: Vec<(String, anyhow::Error)> = Vec::new();
+    for name in &names {
+        match uninstall_one(&roots, name, &mut conn) {
+            Ok(removed) => removed_any |= removed > 0,
+            // One bad package must not strand the rest of an --all sweep. A
+            // single named package still fails the command with its own error.
+            Err(e) => {
+                if names.len() > 1 {
+                    println!("uninstall {name} FAILED: {e:#}");
+                }
+                failed.push((name.clone(), e));
+            }
+        }
+    }
+    if let Some(c) = conn {
+        c.close();
+    }
+
+    // The same reason as on install, in reverse: the packages' `.mnu` files
+    // are gone, but LabVIEW still shows the palette entries until told.
+    if removed_any && let Some(t) = &roots.target {
+        refresh_palettes_and_menus(t, HOOK_TIMEOUT_SECS);
+    }
+
+    if names.len() == 1 && let Some((_, e)) = failed.pop() {
+        return Err(e);
+    }
+    ensure!(
+        failed.is_empty(),
+        "{} of {} packages failed to uninstall: {}",
+        failed.len(),
+        names.len(),
+        failed.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", ")
+    );
+    Ok(())
+}
+
+/// Remove one package and run its uninstall hooks. Returns the file count, so
+/// the caller knows whether anything left disk and a palette rebuild is owed.
+fn uninstall_one(
+    roots: &Roots,
+    package: &str,
+    conn: &mut Option<viserver::Connection>,
+) -> Result<usize> {
+    let before = install::read_manifest(roots, package)?;
 
     // PreUninstall runs while the package's files are still on disk. Both
     // uninstall hooks are best-effort: a hook needs a running LabVIEW, and a
     // hook failure must not leave the package half-present.
     if let (Some(hook), Some(t)) = (&before.pre_uninstall_vi, &roots.target) {
         let info = hook_action_info(&before.name, before.display_name.as_deref(), t, &before.files);
-        match run_hook_vi(&mut conn, t, HOOK_TIMEOUT_SECS, Path::new(hook), &info) {
+        match run_hook_vi(conn, t, HOOK_TIMEOUT_SECS, Path::new(hook), &info) {
             Ok(took) => println!("pre-uninstall ok ({:.1}s)", took.as_secs_f64()),
             Err(e) => println!("pre-uninstall FAILED: {e:#} — uninstalling anyway"),
         }
@@ -358,19 +418,16 @@ fn cmd_uninstall(cli: &Cli, package: &str) -> Result<()> {
         None => None,
     };
 
-    let (removed, m) = install::uninstall(&roots, package)?;
+    let (removed, m) = install::uninstall(roots, package)?;
     println!("removed {} {} ({removed} files)", m.name, m.version);
 
     if let (Some(tmp), Some(t)) = (&post, &roots.target) {
         let info = hook_action_info(&m.name, m.display_name.as_deref(), t, &m.files);
-        match run_hook_vi(&mut conn, t, HOOK_TIMEOUT_SECS, tmp, &info) {
+        match run_hook_vi(conn, t, HOOK_TIMEOUT_SECS, tmp, &info) {
             Ok(took) => println!("post-uninstall ok ({:.1}s)", took.as_secs_f64()),
             Err(e) => println!("post-uninstall FAILED: {e:#}"),
         }
         let _ = std::fs::remove_file(tmp);
-    }
-    if let Some(c) = conn {
-        c.close();
     }
 
     // Hooks we still do not run, and hooks we could not run here: an install
@@ -391,13 +448,7 @@ fn cmd_uninstall(cli: &Cli, package: &str) -> Result<()> {
             unrun.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
         );
     }
-
-    // The same reason as on install, in reverse: the package's `.mnu` files
-    // are gone, but LabVIEW still shows the palette entries until told.
-    if removed > 0 && let Some(t) = &roots.target {
-        refresh_palettes_and_menus(t, HOOK_TIMEOUT_SECS);
-    }
-    Ok(())
+    Ok(removed)
 }
 
 /// Uninstall has no --relink-timeout to borrow, and a hook is one VI run.
