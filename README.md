@@ -4,8 +4,9 @@ An open-source package manager for LabVIEW packages.
 
 Resolves `.vip` / `.ogp` packages by name from the public repositories or a
 local folder, downloads them, verifies the MD5, unpacks them into a real
-LabVIEW installation or a scratch tree — then relinks the installed VIs and
-runs the packages' install hooks through a running LabVIEW's VI Server.
+LabVIEW installation, a scratch tree, or a project's own venv — then relinks
+the installed VIs and runs the packages' install hooks through a running
+LabVIEW's VI Server.
 
 ```console
 $ lvpm targets
@@ -55,6 +56,58 @@ black box.
 - `--repo <URL-or-DIR>` — add a repository: a hosted `index.vipr` folder, or
   a plain local directory of `.vip` files, indexed straight from each
   package's own `spec`
+- `--global` — install into the LabVIEW installation even from inside a
+  project that has a venv (see below)
+
+### Per-project dependencies (venvs)
+
+A project can keep its packages to itself, the way a Python virtualenv or
+`node_modules` does, instead of sharing one `vi.lib` with every other project
+on the machine:
+
+```console
+$ cd C:\Git\MyProject
+$ lvpm venv create --labview-version 2026
+created C:\Git\MyProject\.project
+  bound to       LabVIEW 2026 (64-bit)  v26.3
+  VI Server port 3735
+
+$ lvpm install                    # everything vipm.toml pins, into .project
+$ lvpm install oglib_error        # one more package, into .project
+$ lvpm launch MyProject.lvproj    # a LabVIEW that sees the venv
+```
+
+- `lvpm venv create` makes `.project/` beside `vipm.toml` and binds it to a
+  LabVIEW version: `--labview-version`, else the manifest's `labview-version`,
+  which is the project's *minimum* — binding to a newer IDE is fine, an older
+  one is refused. `.project/` ignores itself in git; the manifest is what you
+  commit. `lvpm venv status` / `lvpm venv remove` round it out.
+- No activation step. Like cargo or npm, any `lvpm` command run at or below a
+  directory holding a venv uses that venv; `--project <DIR>` names one from
+  outside, `--global` says the installation itself is meant. A `vipm.toml`
+  with no venv beside it is an error, never a silent global install. Every
+  venv-mode command prints which venv it resolved to.
+- `lvpm launch [<lvproj>]` starts a LabVIEW on the venv: a copy of the
+  target's `LabVIEW.ini` with the venv mounted and VI Server on a port of its
+  own, handed over with `-pref`. Your primary LabVIEW, if open, is untouched.
+
+How it works: `.project/` is an [LVAddons](https://labviewwiki.org/wiki/LVAddons)
+location, one addon per package, each mirroring the LabVIEW install dir
+under `<pkg>/1/`. LabVIEW started with `LVAddons.AdditionalLocations`
+pointing there overlays them onto its own tree, so a package in the venv
+resolves as `<vilib>/...` exactly as a globally installed one would — the
+VIs you write against it link portably — while `C:\Program Files` never
+changes. Needs LabVIEW 2024 Q1 or later.
+
+Two things follow from LabVIEW reading an addon's contents at launch:
+
+- After `lvpm install`, a LabVIEW that was already open on the venv cannot
+  see the new files — restart it (`lvpm launch`). The relink runs inside a
+  LabVIEW lvpm starts fresh on the venv for that reason, and is refused while
+  one is already open there.
+- The real installation always wins over the overlay: a package installed
+  both globally and in the venv is loaded from the global copy, whatever its
+  version. Keep the target install clean of what the venv provides.
 
 ### Relinking
 
@@ -138,9 +191,16 @@ a project's own `Dependencies` directory works as-is.
 - No mass compile; LabVIEW recompiles installed VIs on first load.
 - Hook VIs' own `error out` is not read back — a hook that fails internally
   but runs to completion reports as ok.
-- A failure part-way through unpacking leaves files behind with no manifest.
+- A failure part-way through unpacking leaves files behind with no manifest,
+  and one failed download aborts the rest of the plan.
 - Windows is the tested platform; Linux target detection exists but is
   untested.
+- In a venv, install hooks are extracted but never run (they act on the
+  LabVIEW installation, not on an overlay), and file groups aimed at machine
+  locations (`<OS ...>`, `<temp>`) are skipped — both are recorded in the
+  manifest and shown by `lvpm list`. `lvpm install <name>` in a venv does not
+  add the pin to `vipm.toml`. No warning yet when a global copy of a venv
+  package shadows it.
 
 ## Build
 
@@ -155,10 +215,13 @@ cargo test
 |---|---|
 | `index.rs` | Fetch and parse `index.vipr` / `.ogpd`, resolve names to versions, scan local repo folders |
 | `spec.rs` | The `spec` manifest inside a package (both `.vip` and legacy `.ogp` dialects) |
-| `project.rs` | The project dependency manifest `lvpm install --manifest` reads |
+| `project.rs` | The project manifest `vipm.toml`: dependency pins, minimum LabVIEW version, lookup from a directory |
 | `target.rs` | LabVIEW detection, and where each `Target Dir` token points |
 | `install.rs` | Plan, unpack, extract hook VIs, record a manifest, uninstall |
+| `venv.rs` | A project's `.project/` venv: binding, lookup from the working directory, `lvpm venv` |
+| `launch.rs` | Start LabVIEW on a venv: the `-pref` ini, readiness by handshake, detached spawning |
 | `relink.rs` | Drive the relink VI over installed folders; folder collapsing and retries |
+| `refresh.rs` | Rebuild palettes and menus through LabVIEW's own shipping VIs |
 | `viserver.rs` | The VI Server TCP protocol: connection, methods, flattened data |
 | `version.rs` | VIPM version ordering (not semver) |
 
