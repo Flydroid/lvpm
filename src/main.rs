@@ -93,6 +93,10 @@ enum Cmd {
         /// Copy the files but skip the relink pass.
         #[arg(long)]
         no_relink: bool,
+        /// Replace an installed package with an older version. Without this,
+        /// resolving to something older than what is installed is refused.
+        #[arg(long)]
+        allow_downgrade: bool,
         #[command(flatten)]
         relink: RelinkArgs,
     },
@@ -203,8 +207,17 @@ fn main() -> Result<()> {
     match &cli.cmd {
         Cmd::Targets => cmd_targets(),
         Cmd::Start { wait } => cmd_start(&cli, *wait),
-        Cmd::Install { package, manifest, dry_run, no_deps, no_relink, relink } => {
-            cmd_install(&cli, package.as_deref(), manifest.as_deref(), *dry_run, *no_deps, *no_relink, relink)
+        Cmd::Install { package, manifest, dry_run, no_deps, no_relink, allow_downgrade, relink } => {
+            cmd_install(
+                &cli,
+                package.as_deref(),
+                manifest.as_deref(),
+                *dry_run,
+                *no_deps,
+                *no_relink,
+                *allow_downgrade,
+                relink,
+            )
         }
         Cmd::Relink { package, all, relink } => cmd_relink(&cli, package.as_deref(), *all, relink),
         Cmd::RunHooks { package, all, timeout } => {
@@ -461,6 +474,7 @@ fn cmd_install(
     dry_run: bool,
     no_deps: bool,
     no_relink: bool,
+    allow_downgrade: bool,
     relink_args: &RelinkArgs,
 ) -> Result<()> {
     let roots = roots_for(cli)?;
@@ -527,6 +541,18 @@ fn cmd_install(
 
     while let Some((n, want, is_root)) = queue.pop() {
         if !done.insert(n.to_lowercase()) {
+            continue;
+        }
+        // A dependency the installed version already satisfies stays as it
+        // is: `install foo` upgrades foo, not everything foo happens to need.
+        // Roots go through — asking for a package means asking for the
+        // version the index resolves, and the install loop decides whether
+        // that is a no-op, an upgrade, or a refused downgrade.
+        if !is_root
+            && let Ok(have) = install::read_manifest(&roots, &n)
+            && want.as_ref().is_none_or(|min| &Version::parse(&have.version) >= min)
+        {
+            eprintln!("  = {} {} already installed, satisfies dependency", have.name, have.version);
             continue;
         }
         let entry = match (&want, is_root) {
@@ -602,9 +628,44 @@ fn cmd_install(
     let mut relink_work: Vec<(String, Vec<PathBuf>)> = Vec::new();
 
     for e in &plan {
-        if install::is_installed(&roots, &e.name) {
-            println!("= {} already installed", e.name);
-            continue;
+        // An installed package is judged by version. The same one is left
+        // alone; an older one is upgraded, its recorded footprint removed
+        // first so files the new version no longer ships do not linger; a
+        // newer one is never silently downgraded.
+        let installed = match install::is_installed(&roots, &e.name) {
+            true => Some(install::read_manifest(&roots, &e.name)?),
+            false => None,
+        };
+        if let Some(old) = &installed {
+            use std::cmp::Ordering::*;
+            let order = Version::parse(&old.version).cmp(&e.version);
+            match order {
+                Equal => {
+                    println!("= {} {} already installed", e.name, old.version);
+                    continue;
+                }
+                Greater if !allow_downgrade => {
+                    println!(
+                        "= {} {} installed, newer than {} — not downgrading (pass --allow-downgrade)",
+                        e.name, old.version, e.version
+                    );
+                    continue;
+                }
+                Greater | Less => {}
+            }
+            let mark = if order == Less { "^" } else { "v" };
+            if dry_run {
+                println!(
+                    "{mark} {} {} -> {}: {} old files would be removed first",
+                    e.name,
+                    old.version,
+                    e.version,
+                    old.files.len()
+                );
+            } else {
+                println!("{mark} {} {} -> {}: removing the old version first", e.name, old.version, e.version);
+                uninstall_one(&roots, &e.name, &mut hook_conn)?;
+            }
         }
         print!("{} {} {} ... ", if dry_run { "?" } else { "+" }, e.name, e.version);
         std::io::stdout().flush().ok();
