@@ -6,7 +6,7 @@
 //! remove exactly what was added and nothing else.
 
 use crate::spec::Spec;
-use crate::target::Roots;
+use crate::target::{LvTarget, Roots, TokenClass};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::io::Read;
@@ -53,6 +53,10 @@ pub struct Manifest {
     pub pre_uninstall_vi: Option<String>,
     #[serde(default)]
     pub post_uninstall_vi: Option<String>,
+    /// File groups a venv install left out because they aim at the machine
+    /// rather than the LabVIEW tree, as `Target Dir (N files)`.
+    #[serde(default)]
+    pub skipped_groups: Vec<String>,
 }
 
 /// What an install *would* do. Produced first so `--dry-run` and the real run
@@ -65,6 +69,9 @@ pub struct Plan {
     /// the manifest so uninstall takes them with everything else.
     pub kept: Vec<PathBuf>,
     pub missing_from_archive: Vec<String>,
+    /// Groups not written because a venv holds LabVIEW-tree content only:
+    /// the `Target Dir` and how many files it named.
+    pub skipped_groups: Vec<(String, usize)>,
 }
 
 #[derive(Debug)]
@@ -144,9 +151,18 @@ pub fn plan(roots: &Roots, spec: &Spec, zip: &mut Archive) -> Result<Plan> {
     let mut writes = Vec::new();
     let mut kept = Vec::new();
     let mut missing = Vec::new();
+    let mut skipped = Vec::new();
 
     for group in &spec.file_groups {
         if group.files.is_empty() {
+            continue;
+        }
+        // A venv is an addon: LabVIEW-tree content only. What a package also
+        // puts on the machine — a driver DLL into System32, say — is no part
+        // of that, and a project's install must not scatter files across the
+        // machine. Left out, and said so.
+        if roots.venv().is_some() && Roots::classify(&group.target_dir)? != TokenClass::LabView {
+            skipped.push((group.target_dir.clone(), group.files.len()));
             continue;
         }
         let dest_root = roots.expand(&group.target_dir)?;
@@ -176,7 +192,21 @@ pub fn plan(roots: &Roots, spec: &Spec, zip: &mut Archive) -> Result<Plan> {
         }
     }
 
-    Ok(Plan { writes, kept, missing_from_archive: missing })
+    Ok(Plan { writes, kept, missing_from_archive: missing, skipped_groups: skipped })
+}
+
+/// The `lvaddoninfo.json` LabVIEW reads to mount an addon (fields as NI's own
+/// addons write them). The floor is the bound target itself, not what the
+/// package claimed: the relink pass saves the payload in that version's
+/// format, so nothing older could load it anyway.
+pub fn addon_info(name: &str, target: &LvTarget) -> String {
+    serde_json::to_string_pretty(&serde_json::json!({
+        "AddonName": name,
+        "ApiVersion": "v1",
+        "MinimumSupportedLVVersion": format!("{}.0", target.version.trunc() as u32),
+        "SupportedBitness": target.bitness.to_string(),
+    }))
+    .expect("a fixed shape of strings serialises")
 }
 
 /// Execute a plan and record the manifest.
@@ -220,6 +250,21 @@ pub fn apply(
         written.push(k.to_string_lossy().replace('\\', "/"));
     }
 
+    // An addon is what LVAddons mounts: `lvaddoninfo.json` beside the mirrored
+    // tree names it and says which LabVIEW may load it. Only when something
+    // landed — an addon holding nothing but its info file is noise, and a
+    // package whose every group aimed at the machine leaves no addon at all.
+    if roots.venv().is_some()
+        && let Some(t) = &roots.target
+        && !written.is_empty()
+    {
+        let info = roots.application.join("lvaddoninfo.json");
+        std::fs::create_dir_all(&roots.application)?;
+        std::fs::write(&info, addon_info(&spec.name, t))
+            .with_context(|| format!("writing {}", info.display()))?;
+        written.push(info.to_string_lossy().replace('\\', "/"));
+    }
+
     let manifest = Manifest {
         name: spec.name.clone(),
         version: spec.version.clone(),
@@ -242,6 +287,11 @@ pub fn apply(
         relink_folders: crate::relink::folders_for_spec(roots, spec)?
             .iter()
             .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .collect(),
+        skipped_groups: plan
+            .skipped_groups
+            .iter()
+            .map(|(dir, n)| format!("{dir} ({n} files)"))
             .collect(),
     };
 
@@ -352,5 +402,15 @@ mod tests {
         assert!(safe_relative("/etc/passwd").is_err());
         assert!(safe_relative(r"C:\windows\system32\evil.dll").is_err());
         assert!(safe_relative("vi.lib/addons/ok.llb").is_ok());
+    }
+
+    #[test]
+    fn addon_info_has_the_fields_ni_writes_and_floors_at_the_bound_target() {
+        let t = LvTarget { version: 26.3, bitness: 64, path: PathBuf::from(r"C:\LV") };
+        let v: serde_json::Value = serde_json::from_str(&addon_info("oglib_error", &t)).unwrap();
+        assert_eq!(v["AddonName"], "oglib_error");
+        assert_eq!(v["ApiVersion"], "v1");
+        assert_eq!(v["MinimumSupportedLVVersion"], "26.0");
+        assert_eq!(v["SupportedBitness"], "64");
     }
 }

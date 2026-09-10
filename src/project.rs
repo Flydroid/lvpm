@@ -10,21 +10,31 @@
 //! project a supply chain.
 
 use anyhow::{Context, Result, bail};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::version::Version;
+
+/// The manifest's file name — what marks a directory as a project root.
+pub const FILE_NAME: &str = "vipm.toml";
 
 #[derive(Debug, Default, PartialEq)]
 pub struct Project {
     /// `project.name`, when stated.
     pub name: Option<String>,
-    /// `project.labview-version`, when stated. Informational: the target comes
-    /// from `--labview-version` or the newest install, not from here.
+    /// `project.labview-version`, when stated: the oldest LabVIEW the project
+    /// is meant for. A venv binds to this version or a newer one; a global
+    /// install still takes its target from `--labview-version`.
     pub labview_version: Option<String>,
     /// `[dependencies]`, in file order. VIPM writes exact versions.
     pub dependencies: Vec<(String, Version)>,
     /// `[nipm.dependencies]` names, for reporting only.
     pub nipm: Vec<String>,
+}
+
+/// The nearest `vipm.toml` at or above `start` — a project is wherever its
+/// manifest is, the way cargo finds `Cargo.toml`.
+pub fn find_manifest(start: &Path) -> Option<PathBuf> {
+    start.ancestors().map(|d| d.join(FILE_NAME)).find(|p| p.is_file())
 }
 
 pub fn read(path: &Path) -> Result<Project> {
