@@ -127,6 +127,15 @@ const OP_HELLO: u32 = 0;
 const OP_GET_VI_REF: u32 = 3;
 #[allow(dead_code)] // Call By Reference: needed once we invoke our own batch VIs.
 const OP_CALL: u32 = 4;
+/// `kTSAppDoMethodSend`. Not observed on the wire — VIPM never invokes an
+/// Application method through `Call`, so no capture contains one. Derived
+/// instead from the `kTS*` name table in `LabVIEW.exe`, which is dense and in
+/// enum order: reading it off at `0x31f9a30` gives ClientSaysHeaveno,
+/// AppAttrVector, VIAttrVector, GetVIRef, Call, **AppDoMethod**, VIDoMethod,
+/// ReleaseRef, ClientBye — and six independently known opcodes land on their
+/// observed values in that same walk (1, 2, 3, 6, 22/23 ObjAttrVector,
+/// 32/33 Ping). See `docs/vi-server-protocol.md`.
+const OP_APP_DO_METHOD: u32 = 5;
 const OP_VI_DO_METHOD: u32 = 6;
 const OP_RELEASE_REF: u32 = 7;
 const OP_BYE: u32 = 8;
@@ -137,7 +146,18 @@ const RET_HELLO: u32 = 10;
 const RET_GET_VI_REF: u32 = 13;
 #[allow(dead_code)]
 const RET_CALL: u32 = 14;
+const RET_APP_DO_METHOD: u32 = 15;
 const RET_VI_DO_METHOD: u32 = 16;
+
+/// The Application-class target: LabVIEW's own application instance, the one
+/// serving this connection.
+///
+/// Not a reference anyone hands out — every `AppAttrVector` request in every
+/// capture addresses the application with a literal zero at +0, so there is no
+/// `Open Application Reference` step to do first. `AppDoMethod` takes the same
+/// target word in the same place, which is what lets an Application method be
+/// invoked with nothing but a connection.
+const APP_REFNUM: u32 = 0;
 
 /// The handshake payload LabVIEW's own client sends, with our own address
 /// spliced in at +28. Captured rather than derived: it embeds a user name
@@ -1287,6 +1307,36 @@ impl Connection {
         self.invoke(vi, &CtrlValGet { control })
     }
 
+    /// Invoke a parameterless Application-class method by raw id.
+    ///
+    /// `AppDoMethod` differs from `VIDoMethod` in two ways, both established
+    /// by sweeping one method with a known id against a live server:
+    ///
+    /// * **No format tag.** The body is `+0 target | +4 method id | +8 args`,
+    ///   where `VIDoMethod` carries the constant 2 between the two. Sending
+    ///   the VI layout makes LabVIEW read the tag as the selector and answer
+    ///   1036 for every id, which is what "the ids must be wrong" looks like.
+    /// * **The target is [`APP_REFNUM`]** — a literal zero, no reference to
+    ///   open first, as in every captured `AppAttrVector`.
+    ///
+    /// This is a diagnostic, not a way to get work done: the methods lvpm
+    /// actually wants (`Palettes:Refresh` 0x861, `Menus:Refresh` 0x981) come
+    /// back **1032, VI Server access denied**, because NI marks them as not
+    /// remotely accessible and a TCP client is remote. They have to be reached
+    /// through a VI running inside LabVIEW instead; see `refresh.rs`. What the
+    /// probe is for is telling those apart on a new release — 1036 means the
+    /// id is gone, 1032 means the id is right and the door is shut.
+    pub fn invoke_app_id(&mut self, id: u32) -> Result<()> {
+        let args = method_args(&[], None);
+        let mut body = Vec::with_capacity(8 + args.len());
+        body.extend_from_slice(&APP_REFNUM.to_be_bytes());
+        body.extend_from_slice(&id.to_be_bytes());
+        body.extend_from_slice(&args);
+        self.request(OP_APP_DO_METHOD, &body, RET_APP_DO_METHOD)
+            .with_context(|| format!("invoking Application method {id} ({id:#x})"))?;
+        Ok(())
+    }
+
     /// Release a reference. LabVIEW sends no reply, so this must not wait.
     /// The reference itself travels in the uID field rather than the body.
     pub fn release(&mut self, vi: VIRef) -> Result<()> {
@@ -1396,6 +1446,14 @@ mod tests {
 \x00\x00\x00\x10\x00\x00\x00\x24\x00\x00\x00\x1e\x00\x00\x00\x01\x00\x16\x40\x21\
 \x10Auto Dispose Ref\x00\x00\x01\x00\x00\x00\x00";
         assert_eq!(got, want);
+    }
+
+    /// A parameterless method sends the argument header and nothing else: one
+    /// slot (the return slot), flags 0x01, no return-type section. That is the
+    /// tail of every `AppDoMethod` body lvpm sends.
+    #[test]
+    fn a_parameterless_method_sends_a_bare_argument_header() {
+        assert_eq!(method_args(&[], None), b"\x00\x00\x00\x01\x00\x00\x00\x01\x00\x00\x00\x00");
     }
 
     /// `Ctrl Val.Set` with a Dbl, an I32 and a Boolean — each byte-for-byte

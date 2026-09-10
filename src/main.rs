@@ -9,6 +9,7 @@
 mod index;
 mod install;
 mod project;
+mod refresh;
 mod relink;
 mod spec;
 mod target;
@@ -124,8 +125,29 @@ enum Cmd {
         #[arg(long, default_value_t = 300)]
         timeout: u64,
     },
+    /// Rebuild the palettes and the File/Tools/Help menus from disk.
+    ///
+    /// `install` does this on its own, after the post-install hooks. Run it by
+    /// hand when LabVIEW was not running then, or after copying palette files
+    /// in some other way — it is what makes a package's palette and Tools
+    /// entries appear without restarting LabVIEW.
+    Refresh {
+        /// Seconds to wait for the refresh to finish.
+        #[arg(long, default_value_t = 300)]
+        timeout: u64,
+    },
     /// Remove a previously installed package.
     Uninstall { package: String },
+    /// Invoke parameterless Application-class methods by raw id, and report
+    /// what LabVIEW says. Re-establishes method ids on a new LabVIEW: 1036
+    /// means "no such method here", anything else means the id resolved.
+    ///
+    /// **Invokes whatever it hits** — sweep with care.
+    AppProbe {
+        /// Method id, decimal or 0x-prefixed hex. Repeatable.
+        #[arg(value_name = "ID", required = true)]
+        ids: Vec<String>,
+    },
     /// Open a VI reference over VI Server and release it. Proves the transport
     /// against a running LabVIEW without changing anything on disk.
     ViProbe {
@@ -182,7 +204,9 @@ fn main() -> Result<()> {
         Cmd::RunHooks { package, all, timeout } => {
             cmd_run_hooks(&cli, package.as_deref(), *all, *timeout)
         }
+        Cmd::Refresh { timeout } => cmd_refresh(&cli, *timeout),
         Cmd::Uninstall { package } => cmd_uninstall(&cli, package),
+        Cmd::AppProbe { ids } => cmd_app_probe(&cli, ids),
         Cmd::ViProbe { vi } => cmd_vi_probe(&cli, vi),
         Cmd::ViSave { vi } => cmd_vi_save(&cli, vi),
         Cmd::ViRun { vi, sets, gets, get_all, timeout, watch, poll_ms, done } => {
@@ -296,6 +320,15 @@ fn cmd_list(cli: &Cli) -> Result<()> {
     Ok(())
 }
 
+fn cmd_refresh(cli: &Cli, timeout: u64) -> Result<()> {
+    let roots = roots_for(cli)?;
+    let Some(t) = roots.target.clone() else {
+        bail!("refresh needs a real LabVIEW target, not --prefix");
+    };
+    refresh_palettes_and_menus(&t, timeout);
+    Ok(())
+}
+
 fn cmd_uninstall(cli: &Cli, package: &str) -> Result<()> {
     let roots = roots_for(cli)?;
     let before = install::read_manifest(&roots, package)?;
@@ -357,6 +390,12 @@ fn cmd_uninstall(cli: &Cli, package: &str) -> Result<()> {
             "note: declared but not run (installed before uninstall hooks existed): {}",
             unrun.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
         );
+    }
+
+    // The same reason as on install, in reverse: the package's `.mnu` files
+    // are gone, but LabVIEW still shows the palette entries until told.
+    if removed > 0 && let Some(t) = &roots.target {
+        refresh_palettes_and_menus(t, HOOK_TIMEOUT_SECS);
     }
     Ok(())
 }
@@ -650,6 +689,18 @@ post-install hooks that would run:");
 post-install hooks: skipped — a scratch tree has no LabVIEW to run them");
         }
     }
+
+    // Palettes and menus last, after the hooks: a hook is free to write more
+    // palette files of its own (the common VIPM template repairs palette
+    // menus), and this has to see what it wrote.
+    if total_writes > 0 && !dry_run {
+        match &target {
+            Some(t) => refresh_palettes_and_menus(t, HOOK_TIMEOUT_SECS),
+            // Nothing to refresh: a scratch tree's palettes belong to no IDE.
+            None => {}
+        }
+    }
+
     if !hook_warnings.is_empty() {
         println!("\npackages with script VIs that were skipped:");
         for h in &hook_warnings {
@@ -713,6 +764,9 @@ fn cmd_run_hooks(cli: &Cli, package: Option<&str>, all: bool, timeout: u64) -> R
     if let Some(c) = conn {
         c.close();
     }
+    // A hook that writes palette files needs the same refresh an install
+    // gives it, otherwise re-running one by hand fixes nothing visible.
+    refresh_palettes_and_menus(&t, args.timeout);
     if failed > 0 {
         bail!("{failed} hook(s) failed");
     }
@@ -744,6 +798,36 @@ running {} post-install hook(s)", hooks.len());
     }
     if let Some(c) = conn {
         c.close();
+    }
+}
+
+/// Rebuild the palettes and the File/Tools/Help menus from what is now on
+/// disk — the last step of an install, after the post-install hooks.
+///
+/// Without it a package's palette and Tools entries stay invisible until
+/// LabVIEW is restarted, however well the files were copied and relinked. See
+/// [`refresh`] for why it runs LabVIEW's own VIs rather than the two
+/// Application methods directly.
+///
+/// Best-effort, like the hooks: the files are installed either way, and a
+/// refresh that fails costs the user a restart, not the package.
+fn refresh_palettes_and_menus(target: &target::LvTarget, timeout_secs: u64) {
+    println!("\nrefreshing palettes and menus");
+    let outcomes = match refresh::run(target, std::time::Duration::from_secs(timeout_secs)) {
+        Ok(o) => o,
+        Err(e) => {
+            println!("  SKIPPED: {e:#}");
+            println!("  the files are installed; `lvpm refresh` retries just this step");
+            return;
+        }
+    };
+    for o in &outcomes {
+        match &o.result {
+            Ok(took) => println!("  {:<9} ok ({:.1}s)", o.what, took.as_secs_f64()),
+            // A restart does what the refresh would have: say so, since
+            // otherwise the package looks broken rather than merely unlisted.
+            Err(e) => println!("  {:<9} FAILED: {e:#}\n      restart LabVIEW to pick these up", o.what),
+        }
     }
 }
 
@@ -910,6 +994,56 @@ fn cmd_relink(cli: &Cli, package: Option<&str>, all: bool, args: &RelinkArgs) ->
         return Ok(());
     }
     run_relink(&roots, &t, args, &work)
+}
+
+/// Invoke Application methods by id and print each answer.
+///
+/// Error 1036 is the useful one — *Method selector is invalid*, i.e. this
+/// LabVIEW has no such method — which is what makes a sweep tell an id that
+/// exists from one that does not. A parameterless call is all it sends, so a
+/// method that wants arguments answers with a complaint about those instead,
+/// and that too proves the id resolved.
+fn cmd_app_probe(cli: &Cli, ids: &[String]) -> Result<()> {
+    let roots = roots_for(cli)?;
+    let Some(t) = roots.target.clone() else {
+        bail!("app-probe needs a real LabVIEW target, not --prefix");
+    };
+    let port = viserver::check_vi_server(&t)?;
+    println!("connecting to {} on port {port}", t.label());
+    let mut conn =
+        viserver::Connection::connect("127.0.0.1", port, std::time::Duration::from_secs(300))?;
+
+    for raw in ids {
+        let s = raw.trim();
+        let id = match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+            Some(hex) => u32::from_str_radix(hex, 16),
+            None => s.parse::<u32>(),
+        }
+        .with_context(|| format!("{raw:?} is not a method id"))?;
+
+        let t0 = std::time::Instant::now();
+        let r = conn.invoke_app_id(id);
+        let ms = t0.elapsed().as_secs_f64() * 1000.0;
+        match r {
+            Ok(()) => println!("  {id:>6} ({id:#06x})  ok                {ms:>7.0} ms"),
+            Err(e) => {
+                let code = viserver::error_code(&e);
+                match code {
+                    Some(c) => println!(
+                        "  {id:>6} ({id:#06x})  error {c:<11} {ms:>7.0} ms{}",
+                        match c {
+                            1036 => "  (no such method here)",
+                            1032 => "  (exists, but not remotely accessible)",
+                            _ => "",
+                        }
+                    ),
+                    None => println!("  {id:>6} ({id:#06x})  {e:#}"),
+                }
+            }
+        }
+    }
+    conn.close();
+    Ok(())
 }
 
 fn cmd_vi_probe(cli: &Cli, vi: &std::path::Path) -> Result<()> {
