@@ -113,6 +113,17 @@ pub fn select(targets: &[LvTarget], want: &str) -> Result<LvTarget> {
     bail!("no LabVIEW target matching {want:?} (detected: {})", known.join(", "));
 }
 
+/// Which kind of place a `Target Dir` token names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenClass {
+    /// Inside the LabVIEW tree — `<vi.lib>`, `<menus>`, `<application>`, …
+    LabView,
+    /// A machine location — the `<OS …>` family.
+    Os,
+    /// The installer's own scratch space.
+    Temp,
+}
+
 /// Where each `Target Dir` token points.
 #[derive(Debug, Clone)]
 pub struct Roots {
@@ -128,6 +139,9 @@ pub struct Roots {
     system_core: PathBuf,
     /// Set when this is a sandbox, so nothing can escape the prefix.
     scratch: Option<PathBuf>,
+    /// Set when this is a project venv: the `.project` dir that LabVIEW mounts
+    /// as an LVAddons location. Nothing LabVIEW-class may land outside it.
+    venv: Option<PathBuf>,
     pub target: Option<LvTarget>,
 }
 
@@ -151,6 +165,7 @@ impl Roots {
             boot_volume: p.join("os/BootVolume"),
             system_core: p.join("os/SystemCore"),
             scratch: Some(p),
+            venv: None,
             target: None,
         }
     }
@@ -176,8 +191,48 @@ impl Roots {
             ),
             system_core: env_path("SystemRoot", "C:\\Windows").join("System32"),
             scratch: None,
+            venv: None,
             target: Some(t.clone()),
         }
+    }
+
+    /// One package's addon inside a project venv. `<venv>/<pkg>/1` mirrors the
+    /// LabVIEW install dir — that is what LVAddons overlays — so every
+    /// LabVIEW-tree token lands inside the addon. The machine roots stay real:
+    /// the venv policy skips those groups rather than redirecting them.
+    pub fn project(venv: &Path, target: &LvTarget, pkg: &str) -> Roots {
+        let mut r = Roots::labview(target);
+        r.application = venv.join(pkg).join("1");
+        r.venv = Some(venv.to_path_buf());
+        r
+    }
+
+    /// The venv as a whole, for the places that treat `application` as a
+    /// boundary rather than a destination: the manifest store, and the prune
+    /// that stops there on uninstall — so removing a package takes its `1`
+    /// and its `<pkg>` dir with it.
+    pub fn project_store(venv: &Path, target: &LvTarget) -> Roots {
+        let mut r = Roots::labview(target);
+        r.application = venv.to_path_buf();
+        r.venv = Some(venv.to_path_buf());
+        r
+    }
+
+    /// The venv these roots belong to, when they do.
+    pub fn venv(&self) -> Option<&Path> {
+        self.venv.as_deref()
+    }
+
+    /// What kind of place a `Target Dir` names, without resolving it.
+    pub fn classify(target_dir: &str) -> Result<TokenClass> {
+        let Some((tok, _)) = target_dir.split_once('>') else {
+            bail!("malformed Target Dir: {target_dir:?}");
+        };
+        Ok(match format!("{tok}>").as_str() {
+            "<temp>" => TokenClass::Temp,
+            t if t.starts_with("<OS ") => TokenClass::Os,
+            _ => TokenClass::LabView,
+        })
     }
 
     /// Resolve a `Target Dir` such as `<menus>/Categories`.
@@ -216,16 +271,17 @@ impl Roots {
         Ok(if rest.is_empty() { base } else { base.join(rest) })
     }
 
-    /// Manifests live beside the thing they describe: inside the sandbox for a
-    /// scratch install, in ProgramData keyed by target for a real one.
+    /// Manifests live beside the thing they describe: inside the venv or the
+    /// sandbox, in ProgramData keyed by target for a real install.
     pub fn store_dir(&self) -> PathBuf {
-        match (&self.scratch, &self.target) {
-            (Some(p), _) => p.join(".lvpm").join("installed"),
-            (None, Some(t)) => env_path("ProgramData", "C:\\ProgramData")
+        match (&self.venv, &self.scratch, &self.target) {
+            (Some(v), _, _) => v.join(".lvpm").join("installed"),
+            (None, Some(p), _) => p.join(".lvpm").join("installed"),
+            (None, None, Some(t)) => env_path("ProgramData", "C:\\ProgramData")
                 .join("lvpm")
                 .join(t.key())
                 .join("installed"),
-            (None, None) => PathBuf::from(".lvpm/installed"),
+            (None, None, None) => PathBuf::from(".lvpm/installed"),
         }
     }
 
@@ -267,12 +323,17 @@ impl Roots {
         .any(|root| root == dir)
     }
 
-    /// Guard against a package writing outside the sandbox in scratch mode.
+    /// Guard against a package writing outside the sandbox, or the venv.
     pub fn check_contained(&self, p: &Path) -> Result<()> {
-        if let Some(root) = &self.scratch
+        let bound = match (&self.scratch, &self.venv) {
+            (Some(root), _) => Some((root, "the scratch prefix")),
+            (None, Some(root)) => Some((root, "the venv")),
+            (None, None) => None,
+        };
+        if let Some((root, what)) = bound
             && !p.starts_with(root)
         {
-            bail!("refusing to write outside the scratch prefix: {}", p.display());
+            bail!("refusing to write outside {what}: {}", p.display());
         }
         Ok(())
     }
@@ -316,5 +377,42 @@ mod tests {
             r.expand("<menus>/Categories").unwrap(),
             Path::new(r"C:\Program Files\National Instruments\LabVIEW 2026\menus\Categories")
         );
+    }
+
+    #[test]
+    fn project_roots_put_labview_tokens_in_the_addon_and_leave_machine_roots_alone() {
+        let t = LvTarget { version: 26.3, bitness: 64, path: PathBuf::from(r"C:\LV2026") };
+        let venv = Path::new(r"C:\repo\.project");
+        let r = Roots::project(venv, &t, "oglib_error");
+
+        assert_eq!(
+            r.expand("<vi.lib>/_OpenG.lib/error").unwrap(),
+            Path::new(r"C:\repo\.project\oglib_error\1\vi.lib\_OpenG.lib\error")
+        );
+        assert_eq!(r.expand("<application>").unwrap(), Path::new(r"C:\repo\.project\oglib_error\1"));
+        assert!(!r.expand("<OS Public Application Data>").unwrap().starts_with(r"C:\repo"));
+        assert!(!r.expand("<temp>").unwrap().starts_with(r"C:\repo"));
+
+        // Nothing LabVIEW-class may leave the venv; machine roots are not
+        // written to at all in venv mode, and the guard is what says so.
+        r.check_contained(&r.expand("<menus>/Categories").unwrap()).unwrap();
+        assert!(r.check_contained(&r.expand("<temp>").unwrap()).is_err());
+
+        assert_eq!(r.store_dir(), Path::new(r"C:\repo\.project\.lvpm\installed"));
+        assert_eq!(Roots::project_store(venv, &t).store_dir(), r.store_dir());
+        assert_eq!(Roots::project_store(venv, &t).application, venv);
+        assert_eq!(r.venv(), Some(venv));
+        assert!(r.target.is_some());
+    }
+
+    #[test]
+    fn classify_sorts_tokens_by_where_they_point() {
+        assert_eq!(Roots::classify("<vi.lib>/addons/Foo").unwrap(), TokenClass::LabView);
+        assert_eq!(Roots::classify("<application>").unwrap(), TokenClass::LabView);
+        assert_eq!(Roots::classify("<menus>").unwrap(), TokenClass::LabView);
+        assert_eq!(Roots::classify("<temp>").unwrap(), TokenClass::Temp);
+        assert_eq!(Roots::classify("<OS Public Application Data>/x").unwrap(), TokenClass::Os);
+        assert_eq!(Roots::classify("<OS System Core Libraries>").unwrap(), TokenClass::Os);
+        assert!(Roots::classify("nonsense").is_err());
     }
 }

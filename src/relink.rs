@@ -19,7 +19,7 @@
 //! feed them in one at a time, and wait for `Done`.
 
 use crate::spec::Spec;
-use crate::target::{LvTarget, Roots};
+use crate::target::Roots;
 use crate::viserver::{self, Connection, LvValue, VIRef};
 use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
@@ -165,6 +165,12 @@ pub fn folders_for_spec(roots: &Roots, spec: &Spec) -> Result<Vec<PathBuf>> {
         if lv_files.is_empty() {
             continue;
         }
+        // A venv install never wrote these, so there is nothing there to walk.
+        if roots.venv().is_some()
+            && Roots::classify(&group.target_dir)? != crate::target::TokenClass::LabView
+        {
+            continue;
+        }
         let dir = roots.expand(&group.target_dir)?;
         if roots.is_shared_root(&dir) {
             for f in lv_files {
@@ -227,8 +233,11 @@ pub struct Outcome {
 }
 
 impl Relinker {
-    pub fn open(target: &LvTarget, vi: &Path, timeout: Duration) -> Result<Relinker> {
-        let port = viserver::ensure_vi_server(target, Duration::from_secs(120))?;
+    /// Load the relink VI into the LabVIEW answering on `port`. Which LabVIEW
+    /// that is — the target's own, or one started on a venv — is the caller's
+    /// business; making it answer is `viserver::ensure_vi_server` or
+    /// `launch::ensure_instance`.
+    pub fn open(port: u16, vi: &Path, timeout: Duration) -> Result<Relinker> {
         // Polling only needs a round trip, but the initial load of the relink
         // VI itself can take a while, so give reads the full budget.
         let mut conn = Connection::connect("127.0.0.1", port, timeout)?;

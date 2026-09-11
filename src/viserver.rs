@@ -98,9 +98,9 @@ pub fn ensure_vi_server(target: &LvTarget, wait: Duration) -> Result<u16> {
         bail!("no LabVIEW.exe in {}", target.path.display());
     }
     eprintln!("starting {} and waiting for VI Server on port {port}...", target.label());
-    // Detached child: LabVIEW outlives lvpm by design.
-    std::process::Command::new(&exe)
-        .spawn()
+    // Detached child: LabVIEW outlives lvpm by design — and must not keep
+    // lvpm's own pipes open while it does (see `launch::spawn_detached`).
+    crate::launch::spawn_detached(&mut std::process::Command::new(&exe))
         .with_context(|| format!("launching {}", exe.display()))?;
 
     let started = std::time::Instant::now();
