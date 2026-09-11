@@ -1,8 +1,11 @@
-//! Package indexes.
+//! Package directories.
 //!
-//! Both public VIPM feeds are plain-HTTP INI files with one `[Package <id>]`
-//! section per package/version. Everything a resolver needs is in there:
-//! download path, MD5, LabVIEW gate and dependency ranges.
+//! OGPM's "Package Directory" (`.ogpd`, see docs/ogpm-model.md): a plain-HTTP
+//! INI file with one `[Package <id>]` section per package/version carrying a
+//! `Package.URL` relative to the directory itself. `.vipr` is the same format
+//! plus `Package.MD5`, a LabVIEW gate and dependency ranges — everything a
+//! resolver needs. A local directory of named packages is a "local repository"
+//! and indexes itself from each package's own spec.
 
 use crate::version::{split_id, Version};
 use anyhow::{Context, Result};

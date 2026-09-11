@@ -1,9 +1,11 @@
-//! The `spec` manifest inside a `.vip`.
+//! The `spec` manifest inside a package.
 //!
-//! A `.vip` is a plain zip containing `spec` (this file), `icon.bmp`, and one
-//! `File Group N/` payload tree per file group. `spec` is INI with quoted
-//! values; the parts that matter for installing are `[File Group N]` and
-//! `[Script VIs]`.
+//! The format is the OpenG Package Tools' "Package Spec File"
+//! (<https://ogpm.sourceforge.net/design/Package%20Spec%20File.htm>; see
+//! docs/ogpm-model.md). A package is a plain zip containing `spec` (this
+//! file), an icon, and one `File Group N/` payload tree per file group. `spec`
+//! is INI, values optionally quoted; the parts that matter for installing are
+//! `[File Group N]` and `[Script VIs]`.
 
 use anyhow::{Context, Result};
 use std::collections::HashMap;
@@ -65,8 +67,8 @@ pub fn parse(text: &str) -> Result<Spec> {
         }
     }
 
-    // Two dialects live in the public corpus: modern `.vip` files use
-    // `[Package]`, while OpenG-era `.ogp` files use `[Package Name]`.
+    // Two dialects live in the public corpus: the OGPT design (and `.ogp`
+    // files) use `[Package Name]`; VIPM's `.vip` renamed it `[Package]`.
     let pkg = sections
         .get("Package")
         .or_else(|| sections.get("Package Name"))
@@ -74,8 +76,9 @@ pub fn parse(text: &str) -> Result<Spec> {
 
     let name = pkg.get("Name").context("spec has no package Name")?.clone();
 
-    // `.ogp` splits the version: Version=1.1 plus Release=1 means "1.1-1",
-    // which is what the index calls it.
+    // OGPT names a package `<name>-<version>-<release>`: Version=1.1 plus
+    // Release=1 is "1.1-1", which is what the package directory calls it.
+    // `.vip` dropped Release and carries a four-part Version instead.
     let version = match (pkg.get("Version"), pkg.get("Release")) {
         (Some(v), Some(r)) if !r.trim().is_empty() => format!("{}-{}", v.trim(), r.trim()),
         (Some(v), _) => v.trim().to_string(),

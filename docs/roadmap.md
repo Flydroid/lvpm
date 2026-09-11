@@ -3,6 +3,14 @@
 What lvpm does next, and why. Items are ordered within each section by how
 much they unblock. Done items stay for a while so the reasoning is on record.
 
+The origin is the OpenG Package Tools design
+([docs/ogpm-model.md](ogpm-model.md)): most of what is below — the lockfile
+and venv (OGPM's "Development System Configuration Manager"), `lvpm check`
+(its global VI namespace database), `lvpm tree` (Package Query), conflicts,
+verification, the package cache, a builder that writes the spec — was
+specified there in 2002–2005 and never finished. The OGPT → lvpm table in that
+document is the checklist.
+
 ## Per-project dependencies (venvs)
 
 A project keeps its packages under `.project/`, mounted into LabVIEW as an
@@ -100,8 +108,28 @@ records) and make it first-class:
 - **PPL support.**
 - **A package cache** shared between venvs, so a second project installing
   the same version copies instead of downloading.
-- Own `User-Agent` stays `lvpm/<version>`: honest, and the first thing to
+- **Fetch over HTTPS.** `jkisoft.com` 301-redirects both the directory and
+  every package to `s3-us-west-1.amazonaws.com/jki-vi-package-network` over
+  plain HTTP, and the `Package.MD5` we check against comes over that same
+  channel — so today the hash catches corruption, not tampering. Try `https`
+  on both hops (S3 and download.ni.com both serve it) and fall back only if a
+  source has no TLS.
+  - Own `User-Agent` stays `lvpm/<version>`: honest, and the first thing to
   check if a public index starts closing connections on us.
+
+## From the OGPM design, not yet started
+
+- **`lvpm verify <pkg>`** — OGPM Package Verification: compare installed files
+  against the install manifest (size, hash), run the package's `Verify` script
+  VI if it has one, report anomalies.
+- **`Conflicts`** — parse it (same grammar as `Requires`), refuse to install
+  over a conflicting package unless told to uninstall it first.
+- **Upgrade** as OGPM defines it: uninstall the old version, then install the
+  new one, in one command.
+- **`Requires` operators beyond `>=`** — `<`, `<=`, `=`, `>`, and the optional
+  release; today only the floor is honoured.
+- **Per-file-group platform gates** — `Exclusive_OS` /
+  `Exclusive_LabVIEW_Version` on a `[File Group N]`, not just on the package.
 
 ## Housekeeping
 
