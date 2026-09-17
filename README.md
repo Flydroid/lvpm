@@ -152,6 +152,10 @@ folder's report of the files it actually rewrote.
   package's folder joins that walk instead of repeating it
 - `lvpm relink <name>` / `lvpm relink --all` — rerun the pass from the
   install manifests, without reinstalling
+- `Relink Package.vi` is compiled into the `lvpm` binary and unpacked to
+  `%LOCALAPPDATA%\lvpm\tools\<hash>\` on first use, so there is nothing to
+  install beside the executable; `LVPM_RELINK_VI=<path>` runs a VI from disk
+  instead
 - transient VI Server refusals (error 1000: the reference invalidated by the
   relink's own saves, or the VI not yet out of its running state) retry with
   a fresh reference and backoff

@@ -57,34 +57,60 @@ fn is_lv_item(p: &Path) -> bool {
         .is_some_and(|e| LV_EXTENSIONS.iter().any(|x| e.eq_ignore_ascii_case(x)))
 }
 
+/// `Relink Package.vi` itself, compiled into the executable.
+///
+/// It is shipped code, not configuration, and LabVIEW can only open it by
+/// path — so lvpm carries the bytes and writes them out on first use rather
+/// than depending on a `tools/` directory surviving beside the binary.
+const RELINK_VI: &[u8] = include_bytes!("../tools/Relink Package.vi");
+
+/// Kept as the on-disk name, because LabVIEW shows it in dialogs and titles.
+const RELINK_VI_NAME: &str = "Relink Package.vi";
+
+/// Override, for trying a modified VI without rebuilding lvpm.
+const RELINK_VI_ENV: &str = "LVPM_RELINK_VI";
+
 /// Where `Relink Package.vi` is, so it can be handed to LabVIEW by path.
 ///
-/// It ships with lvpm, so there is nothing to configure: `tools/` beside the
-/// executable for an installed build, `tools/` in the source tree for
-/// `cargo run`.
+/// The embedded copy is extracted to a per-user cache directory keyed by its
+/// own hash, so a new lvpm build writes a new path instead of overwriting a
+/// file LabVIEW may still have open, and an unchanged one costs a `stat`.
+/// `$LVPM_RELINK_VI` points at a VI on disk instead.
 pub fn locate_vi() -> Result<PathBuf> {
-    let mut tried: Vec<PathBuf> = Vec::new();
-
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent()
-    {
-        let p = dir.join("tools").join("Relink Package.vi");
-        if p.is_file() {
-            return Ok(p);
+    if let Some(p) = std::env::var_os(RELINK_VI_ENV) {
+        let p = PathBuf::from(p);
+        if !p.is_file() {
+            bail!("{RELINK_VI_ENV} is set to {}, which is not a file", p.display());
         }
-        tried.push(p);
-    }
-    let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("tools").join("Relink Package.vi");
-    if p.is_file() {
         return Ok(p);
     }
-    tried.push(p);
+    extract_vi(&crate::state_dir().join("tools"))
+}
 
-    bail!(
-        "cannot find Relink Package.vi — looked in:\n{}\nhint: --no-relink installs \
-         without relinking",
-        tried.iter().map(|p| format!("  {}", p.display())).collect::<Vec<_>>().join("\n")
-    );
+/// Write the embedded VI under `base`, and return where it landed.
+fn extract_vi(base: &Path) -> Result<PathBuf> {
+    let dir = base.join(crate::index::md5_hex(RELINK_VI));
+    let vi = dir.join(RELINK_VI_NAME);
+    // The directory names the contents, so a file of the right length there is
+    // the file we would write.
+    if std::fs::metadata(&vi).is_ok_and(|m| m.len() == RELINK_VI.len() as u64) {
+        return Ok(vi);
+    }
+
+    std::fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
+    // Write beside it and rename, so a second lvpm running the same pass never
+    // sees a half-written VI.
+    let tmp = dir.join(format!(".{}.{}", RELINK_VI_NAME, std::process::id()));
+    std::fs::write(&tmp, RELINK_VI).with_context(|| format!("cannot write {}", tmp.display()))?;
+    if let Err(e) = std::fs::rename(&tmp, &vi) {
+        let _ = std::fs::remove_file(&tmp);
+        // Losing the race is the expected way to fail here: the other process
+        // put the same bytes there, which is all we wanted.
+        if !vi.is_file() {
+            return Err(e).with_context(|| format!("cannot write {}", vi.display()));
+        }
+    }
+    Ok(vi)
 }
 
 /// Drop any folder an already-kept folder contains, since the walk covers it.
@@ -407,6 +433,29 @@ impl Relinker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// First use writes the VI; a second run over the same base reuses it
+    /// without rewriting, and a truncated leftover is repaired rather than
+    /// handed to LabVIEW.
+    #[test]
+    fn extracts_the_embedded_vi_once() {
+        let base = std::env::temp_dir().join(format!("lvpm-extract-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+
+        let vi = extract_vi(&base).unwrap();
+        assert_eq!(vi.file_name().unwrap(), RELINK_VI_NAME);
+        assert_eq!(std::fs::read(&vi).unwrap(), RELINK_VI);
+
+        let stamp = std::fs::metadata(&vi).unwrap().modified().unwrap();
+        assert_eq!(extract_vi(&base).unwrap(), vi);
+        assert_eq!(std::fs::metadata(&vi).unwrap().modified().unwrap(), stamp);
+
+        std::fs::write(&vi, b"truncated").unwrap();
+        assert_eq!(extract_vi(&base).unwrap(), vi);
+        assert_eq!(std::fs::read(&vi).unwrap(), RELINK_VI);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     /// The cross-package version of `collapse`: a folder covered by another
     /// package's folder joins that folder's run instead of getting its own,

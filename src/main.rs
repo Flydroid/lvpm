@@ -342,12 +342,18 @@ fn destination(cli: &Cli) -> Result<Destination> {
     roots_for(cli).map(explicit)
 }
 
-/// The index cache is per-user, not per-target — the feeds are the same.
-fn cache_dir() -> PathBuf {
+/// Everything lvpm keeps for itself between runs — caches and the VIs it
+/// unpacks out of its own binary. Per-user, not per-target.
+fn state_dir() -> PathBuf {
     let base = std::env::var("LOCALAPPDATA")
         .map(PathBuf::from)
         .unwrap_or_else(|_| std::env::temp_dir());
-    base.join("lvpm").join("cache")
+    base.join("lvpm")
+}
+
+/// The index cache is per-user, not per-target — the feeds are the same.
+fn cache_dir() -> PathBuf {
+    state_dir().join("cache")
 }
 
 fn cmd_start(cli: &Cli, wait: u64) -> Result<()> {
