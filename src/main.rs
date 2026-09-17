@@ -15,6 +15,7 @@
 mod index;
 mod install;
 mod launch;
+mod linkfix;
 mod project;
 mod refresh;
 mod relink;
@@ -239,6 +240,24 @@ enum Cmd {
         /// A `.lvproj` to open in the started LabVIEW.
         lvproj: Option<PathBuf>,
     },
+    /// Rewrite the linker tables of installed VIs the way a LabVIEW relink
+    /// would, without LabVIEW: owner paths, relative paths and build-machine
+    /// absolutes become `<vilib>`-token paths, and links into other libraries
+    /// get their qualifier. Stops the "save changes?" dialog a venv otherwise
+    /// raises on project close. Defaults to the venv in effect; `--tree` takes
+    /// any LabVIEW-shaped folder (or a venv store) instead.
+    Linkfix {
+        /// A folder to fix instead of the venv: a venv `.project` store, or a
+        /// LabVIEW-shaped tree with `vi.lib`, `user.lib`, ... at its top.
+        #[arg(long, value_name = "DIR")]
+        tree: Option<PathBuf>,
+        /// Report what would change, write nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Name every changed and every skipped file.
+        #[arg(long, short)]
+        verbose: bool,
+    },
     /// Show what lvpm has installed into the selected target.
     List,
     /// Search the indexes.
@@ -302,6 +321,7 @@ fn main() -> Result<()> {
         }
         Cmd::Venv(sub) => cmd_venv(&cli, sub),
         Cmd::Launch { lvproj } => cmd_launch(&cli, lvproj.as_deref()),
+        Cmd::Linkfix { tree, dry_run, verbose } => cmd_linkfix(&cli, tree.as_deref(), *dry_run, *verbose),
         Cmd::List => cmd_list(&cli),
         Cmd::Search { query } => cmd_search(&cli, query),
     }
@@ -1543,6 +1563,65 @@ fn cmd_app_probe(cli: &Cli, ids: &[String]) -> Result<()> {
         }
     }
     conn.close();
+    Ok(())
+}
+
+/// Fix linker tables in place — see [`linkfix`]. A venv store is a set of
+/// `<package>/1/` roots; anything else is one LabVIEW-shaped root.
+fn cmd_linkfix(cli: &Cli, tree: Option<&Path>, dry_run: bool, verbose: bool) -> Result<()> {
+    let roots: Vec<PathBuf> = match tree {
+        Some(t) => {
+            let store_like = linkfix::venv_roots(t)?;
+            if store_like.is_empty() { vec![t.to_path_buf()] } else { store_like }
+        }
+        None => match destination(cli)? {
+            Destination::Venv(v) => linkfix::venv_roots(&v.dir)?,
+            Destination::Global(_) | Destination::Scratch(_) => bail!(
+                "linkfix works on a venv, or on a folder given with --tree; a real LabVIEW \
+                 installation is relinked by LabVIEW itself"
+            ),
+        },
+    };
+    ensure!(!roots.is_empty(), "nothing to fix: no package roots found");
+    println!("{}fixing linker tables under {} root(s)", if dry_run { "dry run: " } else { "" }, roots.len());
+
+    let (_tree, outcomes) = linkfix::fix_tree(&roots, dry_run)?;
+    let mut total = linkfix::Changes::default();
+    let (mut changed, mut clean, mut skipped) = (0usize, 0usize, 0usize);
+    for o in &outcomes {
+        match &o.result {
+            Ok(c) if c.total() > 0 => {
+                changed += 1;
+                total.owner += c.owner;
+                total.relative += c.relative;
+                total.absolute += c.absolute;
+                total.qualifier += c.qualifier;
+                total.vils += c.vils;
+                if verbose {
+                    println!("  {:<60} owner {} rel {} abs {} qual {} vils {}", o.path.display(), c.owner, c.relative, c.absolute, c.qualifier, c.vils);
+                }
+            }
+            Ok(_) => clean += 1,
+            Err(e) => {
+                skipped += 1;
+                if verbose {
+                    println!("  SKIPPED {}: {e:#}", o.path.display());
+                }
+            }
+        }
+    }
+    println!(
+        "\n{} VIs looked at: {changed} {}, {clean} already clean, {skipped} skipped",
+        outcomes.len(),
+        if dry_run { "would change" } else { "changed" }
+    );
+    println!(
+        "  edits: owner paths {}, relative paths {}, build-machine absolutes {}, qualifiers {}, owner refs {}",
+        total.owner, total.relative, total.absolute, total.qualifier, total.vils
+    );
+    if skipped > 0 && !verbose {
+        println!("  (--verbose names the skipped files and why)");
+    }
     Ok(())
 }
 

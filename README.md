@@ -159,6 +159,31 @@ With `--relink`, the pass drives `tools/Relink Package.vi` over every installed
 package folder through VI Server — load, let LabVIEW resolve the links, save —
 and prints each folder's report of the files it actually rewrote.
 
+### `lvpm linkfix` — the relink without LabVIEW
+
+Unrelinked VIs load and run, but a project that loads them still asks to save
+them on close: LabVIEW fills in what the packaged link tables left out and
+wants to persist it. Measured on the 66 VIs the IDE saved out of the NovaXC
+venv, that is exactly four things — the VI's own owning library path in the
+`<vilib>` token form, relative subVI paths in token form, the library
+qualifier plus owner path on links into other libraries, and the build
+machine's absolutes replaced. `lvpm linkfix` writes those four things into the
+`.vi` files directly, in each file's own LabVIEW version, using the block
+layouts pylabview documents (`src/linkfix.rs`). Files reached through an
+`.llb` path are left alone: LLB-relative links are canonical.
+
+```console
+$ lvpm linkfix                         # the venv in effect
+$ lvpm linkfix --tree .project --dry-run --verbose
+```
+
+On the NovaXC venv: 6647 VIs, 5174 rewritten, 17 skipped (class-API link
+tails of a shape not yet decoded — reported, never guessed). Verified with
+LabVIEW's own `Save.To Buffer` on the fixed files: what it would save is what
+is on disk. `tools/predict_dirty.py` predicts which packaged VIs need this
+(100% recall on the IDE's list), `tools/linkobjs.py oracle` compares a fixed
+tree with IDE-saved files link by link.
+
 - one pass over the whole plan, so no package is relinked before a later
   package's files are on disk
 - overlapping folders are collapsed first: a folder nested inside another

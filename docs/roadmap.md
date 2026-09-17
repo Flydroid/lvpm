@@ -47,10 +47,15 @@ wins over the overlay; `LVAddons.AdditionalLocations` needs LabVIEW 2024 Q1.
   files only the 3 that were saved by hand ever changed. `tools/audit.py`
   reports the two properties that decide it (embedded compiled code, and
   linker paths that are not `<vilib>`-relative).
-- **Rewrite linker paths in Rust.** The residue the relink existed to fix is
-  579 drive-letter absolutes across the NovaXC set. Rewriting those `PTH0`
-  records to `<vilib>`-style tokens directly in the `.vi` would remove the
-  last reason to start LabVIEW at install time at all.
+- ~~**Rewrite linker paths in Rust.**~~ Done: `lvpm linkfix` (`src/linkfix.rs`).
+  The real residue turned out to be bigger than the 579 absolutes: 5127 of
+  7649 VIs carried a relative or empty owner path, relative subVI paths, or
+  links into other libraries without the qualifier — everything a project
+  load rewrites and then asks to save. The fixer writes all of it in the
+  file's own version; verified with `Save.To Buffer`. Open: 17 class-API
+  link tails of a shape not yet decoded (skipped, reported); make `linkfix`
+  the default install step for venvs once the IDE close of NovaXC confirms
+  it; the `.llb` folders lvpm unpacks instead of building real LLBs.
 - **Do not inherit `SaveChanges_ApplyToAll`.** `launch::write_ini` copies the
   target's `LabVIEW.ini` wholesale, so a sticky "apply to all" from the user's
   own IDE lets a venv dependency be upgraded and saved with no dialog —
