@@ -31,17 +31,31 @@ wins over the overlay; `LVAddons.AdditionalLocations` needs LabVIEW 2024 Q1.
 
 ### Iteration 2
 
-- **Install hooks in a venv.** Today none run. `ni_lib_advanced_http_client_api`
-  genuinely needs its PostInstall (it repairs Call Library paths); DQMH did
-  not (its palette came from the overlay). Candidate: run PostInstall inside
-  the venv instance, snapshot the real installation before and after, move
-  palette files it dropped into `<menus>` into the addon, warn about anything
-  else. Per-dependency `hooks = "run" | "skip"` in the manifest makes it an
-  explicit opt-in.
-- **Relink what a partial run left behind.** A rerun after a failed install
-  only relinks the packages *it* copied; packages the first run copied stay
-  `NOT relinked` until `lvpm relink --all`. The venv install should relink
-  everything still unrelinked in the store.
+- ~~**Install hooks in a venv.**~~ Done. `PostInstall` now runs in the venv's
+  own instance, sharing the one LabVIEW the install already starts, and
+  `lvpm run-hooks` is venv-aware too. Confirmed on
+  `ni_lib_advanced_http_client_api`: it ships both `lvwebclient_32.dll` and
+  `lvwebclient_64.dll` but records the 32-bit one in all 19 VIs, so without
+  the hook `Open Session.vi` fails with error 1003; after it, all 19 point at
+  `_64` and the VI runs. `--no-hooks` opts out. Still open: `PreInstall` in a
+  venv (the instance only starts once the files are down), snapshotting the
+  real installation to catch a hook that writes outside the overlay, and
+  per-dependency `hooks = "run" | "skip"` in the manifest.
+- ~~**Relink by default.**~~ Inverted: the relink pass is now opt-in behind
+  `--relink`. Measured across 10 packages saved between LabVIEW 8.6 and 2020,
+  unrelinked VIs load and run from a venv untouched, and of 2412 installed
+  files only the 3 that were saved by hand ever changed. `tools/audit.py`
+  reports the two properties that decide it (embedded compiled code, and
+  linker paths that are not `<vilib>`-relative).
+- **Rewrite linker paths in Rust.** The residue the relink existed to fix is
+  579 drive-letter absolutes across the NovaXC set. Rewriting those `PTH0`
+  records to `<vilib>`-style tokens directly in the `.vi` would remove the
+  last reason to start LabVIEW at install time at all.
+- **Do not inherit `SaveChanges_ApplyToAll`.** `launch::write_ini` copies the
+  target's `LabVIEW.ini` wholesale, so a sticky "apply to all" from the user's
+  own IDE lets a venv dependency be upgraded and saved with no dialog —
+  observed on `Delacor_lib_QMH_Create Message Queue.vi`, 16.0 to 26.3. Force
+  it False in the venv ini.
 - **Survive one bad download.** A single failed download aborts the plan;
   retry transient errors, continue past a package, fail at the end with the
   list — as `uninstall --all` already does.

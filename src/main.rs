@@ -3,8 +3,14 @@
 //! Resolves `.vip` packages by name from the public VIPM indexes, downloads
 //! them, verifies the MD5 and unpacks them — either into a scratch tree or
 //! into a real LabVIEW installation. No VIPM. Copying the files is followed by
-//! a relink pass over VI Server (see [`relink`]), which a scratch install
-//! skips and `--no-relink` turns off. Script VIs are reported but never run.
+//! the packages' install hooks, run over VI Server — in a venv's own LabVIEW
+//! when a venv is in effect, since the paths a hook is handed are the venv's
+//! own. `--no-hooks` turns that off.
+//!
+//! The relink pass (see [`relink`]) is opt-in, behind `--relink`: measured
+//! across 10 packages saved between LabVIEW 8.6 and 2020, unrelinked VIs load
+//! and run from a venv untouched, because LabVIEW resolves what the linker
+//! tables miss by searching vi.lib. Relinking only warms that cache.
 
 mod index;
 mod install;
@@ -105,9 +111,18 @@ enum Cmd {
         /// Do not install dependencies.
         #[arg(long)]
         no_deps: bool,
-        /// Copy the files but skip the relink pass.
-        #[arg(long)]
+        /// Run the relink pass after copying. Off by default: measured across
+        /// 10 packages from LabVIEW 8.6 to 2020, unrelinked VIs load and run
+        /// from a venv untouched, and LabVIEW resolves what the linker tables
+        /// miss by searching vi.lib. Relinking only warms that cache.
+        #[arg(long = "relink")]
+        relink_pass: bool,
+        /// Accepted and ignored: skipping the relink is now the default.
+        #[arg(long, hide = true)]
         no_relink: bool,
+        /// Copy the files but skip the packages' install hooks.
+        #[arg(long)]
+        no_hooks: bool,
         /// Replace an installed package with an older version. Without this,
         /// resolving to something older than what is installed is refused.
         #[arg(long)]
@@ -250,14 +265,25 @@ fn main() -> Result<()> {
     match &cli.cmd {
         Cmd::Targets => cmd_targets(),
         Cmd::Start { wait } => cmd_start(&cli, *wait),
-        Cmd::Install { package, manifest, dry_run, no_deps, no_relink, allow_downgrade, relink } => {
+        Cmd::Install {
+            package,
+            manifest,
+            dry_run,
+            no_deps,
+            relink_pass,
+            no_relink: _,
+            no_hooks,
+            allow_downgrade,
+            relink,
+        } => {
             cmd_install(
                 &cli,
                 package.as_deref(),
                 manifest.as_deref(),
                 *dry_run,
                 *no_deps,
-                *no_relink,
+                *relink_pass,
+                *no_hooks,
                 *allow_downgrade,
                 relink,
             )
@@ -543,7 +569,11 @@ fn uninstall_one(
     // hook failure must not leave the package half-present.
     if hooks && let (Some(hook), Some(t)) = (&before.pre_uninstall_vi, &roots.target) {
         let info = hook_action_info(&before.name, before.display_name.as_deref(), t, &before.files);
-        match run_hook_vi(conn, t, HOOK_TIMEOUT_SECS, Path::new(hook), &info) {
+        // Only ever the target's own LabVIEW here: `hooks` is false in a venv,
+        // whose instance has to be closed before its files can be removed.
+        match viserver::ensure_vi_server(t, std::time::Duration::from_secs(120))
+            .and_then(|port| run_hook_vi(conn, port, HOOK_TIMEOUT_SECS, Path::new(hook), &info))
+        {
             Ok(took) => println!("pre-uninstall ok ({:.1}s)", took.as_secs_f64()),
             Err(e) => println!("pre-uninstall FAILED: {e:#} — uninstalling anyway"),
         }
@@ -570,7 +600,9 @@ fn uninstall_one(
 
     if let (Some(tmp), Some(t)) = (&post, &roots.target) {
         let info = hook_action_info(&m.name, m.display_name.as_deref(), t, &m.files);
-        match run_hook_vi(conn, t, HOOK_TIMEOUT_SECS, tmp, &info) {
+        match viserver::ensure_vi_server(t, std::time::Duration::from_secs(120))
+            .and_then(|port| run_hook_vi(conn, port, HOOK_TIMEOUT_SECS, tmp, &info))
+        {
             Ok(took) => println!("post-uninstall ok ({:.1}s)", took.as_secs_f64()),
             Err(e) => println!("post-uninstall FAILED: {e:#}"),
         }
@@ -640,7 +672,8 @@ fn cmd_install(
     manifest: Option<&Path>,
     dry_run: bool,
     no_deps: bool,
-    no_relink: bool,
+    relink_pass: bool,
+    no_hooks: bool,
     allow_downgrade: bool,
     relink_args: &RelinkArgs,
 ) -> Result<()> {
@@ -883,15 +916,24 @@ fn cmd_install(
                 true => install::extract_hook(&roots, &e.name, &mut zip, "PreInstall.vi")?,
                 false => None,
             };
-            // Hooks act on the LabVIEW installation; a venv is not one.
-            if venv.is_none()
+            // PreInstall runs before the files land, so it needs a LabVIEW
+            // that is already up: the target's own. A venv's instance is
+            // started after the copy (so it sees the new addon), which is too
+            // late for a PreInstall — those stay reported, not run.
+            if !no_hooks
+                && venv.is_none()
                 && let (Some(vi), Some(t)) = (&pre, &roots.target)
             {
                 let planned: Vec<String> =
                     p.writes.iter().map(|w| w.dest.to_string_lossy().into_owned()).collect();
                 let info =
                     hook_action_info(&e.name, e.display_name.as_deref(), t, &planned);
-                match run_hook_vi(&mut hook_conn, t, relink_args.timeout, vi, &info) {
+                // A LabVIEW that will not come up is a failed hook, never a
+                // failed install: the files still go down either way.
+                match viserver::ensure_vi_server(t, std::time::Duration::from_secs(120))
+                    .and_then(|port| {
+                        run_hook_vi(&mut hook_conn, port, relink_args.timeout, vi, &info)
+                    }) {
                     Ok(took) => print!("[pre-install ok, {:.1}s] ", took.as_secs_f64()),
                     Err(err) => print!("[pre-install FAILED: {err:#}] "),
                 }
@@ -900,7 +942,10 @@ fn cmd_install(
             let m = install::apply(&roots, &spec, &mut zip, &p, pre.as_deref())?;
             println!("{} files", m.files.len());
             relink_work.push((e.name.clone(), m.relink_folders.iter().map(PathBuf::from).collect()));
-            if venv.is_none()
+            // A venv's hooks run too: the paths handed to them in `Files
+            // Installed` are the venv's own, so a hook that repairs what it
+            // shipped repairs it where it landed.
+            if !no_hooks
                 && let Some(hook) = &m.post_install_vi
             {
                 hook_runs.push((e.name.clone(), PathBuf::from(hook), m.files.clone()));
@@ -943,31 +988,50 @@ fn cmd_install(
         c.close();
     }
 
-    // Relink is the second phase, and only a real LabVIEW installation has a
-    // LabVIEW to do it: a scratch tree has no VI Server to talk to.
+    // Relinking and the PostInstall hooks are the second phase, and both need
+    // a LabVIEW: a scratch tree has none, so both are skipped there. They
+    // share one instance, because starting a venv's LabVIEW twice costs more
+    // than the whole relink pass it would be repeating.
     let folders: usize = relink_work.iter().map(|(_, f)| f.len()).sum();
     let target = store.target.clone();
-    if folders == 0 {
-        // Nothing with linker tables was installed — palettes and docs only.
-    } else if target.is_none() {
-        println!("\nrelink: skipped — a scratch tree has no LabVIEW to relink with");
-    } else if no_relink {
-        println!("\nrelink: skipped (--no-relink). These VIs still declare the paths their");
-        println!("      build machine wrote, so run `lvpm relink <package>` before using them.");
-    } else if dry_run {
-        println!("\nrelink: {folders} folder(s) across {} package(s):", relink_work.len());
-        for (pkg, dirs) in &relink_work {
-            for d in dirs {
-                println!("      {pkg}: {}", d.display());
+    let want_relink = relink_pass && folders > 0;
+
+    if folders > 0 && !relink_pass {
+        println!("\nrelink: skipped (the default — pass `--relink` to run it). Measured across");
+        println!("      10 packages, unrelinked VIs load and run; LabVIEW resolves what the");
+        println!("      linker tables miss by searching vi.lib.");
+    }
+
+    if dry_run {
+        if want_relink {
+            println!("\nrelink: {folders} folder(s) across {} package(s):", relink_work.len());
+            for (pkg, dirs) in &relink_work {
+                for d in dirs {
+                    println!("      {pkg}: {}", d.display());
+                }
             }
         }
-    } else {
+        if !hook_runs.is_empty() {
+            println!("\npost-install hooks that would run:");
+            for (pkg, vi, _) in &hook_runs {
+                println!("  {pkg}: {}", vi.display());
+            }
+        }
+    } else if !want_relink && hook_runs.is_empty() {
+        // Nothing to do in LabVIEW — do not start one.
+    } else if let Some(t) = &target {
         match &venv {
             // A LabVIEW of the venv's own, started after the files landed so
             // that it sees them, and closed again unless asked to stay.
             Some(v) => {
                 let inst = launch::ensure_instance(v, true, std::time::Duration::from_secs(180))?;
-                let outcome = run_relink(&store, inst.port, relink_args, &relink_work);
+                let outcome = match want_relink {
+                    true => run_relink(&store, inst.port, relink_args, &relink_work),
+                    false => Ok(()),
+                };
+                if !hook_runs.is_empty() {
+                    run_post_install_hooks(t, inst.port, relink_args, &hook_runs);
+                }
                 if relink_args.keep_open {
                     println!("\nleaving the venv LabVIEW open (--keep-open), VI Server on port {}", inst.port);
                 } else {
@@ -976,28 +1040,19 @@ fn cmd_install(
                 outcome?;
             }
             None => {
-                let t = target.as_ref().expect("a real target, checked above");
                 let port = viserver::ensure_vi_server(t, std::time::Duration::from_secs(120))?;
-                run_relink(&store, port, relink_args, &relink_work)?;
+                let outcome = match want_relink {
+                    true => run_relink(&store, port, relink_args, &relink_work),
+                    false => Ok(()),
+                };
+                if !hook_runs.is_empty() {
+                    run_post_install_hooks(t, port, relink_args, &hook_runs);
+                }
+                outcome?;
             }
         }
-    }
-
-    // PostInstall hooks, after relinking so the hook VI and whatever it loads
-    // are runnable. Failures are reported, not fatal: the files are installed.
-    if !hook_runs.is_empty() {
-        if dry_run {
-            println!("
-post-install hooks that would run:");
-            for (pkg, vi, _) in &hook_runs {
-                println!("  {pkg}: {}", vi.display());
-            }
-        } else if let Some(t) = &target {
-            run_post_install_hooks(t, relink_args, &hook_runs);
-        } else {
-            println!("
-post-install hooks: skipped — a scratch tree has no LabVIEW to run them");
-        }
+    } else {
+        println!("\nrelink and post-install hooks: skipped — a scratch tree has no LabVIEW");
     }
 
     // Palettes and menus last, after the hooks: a hook is free to write more
@@ -1034,9 +1089,16 @@ post-install hooks: skipped — a scratch tree has no LabVIEW to run them");
 /// Re-run PostInstall hooks for already-installed packages. The hook VI was
 /// extracted at install time; the package's files are not touched.
 fn cmd_run_hooks(cli: &Cli, package: Option<&str>, all: bool, timeout: u64) -> Result<()> {
-    let roots = roots_for(cli)?;
+    // Venv-aware the way the `vi-*` primitives are: a venv's hooks run in the
+    // venv's own LabVIEW, against the venv paths its manifest recorded.
+    let dest = destination(cli)?;
+    let roots = dest.store();
     let Some(t) = roots.target.clone() else {
         bail!("run-hooks needs a real LabVIEW target, not --prefix");
+    };
+    let venv = match &dest {
+        Destination::Venv(v) => Some(v.clone()),
+        _ => None,
     };
 
     let manifests = if all {
@@ -1054,6 +1116,16 @@ fn cmd_run_hooks(cli: &Cli, package: Option<&str>, all: bool, timeout: u64) -> R
     }
 
     let args = RelinkArgs { timeout, progress: None, keep_open: false };
+    // The venv's own instance, started if it is not up and left running — it
+    // is the user's to close, the way `vi-probe` leaves it.
+    let instance = match &venv {
+        Some(v) => Some(launch::ensure_instance(v, false, std::time::Duration::from_secs(180))?),
+        None => None,
+    };
+    let port = match &instance {
+        Some(i) => i.port,
+        None => viserver::ensure_vi_server(&t, std::time::Duration::from_secs(120))?,
+    };
     let mut conn: Option<viserver::Connection> = None;
     let mut failed = 0usize;
 
@@ -1068,7 +1140,7 @@ fn cmd_run_hooks(cli: &Cli, package: Option<&str>, all: bool, timeout: u64) -> R
         print!("{} ... ", m.name);
         std::io::stdout().flush().ok();
         let info = hook_action_info(&m.name, m.display_name.as_deref(), &t, &m.files);
-        match run_hook_vi(&mut conn, &t, args.timeout, &vi, &info) {
+        match run_hook_vi(&mut conn, port, args.timeout, &vi, &info) {
             Ok(took) => println!("ok ({:.1}s)", took.as_secs_f64()),
             Err(e) => {
                 println!("FAILED: {e:#}");
@@ -1081,7 +1153,16 @@ fn cmd_run_hooks(cli: &Cli, package: Option<&str>, all: bool, timeout: u64) -> R
     }
     // A hook that writes palette files needs the same refresh an install
     // gives it, otherwise re-running one by hand fixes nothing visible.
-    refresh_palettes_and_menus(&t, args.timeout);
+    // `refresh::run` drives the target's own LabVIEW, so in a venv it would
+    // refresh the wrong instance: a venv rebuilds its palettes at launch.
+    match &instance {
+        Some(i) => println!(
+            "\npalettes: not refreshed — the venv's LabVIEW (port {}) builds them at launch;\n      \
+             restart it with `lvpm launch` to pick up anything a hook dropped",
+            i.port
+        ),
+        None => refresh_palettes_and_menus(&t, args.timeout),
+    }
     if failed > 0 {
         bail!("{failed} hook(s) failed");
     }
@@ -1096,6 +1177,7 @@ fn cmd_run_hooks(cli: &Cli, package: Option<&str>, all: bool, timeout: u64) -> R
 /// does not fail the install — the package's files are already in place.
 fn run_post_install_hooks(
     target: &target::LvTarget,
+    port: u16,
     args: &RelinkArgs,
     hooks: &[(String, PathBuf, Vec<String>)],
 ) {
@@ -1106,7 +1188,7 @@ running {} post-install hook(s)", hooks.len());
         print!("  {pkg} ... ");
         std::io::stdout().flush().ok();
         let info = hook_action_info(pkg, None, target, files);
-        match run_hook_vi(&mut conn, target, args.timeout, vi, &info) {
+        match run_hook_vi(&mut conn, port, args.timeout, vi, &info) {
             Ok(took) => println!("ok ({:.1}s)", took.as_secs_f64()),
             Err(e) => println!("FAILED: {e:#}"),
         }
@@ -1180,16 +1262,20 @@ fn hook_action_info(
 }
 
 /// Run one hook VI to completion over a lazily opened, shared connection.
+///
+/// Takes a port rather than a target so a venv's own LabVIEW can run the hook:
+/// `ni_lib_advanced_http_client_api` rewrites its Call Library paths to the
+/// right DLL bitness, and without that its VIs are broken (error 1003) wherever
+/// they were installed.
 fn run_hook_vi(
     conn: &mut Option<viserver::Connection>,
-    target: &target::LvTarget,
+    port: u16,
     timeout_secs: u64,
     vi: &Path,
     action_info: &viserver::LvValue,
 ) -> Result<std::time::Duration> {
     let timeout = std::time::Duration::from_secs(timeout_secs);
     if conn.is_none() {
-        let port = viserver::ensure_vi_server(target, std::time::Duration::from_secs(120))?;
         *conn = Some(viserver::Connection::connect("127.0.0.1", port, timeout)?);
     }
     let c = conn.as_mut().unwrap();
