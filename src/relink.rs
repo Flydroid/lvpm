@@ -57,34 +57,23 @@ fn is_lv_item(p: &Path) -> bool {
         .is_some_and(|e| LV_EXTENSIONS.iter().any(|x| e.eq_ignore_ascii_case(x)))
 }
 
-/// Where `Relink Package.vi` is, so it can be handed to LabVIEW by path.
+const RELINK_VI_BYTES: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/src/lv-src/relink-package.vi"
+));
+
+/// Materialize the bundled relink VI so LabVIEW can open it by path.
 ///
-/// It ships with lvpm, so there is nothing to configure: `tools/` beside the
-/// executable for an installed build, `tools/` in the source tree for
-/// `cargo run`.
+/// The VI is embedded in the executable at compile time, so the installed
+/// executable does not depend on the source checkout or a companion file.
 pub fn locate_vi() -> Result<PathBuf> {
-    let mut tried: Vec<PathBuf> = Vec::new();
-
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent()
-    {
-        let p = dir.join("tools").join("Relink Package.vi");
-        if p.is_file() {
-            return Ok(p);
-        }
-        tried.push(p);
-    }
-    let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("tools").join("Relink Package.vi");
-    if p.is_file() {
-        return Ok(p);
-    }
-    tried.push(p);
-
-    bail!(
-        "cannot find Relink Package.vi — looked in:\n{}\nhint: --no-relink installs \
-         without relinking",
-        tried.iter().map(|p| format!("  {}", p.display())).collect::<Vec<_>>().join("\n")
-    );
+    let p = std::env::temp_dir().join(format!(
+        "lvpm-relink-package-{}.vi",
+        env!("CARGO_PKG_VERSION")
+    ));
+    std::fs::write(&p, RELINK_VI_BYTES)
+        .with_context(|| format!("materializing relink VI at {}", p.display()))?;
+    Ok(p)
 }
 
 /// Drop any folder an already-kept folder contains, since the walk covers it.
