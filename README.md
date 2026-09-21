@@ -30,12 +30,20 @@ running 15 post-install hook(s)
 
 ## Why
 
-VIPM is closed source. Everything it needs to install a package, however, is
-open: the package format is a zip, the repository indexes are plain-HTTP INI
-files, placing files is a directory copy, and the LabVIEW-side work — fixing
-VI links, running hook VIs — goes over VI Server, a documented TCP protocol.
-This exists to show that a LabVIEW package manager does not have to be a
-black box.
+LabVIEW packaging was open before it was closed. The **OpenG Package Tools**
+(2002–2005, LGPL) designed and documented all of it: the zip-with-a-`spec`
+package, the INI package directory, `Target Dir` tokens, file groups, replace
+modes, install-time script VIs, the installed-package database, dependency and
+conflict resolution, verification, and a per-project "development system
+configuration" you could export and re-import. VIPM descends from that design
+and is closed source; the design itself, its documents and its source are
+still public at <https://ogpm.sourceforge.net/>.
+
+lvpm goes back to that model and finishes it: same formats, so today's `.vip`
+and `.ogp` packages and the public `.ogpd` / `.vipr` directories work as-is,
+with the LabVIEW-side work — fixing VI links, running hook VIs — done over VI
+Server, a documented TCP protocol. [docs/ogpm-model.md](docs/ogpm-model.md) is
+the reference and the term-by-term map from OGPT to lvpm.
 
 ## What works
 
@@ -200,16 +208,20 @@ packages / 8766 files, installed, relinked in one deduplicated pass and its
 
 ## Package sources
 
-Two public, anonymous, plain-HTTP indexes, which between them cover
-approximately 98% of the packages listed on vipm.io:
+Two public, anonymous, plain-HTTP package directories, which between them
+cover approximately 98% of the packages listed on vipm.io:
 
 | Source | Packages |
 |---|---|
 | `download.ni.com/evaluation/labview/lvtn/vipm/index.vipr` | ~2,530 |
 | `www.jkisoft.com/packages/jkisoft.ogpd` | ~2,290 |
 
-Anything they lack can come from a folder of `.vip` files via `--repo` —
-a project's own `Dependencies` directory works as-is.
+Both are OGPM's Package Directory format — `[Package <name>-<version>]`
+sections with a `Package.URL` — unchanged since `openg.ogpd` in 2004; `.vipr`
+adds an MD5 per entry. Anything they lack can come from a folder of `.vip` /
+`.ogp` files via `--repo`, OGPM's "local repository": a directory of named
+packages is its own index. A project's own `Dependencies` directory works
+as-is.
 
 ## Known limitations
 
@@ -243,8 +255,8 @@ cargo test
 
 | Module | Responsibility |
 |---|---|
-| `index.rs` | Fetch and parse `index.vipr` / `.ogpd`, resolve names to versions, scan local repo folders |
-| `spec.rs` | The `spec` manifest inside a package (both `.vip` and legacy `.ogp` dialects) |
+| `index.rs` | Fetch and parse package directories (`.ogpd` / `index.vipr`), resolve names to versions, scan local repositories |
+| `spec.rs` | The `spec` manifest inside a package (the OGPT `.ogp` format and VIPM's `.vip` dialect) |
 | `project.rs` | The project manifest `lvpm.toml`: dependencies and their constraints, sources, minimum LabVIEW, lookup from a directory |
 | `target.rs` | LabVIEW detection, and where each `Target Dir` token points |
 | `install.rs` | Plan, unpack, extract hook VIs, record a manifest, uninstall |
@@ -253,7 +265,7 @@ cargo test
 | `relink.rs` | Drive the relink VI over installed folders; folder collapsing and retries |
 | `refresh.rs` | Rebuild palettes and menus through LabVIEW's own shipping VIs |
 | `viserver.rs` | The VI Server TCP protocol: connection, methods, flattened data |
-| `version.rs` | VIPM version ordering (not semver) |
+| `version.rs` | Package version ordering: OGPT `version-release`, VIPM's four-part form; not semver |
 
 ## Status
 
