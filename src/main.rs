@@ -874,7 +874,9 @@ fn cmd_install(
         .build()?;
 
     let mut total_writes = 0usize;
-    let mut hook_warnings: Vec<String> = Vec::new();
+    // Any package declared a hook this install did not run — decides whether
+    // the headless note below is owed. Each package already said which.
+    let mut hooks_unrun = false;
     // PostInstall hooks extracted during this run, executed only after the
     // relink pass has made them runnable.
     let mut hook_runs: Vec<(String, PathBuf, Vec<String>)> = Vec::new();
@@ -1028,10 +1030,10 @@ fn cmd_install(
             .collect();
         if !skipped.is_empty() {
             println!("      hooks not run: {}", hook_names(&skipped));
-            hook_warnings.push(format!("{}: {}", e.name, hook_names(&skipped)));
+            hooks_unrun = true;
         }
     }
-    if hooks_off_headless && venv.is_none() && !hook_warnings.is_empty() {
+    if hooks_off_headless && venv.is_none() && hooks_unrun {
         println!("\nhooks: skipped — LabVIEW runs headless here (LV_RTE_HEADLESS). Install hooks mostly add");
         println!("      palettes, menus or markers for the IDE; a package whose hook does real setup needs --hooks.");
     }
@@ -1127,12 +1129,6 @@ post-install hooks: skipped — a scratch tree has no LabVIEW to run them");
         println!("      has to be restarted to see what was just installed");
     }
 
-    if !hook_warnings.is_empty() {
-        println!("\nhooks not run, by package:");
-        for h in &hook_warnings {
-            println!("  {h}");
-        }
-    }
     Ok(())
 }
 
