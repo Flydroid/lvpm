@@ -173,18 +173,27 @@ workflow is the work.
   `lvpm.toml` (DQMH pinned at 7.1.2.1547 — `C:\Temp\GDevCon` was the
   specimen) and no venv; `cd` into it and run `lvpm install` with no flags.
   Expected: the headless banner naming the manifest's LabVIEW, 6 packages /
-  1668 files, 6 PreInstall and 6 PostInstall hooks `ok`, relink and palette
-  refresh both reported as skipped, `lvpm list` from the same directory
-  resolving the same way. About one minute.
+  1668 files, relink, hooks and palette refresh all reported as skipped,
+  `lvpm list` from the same directory resolving the same way and listing
+  the skipped hooks, and — the point — no `LabVIEW.exe` process at any time
+  (`tasklist`). Seconds. With `--hooks` the same install runs 6 PreInstall
+  and 6 PostInstall hooks `ok` in about a minute.
 - **Step 4 — the product compiles against it.** `LabVIEWCLI -OperationName
   MassCompile -DirectoryToCompile <project copy> -MassCompileLogFile <log>
   -Headless`; assert `MassCompile operation succeeded` and a log with no
   bad-VI lines. This is the claim behind "relink off in CI": the compile
   resolves the links of an unrelinked install itself. 47 s on the DQMH
   project.
-- **Step 5 — the container exits.** `LabVIEWCLI -OperationName
-  CloseLabVIEW -Headless` at the end of every job; a LabVIEW lvpm started
-  outlives lvpm and keeps a `docker run` alive otherwise. Assert the
+- **Step 5 — the tests run.** `LabVIEW.exe "<vi.lib>\addons\_JKI
+  Toolkits\Caraya\Caraya CLI.vi" -- -s <tests folder> -x <junit.xml>` —
+  Caraya's own entry point, which needs no LabVIEW to be running beforehand
+  (an existing instance swallows the open and the arguments with it — seen
+  once, when hooks had left one behind). Assert the JUnit file exists and
+  has no `<failure>`. Caraya's shipped `tests\asserts` folder serves until
+  the fixture project has tests of its own.
+- **Step 6 — the container exits.** Caraya CLI quits LabVIEW itself
+  (`-q` defaults on); a job that used `--hooks` or `--relink` ends with
+  `LabVIEWCLI -OperationName CloseLabVIEW -Headless` instead. Assert the
   container is gone.
 - **What to archive.** lvpm's stdout, the mass-compile log, and
   `%TEMP%\LabVIEW_64_*_headless_*_cur.txt` from inside the container — the
