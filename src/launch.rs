@@ -178,6 +178,7 @@ pub fn is_listening(port: u16) -> bool {
 
 /// Wait until the LabVIEW on `port` completes a VI Server handshake. Refused
 /// connections and error 63 both mean "not yet"; only success ends the wait.
+/// Shared by the venv path and `viserver::ensure_vi_server`.
 pub fn wait_ready(port: u16, budget: Duration) -> Result<()> {
     let started = Instant::now();
     let mut last = String::from("never connected");
@@ -191,9 +192,15 @@ pub fn wait_ready(port: u16, budget: Duration) -> Result<()> {
         }
         std::thread::sleep(Duration::from_secs(2));
     }
+    // A headless LabVIEW shows no dialogs; what would have been one is in
+    // its log instead.
+    let hint = if std::env::var_os("LV_RTE_HEADLESS").is_some() {
+        "(headless LabVIEW: see %TEMP%\\LabVIEW_*_headless_*_cur.txt for what went wrong)"
+    } else {
+        "(a dialog may be holding the IDE up — check its window)"
+    };
     bail!(
-        "the venv LabVIEW never answered VI Server on port {port} within {}s (last: {last})\n\
-         (a dialog may be holding the IDE up — check its window)",
+        "LabVIEW never answered VI Server on port {port} within {}s (last: {last})\n{hint}",
         budget.as_secs()
     );
 }

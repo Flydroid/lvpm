@@ -910,14 +910,17 @@ fn cmd_install(
         for miss in &p.missing_from_archive {
             println!("      ! listed in spec but absent from archive: {miss}");
         }
-        // PostInstall runs after the relink pass; everything else is still
-        // only reported.
+        // Warn only about hooks this install owes and will not run. Globally,
+        // PreInstall has run, PostInstall runs after the relink pass, and the
+        // uninstall hooks are extracted for `lvpm uninstall` to run — nothing
+        // to say. In a venv no hook runs at all, so every declared one is
+        // reported.
         let skipped: Vec<String> = spec
             .script_vis
             .iter()
             .filter(|(h, _)| {
-                (h != "PostInstall" || !hook_runs.iter().any(|(n, _, _)| n == &e.name))
-                    && (h != "PreInstall" || venv.is_some())
+                venv.is_some()
+                    || (h == "PostInstall" && !hook_runs.iter().any(|(n, _, _)| n == &e.name))
             })
             .map(|(h, v)| format!("{h}={v}"))
             .collect();
@@ -987,7 +990,7 @@ post-install hooks that would run:");
                 println!("  {pkg}: {}", vi.display());
             }
         } else if let Some(t) = &target {
-            run_post_install_hooks(t, relink_args, &hook_runs);
+            run_post_install_hooks(&store, t, relink_args, &hook_runs);
         } else {
             println!("
 post-install hooks: skipped — a scratch tree has no LabVIEW to run them");
@@ -1000,6 +1003,12 @@ post-install hooks: skipped — a scratch tree has no LabVIEW to run them");
     // is started fresh on launch and builds them from the overlay then.
     if total_writes > 0 && !dry_run && venv.is_none() {
         match &target {
+            // A headless LabVIEW (containers, CI) shows no palette to anyone,
+            // and rebuilding one would start LabVIEW for nothing when the
+            // install had no hooks to run.
+            Some(_) if std::env::var_os("LV_RTE_HEADLESS").is_some() => {
+                println!("\npalettes and menus: not refreshed — LabVIEW runs headless here (`lvpm refresh` if wanted)");
+            }
             Some(t) => refresh_palettes_and_menus(t, HOOK_TIMEOUT_SECS),
             // Nothing to refresh: a scratch tree's palettes belong to no IDE.
             None => {}
@@ -1089,6 +1098,7 @@ fn cmd_run_hooks(cli: &Cli, package: Option<&str>, all: bool, timeout: u64) -> R
 /// is open, run to completion, release. A failure is printed and counted but
 /// does not fail the install — the package's files are already in place.
 fn run_post_install_hooks(
+    roots: &Roots,
     target: &target::LvTarget,
     args: &RelinkArgs,
     hooks: &[(String, PathBuf, Vec<String>)],
@@ -1102,7 +1112,12 @@ running {} post-install hook(s)", hooks.len());
         let info = hook_action_info(pkg, None, target, files);
         match run_hook_vi(&mut conn, target, args.timeout, vi, &info) {
             Ok(took) => println!("ok ({:.1}s)", took.as_secs_f64()),
-            Err(e) => println!("FAILED: {e:#}"),
+            Err(e) => {
+                println!("FAILED: {e:#}");
+                // So `lvpm list` shows it; a failed hook is otherwise only in
+                // this scrollback.
+                let _ = install::mark_hook_skipped(roots, pkg, &format!("PostInstall={}", vi.display()));
+            }
         }
     }
     if let Some(c) = conn {
@@ -1187,8 +1202,11 @@ fn run_hook_vi(
         *conn = Some(viserver::Connection::connect("127.0.0.1", port, timeout)?);
     }
     let c = conn.as_mut().unwrap();
-    let r = c.open_vi_reference(vi)?;
+    // Timed from the open: loading the hook's hierarchy is most of what a hook
+    // costs (a DQMH pre-install reads as 0.0s otherwise), and it is work the
+    // hook caused, not the connection.
     let t0 = std::time::Instant::now();
+    let r = c.open_vi_reference(vi)?;
     // Best-effort: the standard hook template has this control, but a hook is
     // free not to — running it matters more than parameterising it.
     let _ = c.ctrl_val_set(r, "Variant", action_info.clone());
@@ -1234,10 +1252,9 @@ fn run_relink(
         match r.run(d) {
             Ok(o) => {
                 println!("{:.1}s", o.took.as_secs_f64());
-                // The VI's own account of what it saved. Worth printing
-                // even when it is empty: "walked 283, saved 0" and no log
-                // at all look identical from out here otherwise.
-                for line in o.log.lines().filter(|l| !l.trim().is_empty()) {
+                // The VI's own account of what it saved, as a count and
+                // folder-relative names — see `relink::summarize_log`.
+                for line in relink::summarize_log(&o.log, d) {
                     println!("        {line}");
                 }
             }

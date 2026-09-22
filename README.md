@@ -65,6 +65,9 @@ the reference and the term-by-term map from OGPT to lvpm.
   package's own `spec`
 - `--global` — install into the LabVIEW installation even from inside a
   project that has a venv (see below)
+- `--no-relink` — copy the files but skip the relink pass; the default on a
+  development machine is to relink, the CI case for skipping it is under
+  [CI in a container](#ci-in-a-container-docker)
 
 ### The project manifest
 
@@ -205,6 +208,59 @@ can load it.
 Verified end to end: a 46-dependency project manifest resolved to 48
 packages / 8766 files, installed, relinked in one deduplicated pass and its
 15 post-install hooks run, from a single `lvpm install --manifest`.
+
+### CI in a container (Docker)
+
+lvpm runs unchanged in NI's Windows container image
+(`nationalinstruments/labview:latest-windows`, LabVIEW 2026 and later): the
+image carries a real LabVIEW install, the registry keys `lvpm targets` reads,
+and a `LabVIEW.ini` with VI Server already enabled on port 3363. A CI job is
+the project's own manifest installed globally, then the LabVIEWCLI operation
+you want:
+
+```dockerfile
+FROM nationalinstruments/labview:latest-windows
+ENV LV_RTE_HEADLESS=1
+COPY lvpm.exe C:/lvpm/
+COPY . C:/src
+RUN C:\lvpm\lvpm.exe install --manifest C:\src\lvpm.toml --global --labview-version 2026 --no-relink
+RUN LabVIEWCLI -OperationName MassCompile -DirectoryToCompile C:\src -Headless
+```
+
+Three things make that work:
+
+- **`LV_RTE_HEADLESS=1`.** A container has no desktop, so a LabVIEW started
+  normally blocks forever on an activation prompt nobody can see. That
+  variable makes every LabVIEW start headless: no activation, no dialogs,
+  errors to `%TEMP%\LabVIEW_*_headless_*_cur.txt` instead. lvpm needs no
+  flag of its own — the LabVIEW it starts for hooks inherits the variable.
+  When it is set, lvpm also skips the palette and menu refresh, since a
+  headless LabVIEW shows a palette to no one (`lvpm refresh` still works).
+- **`--global`.** Only needed when an `lvpm.toml` sits at or above the
+  working directory: lvpm then refuses to install into the machine unless
+  told to, so a developer inside a project cannot do it by accident (see
+  venvs below). `--manifest <path>` alone does not trigger that check, so
+  with the default working directory the flag is redundant here — it is in
+  the example so a `WORKDIR C:/src` does not turn the install into a
+  refusal. In a throwaway container the machine *is* the sandbox.
+- **`--no-relink`.** Relinking stays the default on a development machine,
+  where unrelinked package VIs load fine but show up as modified and want
+  saving. Nothing in a container opens the IDE, and a mass compile or build
+  resolves the links itself as it loads — measured on a DQMH project: the
+  compile succeeded with zero bad VIs against an unrelinked DQMH install,
+  and skipping the pass saved about ten minutes. Leave the flag off if the
+  job is to *produce* relinked packages rather than consume them.
+
+Two container facts worth knowing. LabVIEW allows one mode at a time per
+machine, headless or IDE, so a headless job cannot share a host with an open
+IDE. And a LabVIEW that lvpm started outlives lvpm by design; in a container
+that keeps the container alive, so end a job with
+`LabVIEWCLI -OperationName CloseLabVIEW -Headless` (a `RUN` step exits on
+its own — this matters for `docker run`).
+
+NI's container license permits CI/CD, automated tests, mass compiles and
+builds, and forbids editing LabVIEW code in a container; whether a relink
+pass in CI counts as the latter is your reading of those terms, not lvpm's.
 
 ## Package sources
 

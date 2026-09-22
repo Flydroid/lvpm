@@ -100,6 +100,16 @@ records) and make it first-class:
 
 ## Packaging and distribution (from idea.txt)
 
+- **One-command install of a released `lvpm.exe`.** A GitHub Release per tag
+  carrying `lvpm.exe` (built by CI, so the relink VI embedded in it is the one
+  from that commit), and an `install.ps1` at a stable URL for
+  `irm https://…/install.ps1 | iex`: downloads the latest release (or
+  `-Version x.y.z`), verifies its checksum, drops it in `%LOCALAPPDATA%\lvpm\bin`,
+  adds that to the user `PATH`, prints `lvpm --version`. Motivation: a stale
+  `cargo install` in `~\.cargo\bin` was still looking for
+  `tools\Relink Package.vi` on disk long after it had been embedded — the
+  binary people run has to be the one that was released, not whatever tree
+  they built last. Same script serves a container image (`RUN irm … | iex`).
 - **An lvpm package format** built without LabVIEW: the source layout is
   already LVAddons-native; check VI versions before packaging; post-build
   steps (error handling, etc.).

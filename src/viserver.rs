@@ -86,10 +86,16 @@ pub fn is_listening(target: &LvTarget) -> bool {
 /// Starting an IDE is visible to whoever is at the machine — exactly what a
 /// package install needs (VIPM does the same), and never done silently: the
 /// launch is announced on stderr. The wait is generous because a cold LabVIEW
-/// start loads vi.lib before it listens; the port answering is what ends it.
+/// start loads vi.lib before it listens — and listening is not yet serving:
+/// the socket binds first and every handshake until initialisation is done
+/// fails with error 63. An interactive IDE closes that gap in well under two
+/// seconds; a headless LabVIEW 2026 in a container was measured at six to
+/// eight. So a completed handshake is what ends the wait, whether the LabVIEW
+/// found listening is ours or one something else started a moment ago.
 pub fn ensure_vi_server(target: &LvTarget, wait: Duration) -> Result<u16> {
     let port = check_vi_server(target)?;
     if is_listening(target) {
+        crate::launch::wait_ready(port, wait)?;
         return Ok(port);
     }
 
@@ -103,23 +109,9 @@ pub fn ensure_vi_server(target: &LvTarget, wait: Duration) -> Result<u16> {
     crate::launch::spawn_detached(&mut std::process::Command::new(&exe))
         .with_context(|| format!("launching {}", exe.display()))?;
 
-    let started = std::time::Instant::now();
-    while started.elapsed() < wait {
-        std::thread::sleep(Duration::from_secs(2));
-        if is_listening(target) {
-            // Listening is not yet serving: the socket opens a moment before
-            // the handshake works. One extra beat costs little and spares the
-            // first real connection a refused handshake.
-            std::thread::sleep(Duration::from_secs(2));
-            return Ok(port);
-        }
-    }
-    bail!(
-        "started {} but its VI Server never answered on port {port} within {}s\n\
-         (a dialog may be holding the IDE up — check its window)",
-        target.label(),
-        wait.as_secs()
-    );
+    crate::launch::wait_ready(port, wait)
+        .with_context(|| format!("started {} but could not reach it", target.label()))?;
+    Ok(port)
 }
 
 // Request opcodes.
