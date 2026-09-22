@@ -260,10 +260,6 @@ that keeps the container alive, so end a job with
 `LabVIEWCLI -OperationName CloseLabVIEW -Headless` (a `RUN` step exits on
 its own — this matters for `docker run`).
 
-NI's container license permits CI/CD, automated tests, mass compiles and
-builds, and forbids editing LabVIEW code in a container; whether a relink
-pass in CI counts as the latter is your reading of those terms, not lvpm's.
-
 ## Package sources
 
 Two public, anonymous, plain-HTTP package directories, which between them
