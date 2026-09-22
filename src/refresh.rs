@@ -6,9 +6,7 @@
 //! package with a menu-launch VI drops it under `<project>`. LabVIEW reads
 //! both trees when it starts and caches them, so until it is told otherwise a
 //! freshly installed package has no palette entry and no **Tools** entry — the
-//! install looks like it did nothing. VIPM refreshes both once at the very end
-//! of its own installs; the captures in `tools/README.md` show it as the last
-//! 10 seconds of a run.
+//! install looks like it did nothing. 
 //!
 //! Two Application-class methods do the work, `Palettes:Refresh` and
 //! `Menus:Refresh`, and **neither can be invoked from here.** They resolve

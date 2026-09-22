@@ -58,7 +58,7 @@ fn binding_path(dir: &Path) -> PathBuf {
 impl Venv {
     /// Roots for installing one package: its own addon under the venv.
     pub fn roots_for_pkg(&self, pkg: &str) -> Result<Roots> {
-        // The name becomes a directory LabVIEW enumerates; VIPM names conform.
+        // The name becomes a directory LabVIEW enumerates; 
         ensure!(
             !pkg.is_empty() && pkg.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)),
             "package name {pkg:?} cannot be an addon folder name"
@@ -83,26 +83,47 @@ impl Venv {
     }
 }
 
+/// What the nearest project at or above a directory amounts to.
+pub enum Found {
+    /// A repo with a created venv.
+    Venv(PathBuf),
+    /// A repo with an `lvpm.toml` and no venv — set up, or not, is the
+    /// caller's call: an error on a developer's machine, the machine itself
+    /// on a headless one.
+    ManifestOnly(PathBuf),
+    /// Not inside a project at all.
+    Nothing,
+}
+
+/// Walk up from `cwd` to the first venv or manifest, whichever comes first.
+pub fn probe(cwd: &Path) -> Found {
+    for dir in cwd.ancestors() {
+        if binding_path(&dir.join(DIR)).is_file() {
+            return Found::Venv(dir.to_path_buf());
+        }
+        if dir.join(project::FILE_NAME).is_file() {
+            return Found::ManifestOnly(dir.to_path_buf());
+        }
+    }
+    Found::Nothing
+}
+
 /// The repo whose venv a command run from `cwd` means: the nearest ancestor
 /// holding a created venv. An `lvpm.toml` with no venv beside it is an error
 /// rather than a fall-through to the installation — installing globally when
 /// the user believes they are installing into a project is the one outcome
 /// that must never happen quietly.
 pub fn locate(cwd: &Path) -> Result<Option<PathBuf>> {
-    for dir in cwd.ancestors() {
-        if binding_path(&dir.join(DIR)).is_file() {
-            return Ok(Some(dir.to_path_buf()));
-        }
-        if dir.join(project::FILE_NAME).is_file() {
-            bail!(
-                "{} has a {} but no venv\n\
-                 `lvpm venv create` makes one; --global installs into the LabVIEW installation itself",
-                dir.display(),
-                project::FILE_NAME
-            );
-        }
+    match probe(cwd) {
+        Found::Venv(dir) => Ok(Some(dir)),
+        Found::ManifestOnly(dir) => bail!(
+            "{} has a {} but no venv\n\
+             `lvpm venv create` makes one; --global installs into the LabVIEW installation itself",
+            dir.display(),
+            project::FILE_NAME
+        ),
+        Found::Nothing => Ok(None),
     }
-    Ok(None)
 }
 
 /// The venv a command means, if any: `--project` names the repo outright,
@@ -292,9 +313,11 @@ mod tests {
         assert!(locate(&deep).unwrap().is_none());
 
         // A manifest with no venv is a project that has not been set up —
-        // an error, never a silent fall-through to the global install.
+        // an error, never a silent fall-through to the global install. The
+        // probe underneath still names the repo, for the headless case.
         std::fs::write(repo.join(project::FILE_NAME), "[project]\n").unwrap();
         assert!(locate(&deep).is_err());
+        assert!(matches!(probe(&deep), Found::ManifestOnly(ref d) if d == &repo));
 
         // Once created, found from anywhere below.
         std::fs::create_dir_all(repo.join(DIR).join(".lvpm")).unwrap();

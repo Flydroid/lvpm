@@ -84,7 +84,7 @@ pub fn is_listening(target: &LvTarget) -> bool {
 /// starting the IDE when it is not, and return the port.
 ///
 /// Starting an IDE is visible to whoever is at the machine — exactly what a
-/// package install needs (VIPM does the same), and never done silently: the
+/// package install needs, and never done silently: the
 /// launch is announced on stderr. The wait is generous because a cold LabVIEW
 /// start loads vi.lib before it listens — and listening is not yet serving:
 /// the socket binds first and every handshake until initialisation is done
@@ -119,9 +119,8 @@ const OP_HELLO: u32 = 0;
 const OP_GET_VI_REF: u32 = 3;
 #[allow(dead_code)] // Call By Reference: needed once we invoke our own batch VIs.
 const OP_CALL: u32 = 4;
-/// `kTSAppDoMethodSend`. Not observed on the wire — VIPM never invokes an
-/// Application method through `Call`, so no capture contains one. Derived
-/// instead from the `kTS*` name table in `LabVIEW.exe`, which is dense and in
+/// `kTSAppDoMethodSend`
+/// Derived from the `kTS*` name table in `LabVIEW.exe`, which is dense and in
 /// enum order: reading it off at `0x31f9a30` gives ClientSaysHeaveno,
 /// AppAttrVector, VIAttrVector, GetVIRef, Call, **AppDoMethod**, VIDoMethod,
 /// ReleaseRef, ClientBye — and six independently known opcodes land on their
@@ -230,8 +229,7 @@ pub enum LvValue {
     /// A path, rendered with the platform's separator. LabVIEW flattens these
     /// as `PTH0` records, not as strings.
     Path(String),
-    /// A variant carrying its own value and named attributes — what VIPM
-    /// hands a hook VI's `Variant` control (Quiet Mode, Files Installed, ...).
+    /// A variant carrying its own value and named attributes.
     /// The inner value is usually unremarkable; the attributes are the point.
     Variant { value: Box<LvValue>, attrs: Vec<(String, LvValue)> },
     /// An array. `elem` is the element's type code, kept separately so an
