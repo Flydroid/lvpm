@@ -58,7 +58,7 @@ fn binding_path(dir: &Path) -> PathBuf {
 impl Venv {
     /// Roots for installing one package: its own addon under the venv.
     pub fn roots_for_pkg(&self, pkg: &str) -> Result<Roots> {
-        // The name becomes a directory LabVIEW enumerates; VIPM names conform.
+        // The name becomes a directory LabVIEW enumerates;
         ensure!(
             !pkg.is_empty() && pkg.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)),
             "package name {pkg:?} cannot be an addon folder name"

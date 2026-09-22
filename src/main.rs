@@ -192,8 +192,16 @@ enum Cmd {
     /// Open a VI reference over VI Server and release it. Proves the transport
     /// against a running LabVIEW without changing anything on disk.
     ViProbe {
-        /// VI to open a reference to.
-        vi: PathBuf,
+        /// VIs to open references to. Several are opened one after another
+        /// on one connection and held until the last one is in, so a shared
+        /// hierarchy loads once; a VI that fails to open is reported and the
+        /// rest still run.
+        #[arg(required = true)]
+        vi: Vec<PathBuf>,
+        /// Seconds to wait for LabVIEW to answer a single open. A subsystem
+        /// top-level VI pulling a large class hierarchy can need minutes.
+        #[arg(long, default_value_t = 30)]
+        timeout: u64,
     },
     /// Load a VI over VI Server and save it back — the relink primitive.
     ViSave {
@@ -237,8 +245,13 @@ enum Cmd {
     /// was already open on it needs a fresh launch to see newly installed
     /// packages.
     Launch {
-        /// A `.lvproj` to open in the started LabVIEW.
+        /// A `.lvproj` (or any LabVIEW file) to open in the started LabVIEW.
         lvproj: Option<PathBuf>,
+        /// Extra `KEY=VALUE` written into the venv's labview.ini for this
+        /// launch, e.g. `--ini NIER=True --ini DPrintfLogging=True` for a
+        /// crash report and verbose log. Repeatable.
+        #[arg(long = "ini", value_name = "KEY=VALUE")]
+        ini_keys: Vec<String>,
     },
     /// Rewrite the linker tables of installed VIs the way a LabVIEW relink
     /// would, without LabVIEW: owner paths, relative paths and build-machine
@@ -314,13 +327,13 @@ fn main() -> Result<()> {
         Cmd::Refresh { timeout } => cmd_refresh(&cli, *timeout),
         Cmd::Uninstall { package, all } => cmd_uninstall(&cli, package.as_deref(), *all),
         Cmd::AppProbe { ids } => cmd_app_probe(&cli, ids),
-        Cmd::ViProbe { vi } => cmd_vi_probe(&cli, vi),
+        Cmd::ViProbe { vi, timeout } => cmd_vi_probe(&cli, vi, *timeout),
         Cmd::ViSave { vi } => cmd_vi_save(&cli, vi),
         Cmd::ViRun { vi, sets, gets, get_all, timeout, watch, poll_ms, done } => {
             cmd_vi_run(&cli, vi, sets, gets, *get_all, *timeout, watch.as_deref(), *poll_ms, done)
         }
         Cmd::Venv(sub) => cmd_venv(&cli, sub),
-        Cmd::Launch { lvproj } => cmd_launch(&cli, lvproj.as_deref()),
+        Cmd::Launch { lvproj, ini_keys } => cmd_launch(&cli, lvproj.as_deref(), ini_keys),
         Cmd::Linkfix { tree, dry_run, verbose } => cmd_linkfix(&cli, tree.as_deref(), *dry_run, *verbose),
         Cmd::List => cmd_list(&cli),
         Cmd::Search { query } => cmd_search(&cli, query),
@@ -1076,8 +1089,7 @@ fn cmd_install(
     }
 
     // Palettes and menus last, after the hooks: a hook is free to write more
-    // palette files of its own (the common VIPM template repairs palette
-    // menus), and this has to see what it wrote. Not for a venv: its LabVIEW
+    // palette files of its own, and this has to see what it wrote. Not for a venv: its LabVIEW
     // is started fresh on launch and builds them from the overlay then.
     if total_writes > 0 && !dry_run && venv.is_none() {
         match &target {
@@ -1191,9 +1203,7 @@ fn cmd_run_hooks(cli: &Cli, package: Option<&str>, all: bool, timeout: u64) -> R
 
 /// Run each package's extracted `PostInstall.vi`, one at a time, and report.
 ///
-/// The hook VIs VIPM ships are self-contained: no controls, everything derived
-/// from App properties (the common template repairs palette menus). So the run
-/// is open, run to completion, release. A failure is printed and counted but
+/// The run is open, run to completion, release. A failure is printed and counted but
 /// does not fail the install — the package's files are already in place.
 fn run_post_install_hooks(
     target: &target::LvTarget,
@@ -1486,10 +1496,18 @@ fn cmd_venv(cli: &Cli, sub: &VenvCmd) -> Result<()> {
 
 /// Start LabVIEW on the venv. No relinking here — that happened at install —
 /// and no waiting: the IDE is the user's from the moment it appears.
-fn cmd_launch(cli: &Cli, lvproj: Option<&Path>) -> Result<()> {
+fn cmd_launch(cli: &Cli, lvproj: Option<&Path>, ini_keys: &[String]) -> Result<()> {
     let Destination::Venv(v) = destination(cli)? else {
         bail!("launch needs a venv: run it inside a project that has one, or pass --project <DIR>");
     };
+    let extra = ini_keys
+        .iter()
+        .map(|kv| {
+            let (k, val) = kv.split_once('=').with_context(|| format!("--ini {kv}: expected KEY=VALUE"))?;
+            ensure!(!k.trim().is_empty(), "--ini {kv}: empty key");
+            Ok((k.trim().to_string(), val.trim().to_string()))
+        })
+        .collect::<Result<Vec<_>>>()?;
     if launch::is_listening(v.port) {
         bail!(
             "a LabVIEW is already running on this venv (VI Server port {}) — open the project from \
@@ -1505,10 +1523,13 @@ fn cmd_launch(cli: &Cli, lvproj: Option<&Path>) -> Result<()> {
         }
         None => None,
     };
-    let ini = launch::write_ini(&v)?;
+    let ini = launch::write_ini(&v, &extra)?;
     launch::spawn(&v, &ini, lvproj.as_deref())?;
     println!("started {} on {}", v.target.label(), v.dir.display());
     println!("  ini            {}", ini.display());
+    for (k, val) in &extra {
+        println!("  ini override   {k}={val}");
+    }
     println!("  VI Server port {}", v.port);
     if let Some(p) = &lvproj {
         println!("  opening        {}", p.display());
@@ -1644,26 +1665,48 @@ fn vi_server_for(cli: &Cli, what: &str) -> Result<(String, u16)> {
     }
 }
 
-fn cmd_vi_probe(cli: &Cli, vi: &std::path::Path) -> Result<()> {
+fn cmd_vi_probe(cli: &Cli, vis: &[PathBuf], timeout: u64) -> Result<()> {
     let (label, port) = vi_server_for(cli, "vi-probe")?;
     println!("connecting to {label} on port {port}");
 
     let started = std::time::Instant::now();
-    let mut conn =
-        viserver::Connection::connect("127.0.0.1", port, std::time::Duration::from_secs(30))?;
+    let mut conn = viserver::Connection::connect(
+        "127.0.0.1",
+        port,
+        std::time::Duration::from_secs(timeout),
+    )?;
     println!("  handshake ok            {:>7.0} ms", started.elapsed().as_secs_f64() * 1000.0);
 
-    let t0 = std::time::Instant::now();
-    let vi_ref = conn.open_vi_reference(vi)?;
-    println!(
-        "  opened {} -> {vi_ref}  {:>7.0} ms",
-        vi.file_name().unwrap_or_default().to_string_lossy(),
-        t0.elapsed().as_secs_f64() * 1000.0
-    );
+    // Every reference stays open until the last VI is in: a hierarchy the
+    // VIs share is then loaded once instead of once per VI.
+    let mut held = Vec::new();
+    let mut failed = 0usize;
+    for vi in vis {
+        let name = vi.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        let t0 = std::time::Instant::now();
+        match conn.open_vi_reference(vi) {
+            Ok(vi_ref) => {
+                println!("  opened {name} -> {vi_ref}  {:>7.0} ms", t0.elapsed().as_secs_f64() * 1000.0);
+                held.push(vi_ref);
+            }
+            Err(e) => {
+                failed += 1;
+                println!("  FAILED {name}: {e:#}  {:>7.0} ms", t0.elapsed().as_secs_f64() * 1000.0);
+                // A transport error leaves the connection unusable; a VI Server
+                // error code does not.
+                if viserver::error_code(&e).is_none() {
+                    bail!("connection lost while opening {}", vi.display());
+                }
+            }
+        }
+    }
 
-    conn.release(vi_ref)?;
+    for vi_ref in held {
+        conn.release(vi_ref)?;
+    }
     conn.close();
     println!("  released + closed       {:>7.0} ms total", started.elapsed().as_secs_f64() * 1000.0);
+    ensure!(failed == 0, "{failed} of {} VIs did not open", vis.len());
     Ok(())
 }
 

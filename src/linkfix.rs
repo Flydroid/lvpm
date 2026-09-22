@@ -790,17 +790,27 @@ impl Tree {
     }
 }
 
+/// The URLs of a library file's MEMBERS. A `.lvclass` also lists its parent
+/// class (`Type="Parent"`) and its friends (`Type="Friended Library"`) as
+/// `<Item>`s with URLs; taking those as members made `Cursor.lvclass` the
+/// owner of `Panel Registry.lvclass` and produced qualified names LabVIEW
+/// could not match — it then searched by name, found several, and crashed.
 fn urls(xml: &str) -> Vec<String> {
+    const MEMBER_TYPES: &[&str] = &["VI", "LVClass", "Library", "Class Private Data", "Control"];
     let mut out = Vec::new();
     let mut rest = xml;
-    while let Some(i) = rest.find("URL=\"") {
-        let s = &rest[i + 5..];
-        match s.find('"') {
-            Some(j) => {
-                out.push(s[..j].to_string());
-                rest = &s[j..];
-            }
-            None => break,
+    while let Some(i) = rest.find("<Item ") {
+        let Some(end) = rest[i..].find('>') else { break };
+        let item = &rest[i..i + end];
+        rest = &rest[i + end..];
+        let attr = |name: &str| -> Option<&str> {
+            let k = format!("{name}=\"");
+            let s = &item[item.find(&k)? + k.len()..];
+            Some(&s[..s.find('"')?])
+        };
+        let (Some(ty), Some(url)) = (attr("Type"), attr("URL")) else { continue };
+        if MEMBER_TYPES.contains(&ty) {
+            out.push(url.to_string());
         }
     }
     out
@@ -1032,9 +1042,23 @@ pub fn fix_vi(bytes: &[u8], vi_logical: &str, tree: &Tree) -> Result<(Option<Vec
             let mut want = prefix.clone();
             want.push(last);
             if want != o.qual {
-                // Only ever add: a packaged VI that already carries a longer
-                // qualifier knows something this tree does not.
-                if o.qual.len() <= want.len() {
+                // A packaged VI may carry a longer chain than this tree can
+                // derive when the outer libraries live outside the tree, so a
+                // longer chain is kept — but only while every extra element
+                // names a library this tree has never seen. An extra element
+                // the tree does know is provably wrong: a friend or parent
+                // class taken for the owner, or the target's own class put in
+                // front of a self link. LabVIEW cannot match such a name and
+                // goes searching, and an earlier linkfix build wrote exactly
+                // that (measured 2026-09-18, mgi_lib_monitored_actor: 362
+                // chains, crash on project load). Rewriting them makes a
+                // re-run heal a tree instead of preserving the damage.
+                let keep = o.qual.len() > want.len()
+                    && o.qual.ends_with(&want)
+                    && o.qual[..o.qual.len() - want.len()]
+                        .iter()
+                        .all(|n| !tree.by_name.contains_key(&lower(&String::from_utf8_lossy(n))));
+                if !keep {
                     o.qual = want;
                     changes.qualifier += 1;
                     sec_changed = true;

@@ -65,7 +65,10 @@ pub fn override_keys(text: &str, keys: &[(&str, &str)]) -> String {
 /// Write the ini a LabVIEW on this venv starts with: the target's own, with
 /// the venv mounted and VI Server moved to the venv's port. Regenerated every
 /// time, so the target's current settings are always what is inherited.
-pub fn write_ini(v: &Venv) -> Result<PathBuf> {
+/// `extra` are further `key=value` overrides, applied after lvpm's own so a
+/// caller can add debug switches (`NIER=True`, `DPrintfLogging=True`, ...)
+/// without touching the installation's LabVIEW.ini.
+pub fn write_ini(v: &Venv, extra: &[(String, String)]) -> Result<PathBuf> {
     let src = v.target.path.join("LabVIEW.ini");
     let text = std::fs::read_to_string(&src).with_context(|| format!("reading {}", src.display()))?;
 
@@ -74,18 +77,17 @@ pub fn write_ini(v: &Venv) -> Result<PathBuf> {
     let raw = v.dir.to_string_lossy().replace('/', "\\");
     let location = if raw.contains(' ') { format!("\"{raw}\"") } else { raw };
     let port = v.port.to_string();
-    let out = override_keys(
-        &text,
-        &[
-            ("LVAddons.AdditionalLocations", &location),
-            ("server.tcp.enabled", "True"),
-            ("server.tcp.port", &port),
-            // `-pref` with its own ini already yields a separate process; this
-            // keeps a second launch from being forwarded to the primary IDE,
-            // which would open the project with no venv at all.
-            ("AllowMultipleInstances", "True"),
-        ],
-    );
+    let mut keys: Vec<(&str, &str)> = vec![
+        ("LVAddons.AdditionalLocations", &location),
+        ("server.tcp.enabled", "True"),
+        ("server.tcp.port", &port),
+        // `-pref` with its own ini already yields a separate process; this
+        // keeps a second launch from being forwarded to the primary IDE,
+        // which would open the project with no venv at all.
+        ("AllowMultipleInstances", "True"),
+    ];
+    keys.extend(extra.iter().map(|(k, val)| (k.as_str(), val.as_str())));
+    let out = override_keys(&text, &keys);
 
     let dest = v.ini_path();
     std::fs::create_dir_all(dest.parent().expect("ini path has a parent"))?;
@@ -221,7 +223,7 @@ pub fn ensure_instance(v: &Venv, fresh: bool, wait: Duration) -> Result<Instance
         }
         return Ok(Instance { port: v.port, child: None });
     }
-    let ini = write_ini(v)?;
+    let ini = write_ini(v, &[])?;
     eprintln!(
         "starting {} on the venv and waiting for VI Server on port {}...",
         v.target.label(),
