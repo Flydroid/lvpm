@@ -49,7 +49,7 @@ irm https://raw.githubusercontent.com/Flydroid/lvpm/main/scripts/install.ps1 -Ou
 .\install.ps1
 ```
 
-Options: `-Version v0.1.0-alpha.1` pins a release, `-InstallDir <DIR>` and
+Options: `-Version v0.2.0` pins a release, `-InstallDir <DIR>` and
 `-NoPath` control where it goes, `-Sha256 <hash>` adds a hash you obtained
 elsewhere as a further check, `-Stable` skips pre-releases. If PowerShell
 refuses to run scripts:

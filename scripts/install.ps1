@@ -22,7 +22,7 @@
     removed), so SmartScreen and LabVIEW do not treat them as untrusted.
 
 .PARAMETER Version
-    Release tag to install, e.g. v0.1.0-alpha.1. Default: the newest release.
+    Release tag to install, e.g. v0.2.0. Default: the newest release.
 
 .PARAMETER Stable
     Skip pre-releases when picking the newest release. By default
@@ -45,7 +45,7 @@
     .\install.ps1
 
 .EXAMPLE
-    .\install.ps1 -Version v0.1.0-alpha.1 -InstallDir C:\tools\lvpm -NoPath
+    .\install.ps1 -Version v0.2.0 -InstallDir C:\tools\lvpm -NoPath
 
 .EXAMPLE
     .\install.ps1 -Sha256 1a86ce51553b705566cc1071a8e1c7cd8acc2df664d2e14b6ea46beba3799931
