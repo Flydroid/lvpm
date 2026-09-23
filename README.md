@@ -45,9 +45,16 @@ files and adds the folder to your user `PATH`. It runs nothing it downloaded
 except `lvpm --version` at the end. Read it first; it is short.
 
 ```powershell
+cd $env:TEMP
 irm https://raw.githubusercontent.com/Flydroid/lvpm/main/scripts/install.ps1 -OutFile install.ps1
 .\install.ps1
 ```
+
+The `cd` matters: the script is written to the current directory, and an
+elevated PowerShell starts in `C:\WINDOWS\system32`, which you cannot write
+to. `Access to the path 'C:\WINDOWS\system32\install.ps1' is denied` means
+you are in a directory that is not yours, not that anything is wrong with
+the download. lvpm installs per-user and needs no elevation.
 
 Options: `-Version v0.2.0` pins a release, `-InstallDir <DIR>` and
 `-NoPath` control where it goes, `-Sha256 <hash>` adds a hash you obtained
