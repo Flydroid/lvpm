@@ -1,6 +1,6 @@
 [package]
 name = "lvpm"
-version = "0.1.0-alpha.1"
+version = "0.2.0"
 edition = "2024"
 description = "Open-source package manager for LabVIEW (.vip) packages"
 license = "MIT OR Apache-2.0"
