@@ -37,7 +37,7 @@ wins over the overlay; `LVAddons.AdditionalLocations` needs LabVIEW 2024 Q1.
   launch returns promptly; palettes build from the overlay (DQMH's showed
   without its PostInstall hook).
 
-### Iteration 2
+### Iteration 2 - WIP
 
 - **Install hooks in a venv.** Today none run. `ni_lib_advanced_http_client_api`
   genuinely needs its PostInstall (it repairs Call Library paths); DQMH did
@@ -65,7 +65,7 @@ wins over the overlay; `LVAddons.AdditionalLocations` needs LabVIEW 2024 Q1.
   (`examples`, `project`, `help`, `templates`, `Targets`): a GUI check.
 - Ask NI: is there a way to make a running LabVIEW re-read an addon location?
 
-## The manifest and the lockfile
+## The manifest and the lockfile - WIP
 
 `lvpm.toml` (done: exact pins, `>=` floors, `*`, `[sources]` with relative
 folders and `defaults = false`, `labview` minimum, `[nipm.dependencies]`).
