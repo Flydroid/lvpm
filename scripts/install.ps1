@@ -184,7 +184,8 @@ try {
     }
 
     Write-Host ''
-    & (Join-Path $InstallDir 'lvpm.exe') --version
+    $installed = (& (Join-Path $InstallDir 'lvpm.exe') --version) -join ' '
+    Write-Host "$installed installed"
 }
 finally {
     Remove-Item -Path $work -Recurse -Force -ErrorAction SilentlyContinue
