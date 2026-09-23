@@ -89,7 +89,12 @@ function Invoke-GitHubApi([string]$Path) {
 if ($Version) {
     $release = Invoke-GitHubApi "releases/tags/$Version"
 } else {
-    $release = Invoke-GitHubApi 'releases?per_page=30' |
+    # Invoke-RestMethod hands a JSON array back as one object rather than as a
+    # stream of them, so piping the call straight into Where-Object tests the
+    # whole array instead of each release and matches nothing. Bind it to a
+    # variable first; piping a variable enumerates it.
+    $releases = Invoke-GitHubApi 'releases?per_page=30'
+    $release = @($releases) |
         Where-Object { -not $_.draft -and (-not $Stable -or -not $_.prerelease) } |
         Select-Object -First 1
     if (-not $release) {
