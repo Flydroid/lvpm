@@ -459,10 +459,23 @@ fn array_desc(elem: u16, dims: u16, name: Option<&str>) -> Result<Vec<u8>> {
     Ok(td)
 }
 
-/// The flattening version stamped on variants we produce: LabVIEW 2026
-/// release, in LabVIEW's own major/minor/fix/stage encoding. LabVIEW accepts
-/// data flattened by older versions, so a fixed stamp is safe.
-const FLATTEN_VERSION: u32 = 0x2600_8000;
+/// The flattening version stamped on variants we produce: LabVIEW 2020
+/// release, in LabVIEW's own major/minor/fix/stage encoding.
+///
+/// **The tolerance only runs one way.** A server unflattens data stamped at or
+/// below its own version and rejects anything above it with error 122, "the
+/// resource you are attempting to open was created in a more recent version of
+/// LabVIEW". This stamp was 2026, which made every `Ctrl Val.Set` fail on a
+/// 2025 server — and since relinking a folder begins by setting the folder
+/// control, every package failed to relink there while 2026 worked.
+///
+/// Note this is the opposite of the *handshake* stamp, which a server tolerates
+/// in both directions: a 2025 server accepts a client claiming 2026 with
+/// `err=0`. Only flattened data is checked against the server's own version.
+///
+/// 2020 is the oldest LabVIEW lvpm supports and the version the bundled relink
+/// VI is saved for, so it is the safe floor for every target.
+const FLATTEN_VERSION: u32 = 0x2000_8000;
 
 /// After a type-descriptor table comes a u16 pair selecting the table entry
 /// the data conforms to. Single-descriptor containers always carry this value.
@@ -1353,6 +1366,49 @@ impl std::fmt::Display for VIRef {
 mod tests {
     use super::*;
 
+    /// The stamp every capture in this module carries, because they were all
+    /// taken against a LabVIEW 2026 server.
+    const CAPTURED_STAMP: [u8; 4] = [0x26, 0x00, 0x80, 0x00];
+
+    /// Restamp a capture of *our own* request with the version we actually
+    /// send.
+    ///
+    /// We deliberately flatten at [`FLATTEN_VERSION`] (2020) rather than at the
+    /// 2026 the captures show, because a server rejects data stamped newer than
+    /// itself with error 122. Swapping the version word keeps every other byte
+    /// of the capture compared exactly, so the layout stays pinned while the
+    /// stamp is free to be the compatible one.
+    ///
+    /// Only for expectations about what we *send*. Captures of what LabVIEW
+    /// sent us are decoder inputs and stay verbatim.
+    fn as_we_stamp_it(capture: &[u8]) -> Vec<u8> {
+        let to = FLATTEN_VERSION.to_be_bytes();
+        let mut out = capture.to_vec();
+        let mut i = 0;
+        while i + 4 <= out.len() {
+            if out[i..i + 4] == CAPTURED_STAMP {
+                out[i..i + 4].copy_from_slice(&to);
+                i += 4;
+            } else {
+                i += 1;
+            }
+        }
+        out
+    }
+
+    /// The stamp we send must be one no supported server can call too new.
+    #[test]
+    fn flatten_stamp_is_not_newer_than_the_oldest_supported_labview() {
+        assert_eq!(
+            FLATTEN_VERSION, 0x2000_8000,
+            "LabVIEW 2020, the oldest lvpm supports; a newer stamp fails on an older server with 122"
+        );
+        assert!(
+            FLATTEN_VERSION < u32::from_be_bytes(CAPTURED_STAMP),
+            "the stamp must not exceed the servers we have captured against"
+        );
+    }
+
     /// The address at +28 is the only field of the handshake that varies, and
     /// LabVIEW rejects a wrong one with 1379 — so pin where it lands and that
     /// nothing else moves with it.
@@ -1486,7 +1542,7 @@ mod tests {
         ];
         for (control, value, want) in cases {
             let got = CtrlValSet { control, value }.encode_args().unwrap();
-            assert_eq!(got, want, "Ctrl Val.Set {control:?}");
+            assert_eq!(got, as_we_stamp_it(want), "Ctrl Val.Set {control:?}");
         }
     }
 
@@ -1501,7 +1557,7 @@ mod tests {
         // u32-length string, no attributes, plus one byte of block padding.
         let tail: &[u8] = b"\x26\x00\x80\x00\x00\x00\x00\x01\x00\x08\x00\x30\xff\xff\xff\xff\
 \x00\x01\x00\x00\x00\x00\x00\x05Hello\x00\x00\x00\x00\x00";
-        assert!(got.ends_with(tail), "variant layout drifted");
+        assert!(got.ends_with(&as_we_stamp_it(tail)), "variant layout drifted");
     }
 
     /// The exact variant LabVIEW returned for a two-element string array, from
@@ -1602,7 +1658,7 @@ mod tests {
 \x00\x01\x00\x01\
 \x00\x00\x00\x02\x00\x00\x00\x07Hello 1\x00\x00\x00\x07Hello 2\
 \x00\x00\x00\x00";
-        assert_eq!(variant(&v).unwrap(), want);
+        assert_eq!(variant(&v).unwrap(), as_we_stamp_it(want));
         assert_eq!(Reader::new(&variant(&v).unwrap()).variant().unwrap(), v);
     }
 
@@ -1628,6 +1684,7 @@ mod tests {
             want.extend_from_slice(b"\x00\x01\x00\x01\x00\x00\x00\x01");
             want.extend_from_slice(data);
             want.extend_from_slice(b"\x00\x00\x00\x00");
+            let want = as_we_stamp_it(&want);
             assert_eq!(variant(&v).unwrap(), want, "{elem} array");
             assert_eq!(Reader::new(&want).variant().unwrap(), v, "{elem} array round trip");
         }
@@ -1696,7 +1753,9 @@ mod tests {
         // Identical but for the element descriptor's name, which LabVIEW
         // ignores: ours is the unnamed `00 05 00 03 00`, theirs the named
         // `00 0d 40 03 00 07 "Numeric" 00`.
-        assert_eq!(&ours[..8], &theirs[..8], "version and descriptor count");
+        // The version word is deliberately ours, not theirs — see FLATTEN_VERSION.
+        assert_eq!(&ours[..4], &FLATTEN_VERSION.to_be_bytes(), "our flatten stamp");
+        assert_eq!(&ours[4..8], &theirs[4..8], "descriptor count");
         assert_eq!(&ours[8..13], b"\x00\x05\x00\x03\x00", "unnamed I32 element");
         assert_eq!(&ours[13..], &theirs[21..], "array descriptor, root and data");
 
