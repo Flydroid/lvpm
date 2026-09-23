@@ -98,8 +98,7 @@ pub fn md5_hex(bytes: &[u8]) -> String {
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// VIPM names its own cache files after the uppercase MD5 of the source URL.
-/// Mirroring that is convenient and makes the two caches comparable.
+/// Cache file name: the uppercase MD5 of the source URL.
 fn cache_name(url: &str) -> String {
     md5_hex(url.as_bytes()).to_uppercase()
 }
