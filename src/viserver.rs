@@ -83,12 +83,19 @@ pub fn is_listening(target: &LvTarget) -> bool {
 /// Make sure the target's LabVIEW is running and its VI Server answers,
 /// starting the IDE when it is not, and return the port.
 ///
-/// Starting an IDE is visible to whoever is at the machine, and never done silently: the
+/// Starting an IDE is visible to whoever is at the machine — exactly what a
+/// package install needs, and never done silently: the
 /// launch is announced on stderr. The wait is generous because a cold LabVIEW
-/// start loads vi.lib before it listens; the port answering is what ends it.
+/// start loads vi.lib before it listens — and listening is not yet serving:
+/// the socket binds first and every handshake until initialisation is done
+/// fails with error 63. An interactive IDE closes that gap in well under two
+/// seconds; a headless LabVIEW 2026 in a container was measured at six to
+/// eight. So a completed handshake is what ends the wait, whether the LabVIEW
+/// found listening is ours or one something else started a moment ago.
 pub fn ensure_vi_server(target: &LvTarget, wait: Duration) -> Result<u16> {
     let port = check_vi_server(target)?;
     if is_listening(target) {
+        crate::launch::wait_ready(port, wait)?;
         return Ok(port);
     }
 
@@ -102,23 +109,9 @@ pub fn ensure_vi_server(target: &LvTarget, wait: Duration) -> Result<u16> {
     crate::launch::spawn_detached(&mut std::process::Command::new(&exe))
         .with_context(|| format!("launching {}", exe.display()))?;
 
-    let started = std::time::Instant::now();
-    while started.elapsed() < wait {
-        std::thread::sleep(Duration::from_secs(2));
-        if is_listening(target) {
-            // Listening is not yet serving: the socket opens a moment before
-            // the handshake works. One extra beat costs little and spares the
-            // first real connection a refused handshake.
-            std::thread::sleep(Duration::from_secs(2));
-            return Ok(port);
-        }
-    }
-    bail!(
-        "started {} but its VI Server never answered on port {port} within {}s\n\
-         (a dialog may be holding the IDE up — check its window)",
-        target.label(),
-        wait.as_secs()
-    );
+    crate::launch::wait_ready(port, wait)
+        .with_context(|| format!("started {} but could not reach it", target.label()))?;
+    Ok(port)
 }
 
 // Request opcodes.
@@ -126,8 +119,8 @@ const OP_HELLO: u32 = 0;
 const OP_GET_VI_REF: u32 = 3;
 #[allow(dead_code)] // Call By Reference: needed once we invoke our own batch VIs.
 const OP_CALL: u32 = 4;
-/// `kTSAppDoMethodSend`. Not observed on the wire. Derived
-/// instead from the `kTS*` name table in `LabVIEW.exe`, which is dense and in
+/// `kTSAppDoMethodSend`
+/// Derived from the `kTS*` name table in `LabVIEW.exe`, which is dense and in
 /// enum order: reading it off at `0x31f9a30` gives ClientSaysHeaveno,
 /// AppAttrVector, VIAttrVector, GetVIRef, Call, **AppDoMethod**, VIDoMethod,
 /// ReleaseRef, ClientBye — and six independently known opcodes land on their
@@ -236,7 +229,7 @@ pub enum LvValue {
     /// A path, rendered with the platform's separator. LabVIEW flattens these
     /// as `PTH0` records, not as strings.
     Path(String),
-    /// A variant carrying its own value and named attributes
+    /// A variant carrying its own value and named attributes.
     /// The inner value is usually unremarkable; the attributes are the point.
     Variant { value: Box<LvValue>, attrs: Vec<(String, LvValue)> },
     /// An array. `elem` is the element's type code, kept separately so an
@@ -466,10 +459,23 @@ fn array_desc(elem: u16, dims: u16, name: Option<&str>) -> Result<Vec<u8>> {
     Ok(td)
 }
 
-/// The flattening version stamped on variants we produce: LabVIEW 2026
-/// release, in LabVIEW's own major/minor/fix/stage encoding. LabVIEW accepts
-/// data flattened by older versions, so a fixed stamp is safe.
-const FLATTEN_VERSION: u32 = 0x2600_8000;
+/// The flattening version stamped on variants we produce: LabVIEW 2020
+/// release, in LabVIEW's own major/minor/fix/stage encoding.
+///
+/// **The tolerance only runs one way.** A server unflattens data stamped at or
+/// below its own version and rejects anything above it with error 122, "the
+/// resource you are attempting to open was created in a more recent version of
+/// LabVIEW". This stamp was 2026, which made every `Ctrl Val.Set` fail on a
+/// 2025 server — and since relinking a folder begins by setting the folder
+/// control, every package failed to relink there while 2026 worked.
+///
+/// Note this is the opposite of the *handshake* stamp, which a server tolerates
+/// in both directions: a 2025 server accepts a client claiming 2026 with
+/// `err=0`. Only flattened data is checked against the server's own version.
+///
+/// 2020 is the oldest LabVIEW lvpm supports and the version the bundled relink
+/// VI is saved for, so it is the safe floor for every target.
+const FLATTEN_VERSION: u32 = 0x2000_8000;
 
 /// After a type-descriptor table comes a u16 pair selecting the table entry
 /// the data conforms to. Single-descriptor containers always carry this value.
@@ -1360,6 +1366,49 @@ impl std::fmt::Display for VIRef {
 mod tests {
     use super::*;
 
+    /// The stamp every capture in this module carries, because they were all
+    /// taken against a LabVIEW 2026 server.
+    const CAPTURED_STAMP: [u8; 4] = [0x26, 0x00, 0x80, 0x00];
+
+    /// Restamp a capture of *our own* request with the version we actually
+    /// send.
+    ///
+    /// We deliberately flatten at [`FLATTEN_VERSION`] (2020) rather than at the
+    /// 2026 the captures show, because a server rejects data stamped newer than
+    /// itself with error 122. Swapping the version word keeps every other byte
+    /// of the capture compared exactly, so the layout stays pinned while the
+    /// stamp is free to be the compatible one.
+    ///
+    /// Only for expectations about what we *send*. Captures of what LabVIEW
+    /// sent us are decoder inputs and stay verbatim.
+    fn as_we_stamp_it(capture: &[u8]) -> Vec<u8> {
+        let to = FLATTEN_VERSION.to_be_bytes();
+        let mut out = capture.to_vec();
+        let mut i = 0;
+        while i + 4 <= out.len() {
+            if out[i..i + 4] == CAPTURED_STAMP {
+                out[i..i + 4].copy_from_slice(&to);
+                i += 4;
+            } else {
+                i += 1;
+            }
+        }
+        out
+    }
+
+    /// The stamp we send must be one no supported server can call too new.
+    #[test]
+    fn flatten_stamp_is_not_newer_than_the_oldest_supported_labview() {
+        assert_eq!(
+            FLATTEN_VERSION, 0x2000_8000,
+            "LabVIEW 2020, the oldest lvpm supports; a newer stamp fails on an older server with 122"
+        );
+        assert!(
+            FLATTEN_VERSION < u32::from_be_bytes(CAPTURED_STAMP),
+            "the stamp must not exceed the servers we have captured against"
+        );
+    }
+
     /// The address at +28 is the only field of the handshake that varies, and
     /// LabVIEW rejects a wrong one with 1379 — so pin where it lands and that
     /// nothing else moves with it.
@@ -1493,7 +1542,7 @@ mod tests {
         ];
         for (control, value, want) in cases {
             let got = CtrlValSet { control, value }.encode_args().unwrap();
-            assert_eq!(got, want, "Ctrl Val.Set {control:?}");
+            assert_eq!(got, as_we_stamp_it(want), "Ctrl Val.Set {control:?}");
         }
     }
 
@@ -1508,7 +1557,7 @@ mod tests {
         // u32-length string, no attributes, plus one byte of block padding.
         let tail: &[u8] = b"\x26\x00\x80\x00\x00\x00\x00\x01\x00\x08\x00\x30\xff\xff\xff\xff\
 \x00\x01\x00\x00\x00\x00\x00\x05Hello\x00\x00\x00\x00\x00";
-        assert!(got.ends_with(tail), "variant layout drifted");
+        assert!(got.ends_with(&as_we_stamp_it(tail)), "variant layout drifted");
     }
 
     /// The exact variant LabVIEW returned for a two-element string array, from
@@ -1609,7 +1658,7 @@ mod tests {
 \x00\x01\x00\x01\
 \x00\x00\x00\x02\x00\x00\x00\x07Hello 1\x00\x00\x00\x07Hello 2\
 \x00\x00\x00\x00";
-        assert_eq!(variant(&v).unwrap(), want);
+        assert_eq!(variant(&v).unwrap(), as_we_stamp_it(want));
         assert_eq!(Reader::new(&variant(&v).unwrap()).variant().unwrap(), v);
     }
 
@@ -1635,6 +1684,7 @@ mod tests {
             want.extend_from_slice(b"\x00\x01\x00\x01\x00\x00\x00\x01");
             want.extend_from_slice(data);
             want.extend_from_slice(b"\x00\x00\x00\x00");
+            let want = as_we_stamp_it(&want);
             assert_eq!(variant(&v).unwrap(), want, "{elem} array");
             assert_eq!(Reader::new(&want).variant().unwrap(), v, "{elem} array round trip");
         }
@@ -1703,7 +1753,9 @@ mod tests {
         // Identical but for the element descriptor's name, which LabVIEW
         // ignores: ours is the unnamed `00 05 00 03 00`, theirs the named
         // `00 0d 40 03 00 07 "Numeric" 00`.
-        assert_eq!(&ours[..8], &theirs[..8], "version and descriptor count");
+        // The version word is deliberately ours, not theirs — see FLATTEN_VERSION.
+        assert_eq!(&ours[..4], &FLATTEN_VERSION.to_be_bytes(), "our flatten stamp");
+        assert_eq!(&ours[4..8], &theirs[4..8], "descriptor count");
         assert_eq!(&ours[8..13], b"\x00\x05\x00\x03\x00", "unnamed I32 element");
         assert_eq!(&ours[13..], &theirs[21..], "array descriptor, root and data");
 

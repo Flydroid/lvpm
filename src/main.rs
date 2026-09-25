@@ -1,11 +1,12 @@
-//! lvpm — a proof-of-concept open-source package manager for LabVIEW packages.
+//! lvpm — an open-source package manager for LabVIEW packages.
 //!
 //! Resolves `.vip` packages by name from the public VIPM indexes, downloads
 //! them, verifies the MD5 and unpacks them — either into a scratch tree or
 //! into a real LabVIEW installation. No VIPM. Copying the files is followed by
 //! the packages' install hooks, run over VI Server — in a venv's own LabVIEW
 //! when a venv is in effect, since the paths a hook is handed are the venv's
-//! own. `--no-hooks` turns that off.
+//! own. `--no-hooks` turns that off; headless (`LV_RTE_HEADLESS`) they are
+//! off unless `--hooks` asks for them.
 //!
 //! The relink pass (see [`relink`]) is opt-in, behind `--relink`: measured
 //! across 10 packages saved between LabVIEW 8.6 and 2020, unrelinked VIs load
@@ -122,8 +123,13 @@ enum Cmd {
         #[arg(long, hide = true)]
         no_relink: bool,
         /// Copy the files but skip the packages' install hooks.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "run_hooks")]
         no_hooks: bool,
+        /// Run the packages' install hooks even where LabVIEW runs headless
+        /// (LV_RTE_HEADLESS is set), where they are otherwise skipped: most
+        /// hooks add palettes, menus or markers for an IDE nobody opens there.
+        #[arg(long = "hooks")]
+        run_hooks: bool,
         /// Replace an installed package with an older version. Without this,
         /// resolving to something older than what is installed is refused.
         #[arg(long)]
@@ -305,21 +311,21 @@ fn main() -> Result<()> {
             relink_pass,
             no_relink: _,
             no_hooks,
+            run_hooks,
             allow_downgrade,
             relink,
-        } => {
-            cmd_install(
-                &cli,
-                package.as_deref(),
-                manifest.as_deref(),
-                *dry_run,
-                *no_deps,
-                *relink_pass,
-                *no_hooks,
-                *allow_downgrade,
-                relink,
-            )
-        }
+        } => cmd_install(
+            &cli,
+            package.as_deref(),
+            manifest.as_deref(),
+            *dry_run,
+            *no_deps,
+            *relink_pass,
+            *no_hooks,
+            *run_hooks,
+            *allow_downgrade,
+            relink,
+        ),
         Cmd::Relink { package, all, relink } => cmd_relink(&cli, package.as_deref(), *all, relink),
         Cmd::RunHooks { package, all, timeout } => {
             cmd_run_hooks(&cli, package.as_deref(), *all, *timeout)
@@ -381,10 +387,41 @@ impl Destination {
     }
 }
 
+/// Is LabVIEW headless on this machine? `LV_RTE_HEADLESS` is NI's own global
+/// override (LabVIEW 2026+): every LabVIEW start becomes non-interactive —
+/// no activation, no dialogs. Nobody sets it on a workstation, since the IDE
+/// would stop opening, so its presence says "automation machine, no developer
+/// present" more reliably than any flag of ours could. lvpm reads it for the
+/// three decisions that hinge on exactly that: whether a manifest without a
+/// venv means the machine, whether to relink, whether to rebuild palettes.
+fn headless() -> bool {
+    std::env::var_os("LV_RTE_HEADLESS").is_some()
+}
+
+/// Hook entries for printing. The manifest keeps them as `Name=path`, where
+/// the path is wherever the VI sat on the package's build machine
+/// (`<OS Boot Volume Root>\ci-builds\...`) — meaningless here, and long. Only
+/// the name says anything to a reader.
+fn hook_names<I, S>(hooks: I) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    hooks
+        .into_iter()
+        .map(|h| h.as_ref().split_once('=').map_or_else(|| h.as_ref().to_string(), |(n, _)| n.to_string()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Settle where a command's packages live, the way cargo settles which crate
 /// you mean: `--prefix` and `--global` say so outright; otherwise a venv at or
 /// above the current directory wins, and only when there is none does
 /// `--labview-version` mean the installation itself.
+///
+/// A manifest with no venv is refused — except on a headless machine, where
+/// the refusal would protect a developer who is not there: a container's
+/// LabVIEW *is* the sandbox, so `lvpm install` in the project means it.
 fn destination(cli: &Cli) -> Result<Destination> {
     let explicit = |r: Roots| match r.target.is_some() {
         true => Destination::Global(r),
@@ -394,11 +431,52 @@ fn destination(cli: &Cli) -> Result<Destination> {
         return roots_for(cli).map(explicit);
     }
     let cwd = std::env::current_dir()?;
+    if headless()
+        && cli.project.is_none()
+        && let venv::Found::ManifestOnly(repo) = venv::probe(&cwd)
+    {
+        return headless_roots(cli, &repo).map(Destination::Global);
+    }
     if let Some(v) = venv::find(cli.project.as_deref(), &cwd)? {
         eprintln!("{}", v.banner());
         return Ok(Destination::Venv(v));
     }
     roots_for(cli).map(explicit)
+}
+
+/// The installation a headless `lvpm install` in a venv-less project means:
+/// `--labview-version` if given, else the manifest's `labview` — the same
+/// choice `lvpm venv create` makes, with the same rule that the manifest's
+/// version is a minimum a newer LabVIEW may satisfy and an older one may not.
+fn headless_roots(cli: &Cli, repo: &Path) -> Result<Roots> {
+    let manifest_path = repo.join(project::FILE_NAME);
+    let proj = project::read(&manifest_path)?;
+    let min_lv = proj.labview.as_deref();
+    let want = cli.labview_version.as_deref().or(min_lv).ok_or_else(|| {
+        anyhow::anyhow!(
+            "which LabVIEW? pass --labview-version <YYYY>, or set labview in {}\n\
+             hint: `lvpm targets` lists what is installed",
+            manifest_path.display()
+        )
+    })?;
+    let targets = target::detect()?;
+    ensure!(!targets.is_empty(), "no LabVIEW installations detected");
+    let t = target::select(&targets, want)?;
+    if let Some(min) = min_lv.and_then(|v| v.trim().parse::<u32>().ok())
+        && t.year() < min
+    {
+        bail!(
+            "{} is older than the project's labview = {min} — a newer LabVIEW may stand in for \
+             the project's minimum, not an older one",
+            t.label()
+        );
+    }
+    eprintln!(
+        "headless (LV_RTE_HEADLESS): {} has a manifest and no venv — using {} itself",
+        repo.display(),
+        t.label()
+    );
+    Ok(Roots::labview(&t))
 }
 
 /// Everything lvpm keeps for itself between runs — caches and the VIs it
@@ -516,7 +594,7 @@ fn cmd_list(cli: &Cli) -> Result<()> {
             if m.skipped_hooks.is_empty() {
                 String::new()
             } else {
-                format!("  (hooks skipped: {})", m.skipped_hooks.join(", "))
+                format!("  (hooks skipped: {})", hook_names(&m.skipped_hooks))
             }
         );
     }
@@ -659,10 +737,7 @@ fn uninstall_one(
             true => "installed before uninstall hooks existed",
             false => "hooks do not run in a venv",
         };
-        println!(
-            "note: declared but not run ({why}): {}",
-            unrun.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
-        );
+        println!("note: declared but not run ({why}): {}", hook_names(unrun));
     }
     Ok(removed)
 }
@@ -707,9 +782,15 @@ fn cmd_install(
     no_deps: bool,
     relink_pass: bool,
     no_hooks: bool,
+    run_hooks: bool,
     allow_downgrade: bool,
     relink_args: &RelinkArgs,
 ) -> Result<()> {
+    // Headless (containers, CI): the hooks measured (DQMH's six) write a
+    // marker file and add a palette entry — IDE furniture. Skipping them means
+    // a headless install never starts LabVIEW at all. A package whose hook
+    // does real setup gets `--hooks`; the caveat is documented with the flag.
+    let hooks_off_headless = headless() && !run_hooks;
     let dest = destination(cli)?;
     // The store is one per destination; in a venv each package gets roots of
     // its own inside the loop, because every package there is its own addon.
@@ -719,6 +800,9 @@ fn cmd_install(
         _ => None,
     };
     let lv_gate = store.target.as_ref().map(|t| t.version);
+    // A venv's hooks run in the venv's own LabVIEW; a headless machine has no
+    // one to see what they set up.
+    let hooks_on = !no_hooks && !hooks_off_headless;
 
     // The project this install belongs to, if any: its `[sources]` count even
     // when a single package is named. Inside a project a bare `lvpm install`
@@ -846,7 +930,9 @@ fn cmd_install(
         .build()?;
 
     let mut total_writes = 0usize;
-    let mut hook_warnings: Vec<String> = Vec::new();
+    // Any package declared a hook this install did not run — decides whether
+    // the headless note below is owed. Each package already said which.
+    let mut hooks_unrun = false;
     // PostInstall hooks extracted during this run, executed only after the
     // relink pass has made them runnable.
     let mut hook_runs: Vec<(String, PathBuf, Vec<String>)> = Vec::new();
@@ -953,7 +1039,7 @@ fn cmd_install(
             // that is already up: the target's own. A venv's instance is
             // started after the copy (so it sees the new addon), which is too
             // late for a PreInstall — those stay reported, not run.
-            if !no_hooks
+            if hooks_on
                 && venv.is_none()
                 && let (Some(vi), Some(t)) = (&pre, &roots.target)
             {
@@ -978,10 +1064,15 @@ fn cmd_install(
             // A venv's hooks run too: the paths handed to them in `Files
             // Installed` are the venv's own, so a hook that repairs what it
             // shipped repairs it where it landed.
-            if !no_hooks
-                && let Some(hook) = &m.post_install_vi
-            {
+            if hooks_on && let Some(hook) = &m.post_install_vi {
                 hook_runs.push((e.name.clone(), PathBuf::from(hook), m.files.clone()));
+            }
+            // The manifest assumes a global install runs its hooks; headless
+            // did not, and `lvpm list` should say so.
+            if hooks_off_headless && venv.is_none() {
+                for (h, v) in &spec.script_vis {
+                    install::mark_hook_skipped(&roots, &e.name, &format!("{h}={v}"))?;
+                }
             }
         }
 
@@ -994,21 +1085,30 @@ fn cmd_install(
         for miss in &p.missing_from_archive {
             println!("      ! listed in spec but absent from archive: {miss}");
         }
-        // PostInstall runs after the relink pass; everything else is still
-        // only reported.
+        // Warn only about hooks this install owes and will not run. Globally,
+        // PreInstall has run, PostInstall runs after the relink pass, and the
+        // uninstall hooks are extracted for `lvpm uninstall` to run — nothing
+        // to say. In a venv PreInstall cannot run (see above); with
+        // `--no-hooks`, or headless, no hook runs at all, so every declared
+        // one is reported.
         let skipped: Vec<String> = spec
             .script_vis
             .iter()
             .filter(|(h, _)| {
-                (h != "PostInstall" || !hook_runs.iter().any(|(n, _, _)| n == &e.name))
-                    && (h != "PreInstall" || venv.is_some())
+                !hooks_on
+                    || (h == "PreInstall" && venv.is_some())
+                    || (h == "PostInstall" && !hook_runs.iter().any(|(n, _, _)| n == &e.name))
             })
             .map(|(h, v)| format!("{h}={v}"))
             .collect();
         if !skipped.is_empty() {
-            println!("      warning: declares {} — NOT run", skipped.join(", "));
-            hook_warnings.push(format!("{}: {}", e.name, skipped.join(", ")));
+            println!("      hooks not run: {}", hook_names(&skipped));
+            hooks_unrun = true;
         }
+    }
+    if hooks_off_headless && venv.is_none() && hooks_unrun {
+        println!("\nhooks: skipped — LabVIEW runs headless here (LV_RTE_HEADLESS). Install hooks mostly add");
+        println!("      palettes, menus or markers for the IDE; a package whose hook does real setup needs --hooks.");
     }
 
     if dry_run {
@@ -1063,7 +1163,7 @@ fn cmd_install(
                     false => Ok(()),
                 };
                 if !hook_runs.is_empty() {
-                    run_post_install_hooks(t, inst.port, relink_args, &hook_runs);
+                    run_post_install_hooks(None, t, inst.port, relink_args, &hook_runs);
                 }
                 if relink_args.keep_open {
                     println!("\nleaving the venv LabVIEW open (--keep-open), VI Server on port {}", inst.port);
@@ -1079,7 +1179,7 @@ fn cmd_install(
                     false => Ok(()),
                 };
                 if !hook_runs.is_empty() {
-                    run_post_install_hooks(t, port, relink_args, &hook_runs);
+                    run_post_install_hooks(Some(&store), t, port, relink_args, &hook_runs);
                 }
                 outcome?;
             }
@@ -1093,6 +1193,12 @@ fn cmd_install(
     // is started fresh on launch and builds them from the overlay then.
     if total_writes > 0 && !dry_run && venv.is_none() {
         match &target {
+            // A headless LabVIEW (containers, CI) shows no palette to anyone,
+            // and rebuilding one would start LabVIEW for nothing when the
+            // install had no hooks to run.
+            Some(_) if headless() => {
+                println!("\npalettes and menus: not refreshed — LabVIEW runs headless here (`lvpm refresh` if wanted)");
+            }
             Some(t) => refresh_palettes_and_menus(t, HOOK_TIMEOUT_SECS),
             // Nothing to refresh: a scratch tree's palettes belong to no IDE.
             None => {}
@@ -1103,12 +1209,6 @@ fn cmd_install(
         println!("      has to be restarted to see what was just installed");
     }
 
-    if !hook_warnings.is_empty() {
-        println!("\npackages with script VIs that were skipped:");
-        for h in &hook_warnings {
-            println!("  {h}");
-        }
-    }
     Ok(())
 }
 
@@ -1203,9 +1303,11 @@ fn cmd_run_hooks(cli: &Cli, package: Option<&str>, all: bool, timeout: u64) -> R
 
 /// Run each package's extracted `PostInstall.vi`, one at a time, and report.
 ///
-/// The run is open, run to completion, release. A failure is printed and counted but
-/// does not fail the install — the package's files are already in place.
+/// The run is open, run to completion, release. A failure is printed but does
+/// not fail the install — the package's files are already in place. With
+/// `roots` (a global install) it is also recorded for `lvpm list`.
 fn run_post_install_hooks(
+    roots: Option<&Roots>,
     target: &target::LvTarget,
     port: u16,
     args: &RelinkArgs,
@@ -1220,7 +1322,14 @@ running {} post-install hook(s)", hooks.len());
         let info = hook_action_info(pkg, None, target, files);
         match run_hook_vi(&mut conn, port, args.timeout, vi, &info) {
             Ok(took) => println!("ok ({:.1}s)", took.as_secs_f64()),
-            Err(e) => println!("FAILED: {e:#}"),
+            Err(e) => {
+                println!("FAILED: {e:#}");
+                // So `lvpm list` shows it; a failed hook is otherwise only in
+                // this scrollback.
+                if let Some(roots) = roots {
+                    let _ = install::mark_hook_skipped(roots, pkg, &format!("PostInstall={}", vi.display()));
+                }
+            }
         }
     }
     if let Some(c) = conn {
@@ -1258,8 +1367,7 @@ fn refresh_palettes_and_menus(target: &target::LvTarget, timeout_secs: u64) {
     }
 }
 
-/// The action-info variant VIPM hands a hook VI's `Variant` control. The
-/// attribute names are the ones hook VIs read back with Get Variant Attribute
+/// The attribute names are the ones hook VIs read back with Get Variant Attribute
 /// (observed in the DQMH hooks); `Quiet Mode` is the one that matters — FALSE
 /// is what turns a hook error into a modal dialog parked over the install.
 fn hook_action_info(
@@ -1309,8 +1417,11 @@ fn run_hook_vi(
         *conn = Some(viserver::Connection::connect("127.0.0.1", port, timeout)?);
     }
     let c = conn.as_mut().unwrap();
-    let r = c.open_vi_reference(vi)?;
+    // Timed from the open: loading the hook's hierarchy is most of what a hook
+    // costs (a DQMH pre-install reads as 0.0s otherwise), and it is work the
+    // hook caused, not the connection.
     let t0 = std::time::Instant::now();
+    let r = c.open_vi_reference(vi)?;
     // Best-effort: the standard hook template has this control, but a hook is
     // free not to — running it matters more than parameterising it.
     let _ = c.ctrl_val_set(r, "Variant", action_info.clone());
@@ -1356,10 +1467,9 @@ fn run_relink(
         match r.run(d) {
             Ok(o) => {
                 println!("{:.1}s", o.took.as_secs_f64());
-                // The VI's own account of what it saved. Worth printing
-                // even when it is empty: "walked 283, saved 0" and no log
-                // at all look identical from out here otherwise.
-                for line in o.log.lines().filter(|l| !l.trim().is_empty()) {
+                // The VI's own account of what it saved, as a count and
+                // folder-relative names — see `relink::summarize_log`.
+                for line in relink::summarize_log(&o.log, d) {
                     println!("        {line}");
                 }
             }

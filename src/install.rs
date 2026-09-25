@@ -22,7 +22,12 @@ pub struct Manifest {
     pub target: String,
     /// Absolute paths, forward-slashed.
     pub files: Vec<String>,
-    /// Hooks the package declares that we did not run.
+    /// Hooks the package declares that were not run: every one in a venv
+    /// (hooks act on a LabVIEW installation, and a venv is not one), and
+    /// globally only a PostInstall that failed. Uninstall hooks are not
+    /// skipped, they are pending — `lvpm uninstall` runs them from the
+    /// extracted copies below. Manifests older than that extraction list them
+    /// here, which is how uninstall knows it has nothing to run.
     pub skipped_hooks: Vec<String>,
     /// Whether the relink pass has run over these files since they were
     /// copied. Defaults to false so manifests written before relinking existed
@@ -278,7 +283,13 @@ pub fn apply(
             None => format!("scratch {}", roots.application.display()),
         },
         files: written,
-        skipped_hooks: spec.script_vis.iter().map(|(h, v)| format!("{h}={v}")).collect(),
+        skipped_hooks: match roots.venv() {
+            Some(_) => spec.script_vis.iter().map(|(h, v)| format!("{h}={v}")).collect(),
+            // PreInstall has run by now, PostInstall runs after the relink
+            // pass and is recorded here only if it fails, and the uninstall
+            // hooks wait for `lvpm uninstall` in the copies extracted above.
+            None => Vec::new(),
+        },
         relinked: false,
         post_install_vi: post_install_vi.map(|p| p.to_string_lossy().replace('\\', "/")),
         pre_install_vi: pre_install_vi.map(|p| p.to_string_lossy().replace('\\', "/")),
@@ -338,6 +349,17 @@ pub fn mark_relinked(roots: &Roots, name: &str) -> Result<()> {
         return Ok(());
     }
     m.relinked = true;
+    write_manifest(roots, &m)
+}
+
+/// Record a hook this install declared and did not run, so `lvpm list` says
+/// so. `hook` is the `Name=path` form the manifest already uses.
+pub fn mark_hook_skipped(roots: &Roots, name: &str, hook: &str) -> Result<()> {
+    let mut m = read_manifest(roots, name)?;
+    if m.skipped_hooks.iter().any(|h| h == hook) {
+        return Ok(());
+    }
+    m.skipped_hooks.push(hook.to_string());
     write_manifest(roots, &m)
 }
 

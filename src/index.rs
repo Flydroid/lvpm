@@ -1,8 +1,11 @@
-//! Package indexes.
+//! Package directories.
 //!
-//! Both public VIPM feeds are plain-HTTP INI files with one `[Package <id>]`
-//! section per package/version. Everything a resolver needs is in there:
-//! download path, MD5, LabVIEW gate and dependency ranges.
+//! OGPM's "Package Directory" (`.ogpd`, see docs/ogpm-model.md): a plain-HTTP
+//! INI file with one `[Package <id>]` section per package/version carrying a
+//! `Package.URL` relative to the directory itself. `.vipr` is the same format
+//! plus `Package.MD5`, a LabVIEW gate and dependency ranges — everything a
+//! resolver needs. A local directory of named packages is a "local repository"
+//! and indexes itself from each package's own spec.
 
 use crate::version::{split_id, Version};
 use anyhow::{Context, Result};
@@ -95,8 +98,7 @@ pub fn md5_hex(bytes: &[u8]) -> String {
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// VIPM names its own cache files after the uppercase MD5 of the source URL.
-/// Mirroring that is convenient and makes the two caches comparable.
+/// Cache file name: the uppercase MD5 of the source URL.
 fn cache_name(url: &str) -> String {
     md5_hex(url.as_bytes()).to_uppercase()
 }

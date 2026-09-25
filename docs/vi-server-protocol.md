@@ -113,6 +113,28 @@ A 2026 server accepted clients stamping themselves 2025 and 2015, both `err=0`.
 The stamp is tolerated downward, so one old stamp may serve several targets
 rather than needing a table per release.
 
+The *handshake* stamp is in fact tolerated in **both** directions: a 2025 server
+accepts a client claiming 2026 with `err=0`, measured against a live v25.3. So
+the handshake is not where a version mismatch shows up.
+
+### Flattened data is checked, and only downward
+
+The same encoding stamps every flattened variant, and there the tolerance runs
+one way only. A server unflattens data stamped at or below its own version and
+rejects anything above it with **122** — *"the resource you are attempting to
+open was created in a more recent version of LabVIEW and is incompatible with
+this version"*.
+
+This is easy to misread as a broken VI rather than a wire problem, because the
+error names a *resource*. Measured against a live 2025 server: a `Ctrl Val.Set`
+carrying a variant stamped `0x26008000` fails with 122 while the identical call
+stamped `0x20008000` succeeds. Relinking a folder begins by setting the folder
+control, so a too-new stamp fails every package on an older LabVIEW while
+working perfectly on the newest one.
+
+Stamp flattened data at the oldest LabVIEW supported (`0x20008000`, 2020), not
+at the newest seen.
+
 ## Paths — `PTH0`
 
 The same record appears in a VI file's `LIvi`/`LIbd` linker blocks, so one

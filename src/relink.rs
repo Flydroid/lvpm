@@ -8,7 +8,7 @@
 //! the measurements behind this.
 //!
 //! The load-resolve-save cycle itself lives in LabVIEW, in
-//! `tools/Relink Package.vi`, whose whole interface is one string in and one
+//! `src/lv-src/relink-package.vi` (embedded in the binary), whose whole interface is one string in and one
 //! boolean out:
 //!
 //! ```text
@@ -46,6 +46,38 @@ fn lv_folder(folder: &Path) -> String {
     s.trim_end_matches('\\').to_string()
 }
 
+/// How many saved files to name before summarising the rest — the same
+/// cut-off the dry run uses for a package's files.
+const SHOWN_SAVES: usize = 6;
+
+/// The VI's report, as lines fit to print under the folder they belong to.
+///
+/// The report is a JSON array of the absolute paths the VI saved. Printed raw
+/// it is one line of escaped backslashes; here it becomes a count and the
+/// paths relative to `folder`, capped like the dry run. An empty array still
+/// says so — "walked 283, saved 0" and no report at all must not look alike.
+/// Anything that is not such an array is passed through untouched, so a VI
+/// that grows a different report keeps being heard.
+pub fn summarize_log(log: &str, folder: &Path) -> Vec<String> {
+    let Ok(saved) = serde_json::from_str::<Vec<String>>(log.trim()) else {
+        return log.lines().filter(|l| !l.trim().is_empty()).map(str::to_string).collect();
+    };
+    if saved.is_empty() {
+        return vec!["saved nothing".to_string()];
+    }
+    let base = lv_folder(folder) + "\\";
+    let mut out = vec![format!("saved {} file(s)", saved.len())];
+    for p in saved.iter().take(SHOWN_SAVES) {
+        let rel = p.replace('/', "\\");
+        let rel = rel.strip_prefix(&base).unwrap_or(&rel);
+        out.push(format!("  {rel}"));
+    }
+    if saved.len() > SHOWN_SAVES {
+        out.push(format!("  ... and {} more", saved.len() - SHOWN_SAVES));
+    }
+    out
+}
+
 /// Extensions worth relinking. Anything else a package ships — documentation,
 /// palettes, DLLs — has no linker tables to fix.
 const LV_EXTENSIONS: &[&str] =
@@ -61,8 +93,11 @@ fn is_lv_item(p: &Path) -> bool {
 ///
 /// It is shipped code, not configuration, and LabVIEW can only open it by
 /// path — so lvpm carries the bytes and writes them out on first use rather
-/// than depending on a `tools/` directory surviving beside the binary.
-const RELINK_VI: &[u8] = include_bytes!("../tools/Relink Package.vi");
+/// than depending on a companion file surviving beside the binary.
+const RELINK_VI: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/src/lv-src/relink-package.vi"
+));
 
 /// Kept as the on-disk name, because LabVIEW shows it in dialogs and titles.
 const RELINK_VI_NAME: &str = "Relink Package.vi";
@@ -455,6 +490,30 @@ mod tests {
         assert_eq!(std::fs::read(&vi).unwrap(), RELINK_VI);
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The report as LabVIEW writes it: a JSON array of absolute paths, which
+    /// becomes a count and folder-relative names, capped past six.
+    #[test]
+    fn summarize_log_counts_and_relativises() {
+        let folder = Path::new(r"C:\Program Files\National Instruments\LabVIEW 2026\examples\DQMH");
+        let log = r#"["C:\\Program Files\\National Instruments\\LabVIEW 2026\\examples\\DQMH\\Libraries\\A\\A.lvlib", "C:\\Program Files\\National Instruments\\LabVIEW 2026\\examples\\DQMH\\B.lvlib"]"#;
+        assert_eq!(
+            summarize_log(log, folder),
+            vec!["saved 2 file(s)", r"  Libraries\A\A.lvlib", r"  B.lvlib"]
+        );
+
+        let many: Vec<String> = (0..9).map(|i| format!(r"C:\x\{i}.vi")).collect();
+        let lines = summarize_log(&serde_json::to_string(&many).unwrap(), Path::new(r"C:\x"));
+        assert_eq!(lines.len(), 1 + SHOWN_SAVES + 1);
+        assert_eq!(lines[0], "saved 9 file(s)");
+        assert_eq!(lines[1], "  0.vi");
+        assert_eq!(lines.last().unwrap(), "  ... and 3 more");
+
+        assert_eq!(summarize_log("[]", folder), vec!["saved nothing"]);
+        // Not the array we know: pass the text through, blank lines dropped.
+        assert_eq!(summarize_log("walked 3\n\nsaved 0\n", folder), vec!["walked 3", "saved 0"]);
+        assert!(summarize_log("", folder).is_empty());
     }
 
     /// The cross-package version of `collapse`: a folder covered by another

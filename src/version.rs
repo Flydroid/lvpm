@@ -1,7 +1,9 @@
 //! Package version parsing.
 //!
-//! VIPM versions are not semver. Real examples from the public indexes:
-//! `1.0.2.3`, `2.3-1`, `2024.0.3.23`, `6.0.1.20`, `0.1.0alpha1-1`, `1.1-1`.
+//! Package versions are not semver. OGPT's form is `<version>-<release>`
+//! (`2.3-1`, `1.1-1`, `0.1.0alpha1-1`: release is the packaging revision);
+//! VIPM's is four numeric parts (`1.0.2.3`, `2024.0.3.23`, `6.0.1.20`). Both
+//! live in the public directories.
 //! We normalise to a list of numeric components and compare those, keeping the
 //! original string for display.
 
