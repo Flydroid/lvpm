@@ -3,7 +3,8 @@
 //! A scratch prefix and a real LabVIEW installation differ only in where the
 //! roots point, so both go through `Roots`. That keeps the installer honest:
 //! the code path exercised against a sandbox is the same one that writes into
-//! `C:\Program Files\National Instruments\LabVIEW 2026`.
+//! `C:\Program Files\National Instruments\LabVIEW 2026` — or, on Linux,
+//! `/usr/local/natinst/LabVIEW-2026-64`.
 
 use anyhow::{Result, bail};
 use std::path::{Path, PathBuf};
@@ -29,7 +30,40 @@ impl LvTarget {
     pub fn label(&self) -> String {
         format!("LabVIEW {} ({}-bit)  v{}", self.year(), self.bitness, self.version)
     }
+
+    /// The executable lvpm starts. On Linux, `labview` is the install dir's
+    /// symlink to whichever edition is installed (`labviewprofull`, ...).
+    pub fn exe(&self) -> PathBuf {
+        self.path.join(EXE)
+    }
+
+    /// The preferences file a LabVIEW started as [`LvTarget::exe`] reads:
+    /// VI Server's switch and port, and what a venv's ini is copied from.
+    ///
+    /// On Windows that is `LabVIEW.ini` beside the executable. On Linux it is
+    /// per user, `~/natinst/.config/LabVIEW-<year>/`, and named after the name
+    /// LabVIEW was started as — `labview.conf` for `labview`, while the
+    /// `/usr/local/bin/labview64` symlink reads `labview64.conf`. It does not
+    /// exist before that user's first launch.
+    pub fn ini(&self) -> PathBuf {
+        #[cfg(windows)]
+        {
+            self.path.join("LabVIEW.ini")
+        }
+        #[cfg(not(windows))]
+        {
+            env_path("HOME", "/root")
+                .join("natinst/.config")
+                .join(format!("LabVIEW-{}", self.year()))
+                .join(format!("{EXE}.conf"))
+        }
+    }
 }
+
+#[cfg(windows)]
+const EXE: &str = "LabVIEW.exe";
+#[cfg(not(windows))]
+const EXE: &str = "labview";
 
 #[cfg(windows)]
 pub fn detect() -> Result<Vec<LvTarget>> {
@@ -54,7 +88,7 @@ pub fn detect() -> Result<Vec<LvTarget>> {
                 continue;
             }
             let path = PathBuf::from(path.trim_end_matches(['\\', '/']));
-            if !path.join("LabVIEW.exe").exists() {
+            if !path.join(EXE).exists() {
                 continue;
             }
             // Several internal versions share one directory (26.0 and 26.3);
@@ -72,22 +106,45 @@ pub fn detect() -> Result<Vec<LvTarget>> {
 
 #[cfg(not(windows))]
 pub fn detect() -> Result<Vec<LvTarget>> {
-    // LabVIEW on Linux lives under /usr/local/natinst/LabVIEW-<year>-64
-    let mut out = Vec::new();
-    if let Ok(rd) = std::fs::read_dir("/usr/local/natinst") {
-        for e in rd.flatten() {
-            let p = e.path();
-            let n = p.file_name().unwrap_or_default().to_string_lossy().to_string();
-            if let Some(rest) = n.strip_prefix("LabVIEW-")
-                && let Some(year) = rest.split('-').next().and_then(|y| y.parse::<u32>().ok())
-            {
-                let bitness = if n.ends_with("-64") { 64 } else { 32 };
-                out.push(LvTarget { version: (year - 2000) as f64, bitness, path: p });
-            }
+    // LabVIEW on Linux lives under /usr/local/natinst/LabVIEW-<year>-64 unless
+    // its prefix was moved at install time; either way its package links
+    // /etc/natinst/labview-<year>-64 to the install's `etc`, where
+    // `labview.dir` names the install. A directory without the executable is
+    // what an uninstall leaves behind.
+    let listed = |dir: &str| std::fs::read_dir(dir).into_iter().flatten().flatten();
+    let linked = listed("/etc/natinst")
+        .filter(|e| e.file_name().to_string_lossy().starts_with("labview-"))
+        .filter_map(|e| std::fs::read_to_string(e.path().join("labview.dir")).ok())
+        .map(|d| PathBuf::from(d.trim()));
+    let mut out: Vec<LvTarget> = Vec::new();
+    for p in linked.chain(listed("/usr/local/natinst").map(|e| e.path())) {
+        let n = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+        if let Some(rest) = n.strip_prefix("LabVIEW-")
+            && let Some(year) = rest.split('-').next().and_then(|y| y.parse::<u32>().ok())
+            && year > 2000
+            && p.join(EXE).is_file()
+            && !out.iter().any(|t| t.path == p)
+        {
+            let bitness = if n.ends_with("-64") { 64 } else { 32 };
+            let version = linux_version(&p).unwrap_or((year - 2000) as f64);
+            out.push(LvTarget { version, bitness, path: p });
         }
     }
     out.sort_by(|a, b| b.version.partial_cmp(&a.version).unwrap_or(std::cmp::Ordering::Equal));
     Ok(out)
+}
+
+/// The internal version of a Linux installation, which its directory name
+/// does not carry: a 2026 Q3 is 26.3, and that is what a package's
+/// `Exclusive_LabVIEW_Version` gate is compared against. NI's uninstall
+/// script in the install dir states it as `LV_MAJOR_VER=26` / `LV_MINOR_VER=3`.
+#[cfg(not(windows))]
+fn linux_version(install: &Path) -> Option<f64> {
+    let text = std::fs::read_to_string(install.join("readme/UNINSTALL")).ok()?;
+    let var = |key: &str| {
+        text.lines().find_map(|l| l.trim().strip_prefix(key)?.strip_prefix('=')?.trim().parse::<u32>().ok())
+    };
+    format!("{}.{}", var("LV_MAJOR_VER")?, var("LV_MINOR_VER")?).parse().ok()
 }
 
 /// Pick a target by year ("2026"), internal version ("26.3") or path.
@@ -170,6 +227,7 @@ impl Roots {
         }
     }
 
+    #[cfg(windows)]
     pub fn labview(t: &LvTarget) -> Roots {
         let userprofile = env_path("USERPROFILE", "C:\\Users\\Default");
         let program_files = if t.bitness == 32 {
@@ -190,6 +248,29 @@ impl Roots {
                 std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into()) + "\\",
             ),
             system_core: env_path("SystemRoot", "C:\\Windows").join("System32"),
+            scratch: None,
+            venv: None,
+            target: Some(t.clone()),
+        }
+    }
+
+    /// The machine roots are what LabVIEW's own `Get System Directory.vi`
+    /// answers on Linux (2026 Q3, read over VI Server): the `<OS ...>` tokens
+    /// are that VI's directory types by name.
+    #[cfg(not(windows))]
+    pub fn labview(t: &LvTarget) -> Roots {
+        let home = env_path("HOME", "/root");
+        Roots {
+            application: t.path.clone(),
+            temp: std::env::temp_dir(),
+            program_data: PathBuf::from("/usr/local"),
+            program_files: PathBuf::from("/usr/local"),
+            public_documents: PathBuf::from("/usr/local"),
+            user_documents: home.join("Documents"),
+            user_desktop: home.join("Desktop"),
+            user_appdata: home,
+            boot_volume: PathBuf::from("/"),
+            system_core: PathBuf::from("/usr/lib"),
             scratch: None,
             venv: None,
             target: Some(t.clone()),
@@ -268,16 +349,23 @@ impl Roots {
             other => bail!("unknown Target Dir token {other:?} (from {target_dir:?})"),
         };
 
-        Ok(if rest.is_empty() { base } else { base.join(rest) })
+        // Specs spell the tail with either separator, and only Windows takes
+        // both: on Linux `addons\Foo` would be one directory of that name.
+        Ok(rest.split(['/', '\\']).filter(|c| !c.is_empty()).fold(base, |p, c| p.join(c)))
     }
 
     /// Manifests live beside the thing they describe: inside the venv or the
-    /// sandbox, in ProgramData keyed by target for a real install.
+    /// sandbox, and for a real install in machine-wide state keyed by target —
+    /// `%ProgramData%` on Windows, `/var/lib` on Linux.
     pub fn store_dir(&self) -> PathBuf {
+        #[cfg(windows)]
+        let machine = env_path("ProgramData", "C:\\ProgramData");
+        #[cfg(not(windows))]
+        let machine = PathBuf::from("/var/lib");
         match (&self.venv, &self.scratch, &self.target) {
             (Some(v), _, _) => v.join(".lvpm").join("installed"),
             (None, Some(p), _) => p.join(".lvpm").join("installed"),
-            (None, None, Some(t)) => env_path("ProgramData", "C:\\ProgramData")
+            (None, None, Some(t)) => machine
                 .join("lvpm")
                 .join(t.key())
                 .join("installed"),
@@ -359,50 +447,100 @@ mod tests {
         }
     }
 
+    /// An install dir and a repo, as each platform spells them.
+    #[cfg(windows)]
+    const LV: &str = r"C:\Program Files\National Instruments\LabVIEW 2026";
+    #[cfg(not(windows))]
+    const LV: &str = "/usr/local/natinst/LabVIEW-2026-64";
+    #[cfg(windows)]
+    const REPO: &str = r"C:\repo";
+    #[cfg(not(windows))]
+    const REPO: &str = "/home/dev/repo";
+
     #[test]
     fn labview_roots_hang_off_the_install_dir() {
-        let t = LvTarget {
-            version: 26.3,
-            bitness: 64,
-            path: PathBuf::from(r"C:\Program Files\National Instruments\LabVIEW 2026"),
-        };
+        let t = LvTarget { version: 26.3, bitness: 64, path: PathBuf::from(LV) };
         assert_eq!(t.year(), 2026);
         assert_eq!(t.key(), "LabVIEW-2026-64bit");
         let r = Roots::labview(&t);
         assert_eq!(
             r.expand("<vi.lib>/addons/HSE").unwrap(),
-            Path::new(r"C:\Program Files\National Instruments\LabVIEW 2026\vi.lib\addons\HSE")
+            Path::new(LV).join("vi.lib").join("addons").join("HSE")
         );
         assert_eq!(
             r.expand("<menus>/Categories").unwrap(),
-            Path::new(r"C:\Program Files\National Instruments\LabVIEW 2026\menus\Categories")
+            Path::new(LV).join("menus").join("Categories")
         );
     }
 
     #[test]
     fn project_roots_put_labview_tokens_in_the_addon_and_leave_machine_roots_alone() {
-        let t = LvTarget { version: 26.3, bitness: 64, path: PathBuf::from(r"C:\LV2026") };
-        let venv = Path::new(r"C:\repo\.project");
+        let t = LvTarget { version: 26.3, bitness: 64, path: PathBuf::from(LV) };
+        let venv = &Path::new(REPO).join(".project");
         let r = Roots::project(venv, &t, "oglib_error");
+        let addon = venv.join("oglib_error").join("1");
 
         assert_eq!(
             r.expand("<vi.lib>/_OpenG.lib/error").unwrap(),
-            Path::new(r"C:\repo\.project\oglib_error\1\vi.lib\_OpenG.lib\error")
+            addon.join("vi.lib").join("_OpenG.lib").join("error")
         );
-        assert_eq!(r.expand("<application>").unwrap(), Path::new(r"C:\repo\.project\oglib_error\1"));
-        assert!(!r.expand("<OS Public Application Data>").unwrap().starts_with(r"C:\repo"));
-        assert!(!r.expand("<temp>").unwrap().starts_with(r"C:\repo"));
+        assert_eq!(r.expand("<application>").unwrap(), addon);
+        assert!(!r.expand("<OS Public Application Data>").unwrap().starts_with(REPO));
+        assert!(!r.expand("<temp>").unwrap().starts_with(REPO));
 
         // Nothing LabVIEW-class may leave the venv; machine roots are not
         // written to at all in venv mode, and the guard is what says so.
         r.check_contained(&r.expand("<menus>/Categories").unwrap()).unwrap();
         assert!(r.check_contained(&r.expand("<temp>").unwrap()).is_err());
 
-        assert_eq!(r.store_dir(), Path::new(r"C:\repo\.project\.lvpm\installed"));
+        assert_eq!(r.store_dir(), venv.join(".lvpm").join("installed"));
         assert_eq!(Roots::project_store(venv, &t).store_dir(), r.store_dir());
-        assert_eq!(Roots::project_store(venv, &t).application, venv);
-        assert_eq!(r.venv(), Some(venv));
+        assert_eq!(&Roots::project_store(venv, &t).application, venv);
+        assert_eq!(r.venv(), Some(venv.as_path()));
         assert!(r.target.is_some());
+    }
+
+    /// On Linux the `<OS ...>` tokens land where LabVIEW's Get System
+    /// Directory.vi says, and a global install's manifests in /var/lib — not
+    /// in a `C:\ProgramData` relative to the working directory, which is what
+    /// the Windows fallbacks amount to there.
+    #[cfg(not(windows))]
+    #[test]
+    fn linux_roots_are_the_ones_labview_reports() {
+        let t = LvTarget { version: 26.3, bitness: 64, path: PathBuf::from(LV) };
+        let r = Roots::labview(&t);
+        let home = env_path("HOME", "/root");
+        assert_eq!(r.expand("<OS User Documents>/x").unwrap(), home.join("Documents/x"));
+        assert_eq!(r.expand("<OS User Application Data>").unwrap(), home);
+        assert_eq!(r.expand("<OS Public Application Data>").unwrap(), Path::new("/usr/local"));
+        assert_eq!(r.expand("<OS Boot Volume Root>/ci").unwrap(), Path::new("/ci"));
+        assert_eq!(r.expand("<OS System Core Libraries>").unwrap(), Path::new("/usr/lib"));
+        assert_eq!(r.store_dir(), Path::new("/var/lib/lvpm/LabVIEW-2026-64bit/installed"));
+        assert_eq!(t.exe(), Path::new(LV).join("labview"));
+        assert_eq!(t.ini(), home.join("natinst/.config/LabVIEW-2026/labview.conf"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn linux_version_comes_from_the_uninstall_script() {
+        let dir = std::env::temp_dir().join(format!("lvpm-target-test-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("readme")).unwrap();
+        assert_eq!(linux_version(&dir), None);
+        std::fs::write(
+            dir.join("readme/UNINSTALL"),
+            "# LabVIEW 2026 Q3 uninstallation script.\nLV_MAJOR_VER=26\nLV_MINOR_VER=3\nLV_UPDATE_VER=0\n",
+        )
+        .unwrap();
+        assert_eq!(linux_version(&dir), Some(26.3));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_target_dir_may_use_either_separator() {
+        let r = Roots::scratch(Path::new("/tmp/box"));
+        let want = Path::new("/tmp/box/LabVIEW").join("vi.lib").join("addons").join("Foo");
+        assert_eq!(r.expand("<vi.lib>/addons/Foo").unwrap(), want);
+        assert_eq!(r.expand("<vi.lib>\\addons\\Foo\\").unwrap(), want);
     }
 
     #[test]
