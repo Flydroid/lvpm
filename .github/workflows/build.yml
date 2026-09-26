@@ -1,0 +1,133 @@
+# Build and test lvpm on each platform's own runner, publish the executables,
+# and run lvpm against LabVIEW for Linux in NI's container (docs/linux.md).
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Windows 64-bit: the MSVC build the releases ship
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            name: windows-x64
+            exe: lvpm.exe
+
+          # Linux 64-bit, static: NI's image is Ubuntu 22.04, older than the
+          # runner's glibc
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            name: linux-x64
+            exe: lvpm
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install musl tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache target directory
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-${{ matrix.target }}-target-${{ hashFiles('Cargo.lock') }}
+
+      # On the runner's own platform: Windows tests on Windows.
+      - name: Unit tests
+        run: cargo test
+
+      - name: Build release
+        run: cargo build --release --target ${{ matrix.target }}
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+
+      - name: Upload executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: lvpm-${{ matrix.name }}
+          path: target/${{ matrix.target }}/release/${{ matrix.exe }}
+          if-no-files-found: error
+
+  # Both executables in one download, named for the version and commit, to
+  # hand to testers. The Linux one is a tarball: an artifact zip does not keep
+  # the executable bit.
+  collect:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download executables
+        uses: actions/download-artifact@v4
+        with:
+          path: executables
+
+      - name: Name them
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          mkdir dist
+          cp executables/lvpm-windows-x64/lvpm.exe "dist/lvpm-$version-windows-x64.exe"
+          chmod +x executables/lvpm-linux-x64/lvpm
+          tar -czf "dist/lvpm-$version-linux-x64.tar.gz" -C executables/lvpm-linux-x64 lvpm
+          echo "BUNDLE=lvpm-$version-${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+          ls -l dist
+
+      - name: Upload combined artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BUNDLE }}
+          path: dist/
+          if-no-files-found: error
+
+  linux-e2e:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download the Linux executable
+        uses: actions/download-artifact@v4
+        with:
+          name: lvpm-linux-x64
+          path: dist
+
+      # Pinned, so a new image is a change someone makes on purpose.
+      - name: lvpm against LabVIEW 2026 for Linux
+        run: LVPM=dist/lvpm scripts/linux-e2e.sh nationalinstruments/labview:2026q3-linux
