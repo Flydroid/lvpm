@@ -211,4 +211,8 @@ workflow is the work.
 - `Replace Mode = If Newer` compares timestamps instead of "write when absent".
 - Read hook VIs' `error out` back.
 - A failure part-way through unpacking leaves files behind with no manifest.
-- Linux target detection exists but is untested.
+- Linux: install, relink, hooks, refresh and venvs verified against LabVIEW
+  2026 Q3 in NI's container ([linux.md](linux.md)), and run in CI
+  (`.github/workflows/build.yml`). Still open there: `Exclusive_OS` gates,
+  root ownership of the install tree, case sensitivity, a Linux release
+  artifact.
