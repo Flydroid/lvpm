@@ -22,7 +22,7 @@ use crate::spec::Spec;
 use crate::target::Roots;
 use crate::viserver::{self, Connection, LvValue, VIRef};
 use anyhow::{Context, Result, bail};
-use std::path::{Path, PathBuf};
+use std::path::{MAIN_SEPARATOR, MAIN_SEPARATOR_STR, Path, PathBuf};
 use std::time::{Duration, Instant};
 
 /// The control the folder goes into, and the indicator that says it finished.
@@ -40,10 +40,13 @@ const LOG_INDICATOR: &str = "report log out";
 /// ordinary filename character. So `C:/vi.lib/Foo` arrives as a single
 /// unparseable component, the relink walks nothing, and it reports success
 /// over an empty list. Install manifests store forward slashes, which is how
-/// a whole relink pass came back reporting nothing at all.
+/// a whole relink pass came back reporting nothing at all. On Linux it is the
+/// other way round, so there the path goes as it is.
 fn lv_folder(folder: &Path) -> String {
-    let s = folder.to_string_lossy().replace('/', "\\");
-    s.trim_end_matches('\\').to_string()
+    let s = folder.to_string_lossy();
+    #[cfg(windows)]
+    let s = s.replace('/', "\\");
+    s.trim_end_matches(MAIN_SEPARATOR).to_string()
 }
 
 /// How many saved files to name before summarising the rest — the same
@@ -65,10 +68,13 @@ pub fn summarize_log(log: &str, folder: &Path) -> Vec<String> {
     if saved.is_empty() {
         return vec!["saved nothing".to_string()];
     }
-    let base = lv_folder(folder) + "\\";
+    let base = lv_folder(folder) + MAIN_SEPARATOR_STR;
     let mut out = vec![format!("saved {} file(s)", saved.len())];
     for p in saved.iter().take(SHOWN_SAVES) {
+        #[cfg(windows)]
         let rel = p.replace('/', "\\");
+        #[cfg(not(windows))]
+        let rel = p.clone();
         let rel = rel.strip_prefix(&base).unwrap_or(&rel);
         out.push(format!("  {rel}"));
     }
@@ -94,15 +100,13 @@ const RELINK_VI_BYTES: &[u8] = include_bytes!(concat!(
     "/src/lv-src/relink-package.vi"
 ));
 
-/// Materialize the bundled relink VI so LabVIEW can open it by path.
+/// Materialize the bundled relink VI in `dir` so LabVIEW can open it by path.
 ///
 /// The VI is embedded in the executable at compile time, so the installed
 /// executable does not depend on the source checkout or a companion file.
-pub fn locate_vi() -> Result<PathBuf> {
-    let p = std::env::temp_dir().join(format!(
-        "lvpm-relink-package-{}.vi",
-        env!("CARGO_PKG_VERSION")
-    ));
+pub fn locate_vi(dir: &Path) -> Result<PathBuf> {
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let p = dir.join(format!("lvpm-relink-package-{}.vi", env!("CARGO_PKG_VERSION")));
     std::fs::write(&p, RELINK_VI_BYTES)
         .with_context(|| format!("materializing relink VI at {}", p.display()))?;
     Ok(p)
@@ -431,6 +435,7 @@ mod tests {
 
     /// The report as LabVIEW writes it: a JSON array of absolute paths, which
     /// becomes a count and folder-relative names, capped past six.
+    #[cfg(windows)]
     #[test]
     fn summarize_log_counts_and_relativises() {
         let folder = Path::new(r"C:\Program Files\National Instruments\LabVIEW 2026\examples\DQMH");
@@ -453,6 +458,19 @@ mod tests {
         assert!(summarize_log("", folder).is_empty());
     }
 
+    /// The same report from LabVIEW on Linux, whose paths use forward slashes.
+    #[cfg(not(windows))]
+    #[test]
+    fn summarize_log_relativises_linux_paths() {
+        let folder = Path::new("/usr/local/natinst/LabVIEW-2026-64/examples/DQMH/");
+        let log = r#"["/usr/local/natinst/LabVIEW-2026-64/examples/DQMH/Libraries/A/A.lvlib", "/usr/local/natinst/LabVIEW-2026-64/examples/DQMH/B.lvlib"]"#;
+        assert_eq!(
+            summarize_log(log, folder),
+            vec!["saved 2 file(s)", "  Libraries/A/A.lvlib", "  B.lvlib"]
+        );
+        assert_eq!(summarize_log("[]", folder), vec!["saved nothing"]);
+    }
+
     /// The cross-package version of `collapse`: a folder covered by another
     /// package's folder joins that folder's run instead of getting its own,
     /// and exact duplicates merge. Order and per-folder attribution both
@@ -460,22 +478,23 @@ mod tests {
     #[test]
     fn collapse_work_merges_overlapping_packages() {
         let work = vec![
-            ("caraya".to_string(), vec![PathBuf::from(r"C:\lv\vi.lib\addons\Caraya")]),
-            ("h5".to_string(), vec![PathBuf::from(r"C:\lv\vi.lib\addons")]),
-            ("caraya_cli".to_string(), vec![PathBuf::from(r"C:\lv\vi.lib\addons\Caraya")]),
-            ("dqmh".to_string(), vec![PathBuf::from(r"C:\lv\project\DQMH")]),
+            ("caraya".to_string(), vec![PathBuf::from("/lv/vi.lib/addons/Caraya")]),
+            ("h5".to_string(), vec![PathBuf::from("/lv/vi.lib/addons")]),
+            ("caraya_cli".to_string(), vec![PathBuf::from("/lv/vi.lib/addons/Caraya")]),
+            ("dqmh".to_string(), vec![PathBuf::from("/lv/project/DQMH")]),
         ];
         let plan = collapse_work(&work);
         assert_eq!(plan.len(), 2);
-        assert_eq!(plan[0].0, PathBuf::from(r"C:\lv\project\DQMH"));
+        assert_eq!(plan[0].0, PathBuf::from("/lv/project/DQMH"));
         assert_eq!(plan[0].1, ["dqmh"]);
-        assert_eq!(plan[1].0, PathBuf::from(r"C:\lv\vi.lib\addons"));
+        assert_eq!(plan[1].0, PathBuf::from("/lv/vi.lib/addons"));
         assert_eq!(plan[1].1, ["h5", "caraya", "caraya_cli"]);
     }
 
     /// Install manifests store forward slashes; LabVIEW needs backslashes, or
     /// it takes the whole path for one filename and relinks nothing while
     /// reporting success. A whole 101-folder pass came back empty this way.
+    #[cfg(windows)]
     #[test]
     fn folders_reach_labview_with_native_separators() {
         let m = "C:/Program Files/National Instruments/LabVIEW 2026/vi.lib/Delacor/Libraries";
@@ -487,6 +506,15 @@ mod tests {
         assert_eq!(lv_folder(Path::new(r"C:\vi.lib\Foo")), r"C:\vi.lib\Foo");
         assert_eq!(lv_folder(Path::new(r"C:\vi.lib/Foo\")), r"C:\vi.lib\Foo");
         assert_eq!(lv_folder(Path::new("C:/vi.lib/Foo/")), r"C:\vi.lib\Foo");
+    }
+
+    /// On Linux the manifest's forward slashes are already LabVIEW's own; a
+    /// backslash there would be part of a file name.
+    #[cfg(not(windows))]
+    #[test]
+    fn folders_reach_linux_labview_as_they_are() {
+        let m = "/usr/local/natinst/LabVIEW-2026-64/vi.lib/Delacor/Libraries/";
+        assert_eq!(lv_folder(Path::new(m)), m.trim_end_matches('/'));
     }
 
     fn f(paths: &[&str]) -> Vec<String> {

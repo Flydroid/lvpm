@@ -1,5 +1,11 @@
 //! lvpm — an open-source package manager for LabVIEW packages.
 
+// lvpm knows where LabVIEW keeps its files on Windows and on Linux. Every
+// other platform would build and then look in the wrong places, so it does not
+// build: macOS needs a branch of its own (docs/roadmap.md).
+#[cfg(not(any(windows, target_os = "linux")))]
+compile_error!("lvpm supports Windows and Linux; macOS is on the roadmap (docs/roadmap.md)");
+
 mod index;
 mod install;
 mod launch;
@@ -429,11 +435,32 @@ fn headless_roots(cli: &Cli, repo: &Path) -> Result<Roots> {
 }
 
 /// The index cache is per-user, not per-target — the feeds are the same.
+/// `%LOCALAPPDATA%\lvpm\cache` on Windows, `~/.cache/lvpm` (XDG) elsewhere.
 fn cache_dir() -> PathBuf {
-    let base = std::env::var("LOCALAPPDATA")
+    #[cfg(windows)]
+    let dir = std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join("lvpm").join("cache"));
+    #[cfg(not(windows))]
+    let dir = std::env::var_os("XDG_CACHE_HOME")
+        .filter(|d| !d.is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(|_| std::env::temp_dir());
-    base.join("lvpm").join("cache")
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
+        .map(|d| d.join("lvpm"));
+    dir.unwrap_or_else(|| std::env::temp_dir().join("lvpm").join("cache"))
+}
+
+/// Where lvpm puts files a LabVIEW has to open by path: the relink VI, and a
+/// PostUninstall hook that must outlive its package. `%TEMP%` is the user's
+/// own on Windows; `/tmp` is shared on Linux, where a name another user took
+/// first is one this user cannot write — so there it is the per-user cache.
+fn work_dir() -> PathBuf {
+    #[cfg(windows)]
+    {
+        std::env::temp_dir()
+    }
+    #[cfg(not(windows))]
+    {
+        cache_dir()
+    }
 }
 
 fn cmd_start(cli: &Cli, wait: u64) -> Result<()> {
@@ -633,8 +660,10 @@ fn uninstall_one(
     // hook VI itself, so it runs from a copy that outlives the uninstall.
     let post = match &before.post_uninstall_vi {
         Some(hook) if hooks => {
-            let tmp = std::env::temp_dir().join(format!("lvpm-{}-PostUninstall.vi", before.name));
-            std::fs::copy(hook, &tmp)
+            let dir = work_dir();
+            let tmp = dir.join(format!("lvpm-{}-PostUninstall.vi", before.name));
+            std::fs::create_dir_all(&dir)
+                .and_then(|()| std::fs::copy(hook, &tmp))
                 .map(|_| tmp)
                 .map_err(|e| println!("note: cannot stage PostUninstall.vi ({e}) — not running it"))
                 .ok()
@@ -1264,8 +1293,9 @@ fn hook_action_info(
     files: &[String],
 ) -> viserver::LvValue {
     use viserver::LvValue;
-    let paths: Vec<LvValue> =
-        files.iter().map(|f| LvValue::Path(f.replace('/', "\\"))).collect();
+    // Manifests store forward slashes; a Windows LabVIEW wants its own.
+    let native = |f: &String| if cfg!(windows) { f.replace('/', "\\") } else { f.clone() };
+    let paths: Vec<LvValue> = files.iter().map(|f| LvValue::Path(native(f))).collect();
     let files_installed = LvValue::array(paths)
         .unwrap_or_else(|_| LvValue::empty_array(viserver::TD_PATH));
     LvValue::Variant {
@@ -1322,7 +1352,7 @@ fn run_relink(
     args: &RelinkArgs,
     work: &[(String, Vec<PathBuf>)],
 ) -> Result<()> {
-    let vi = relink::locate_vi()?;
+    let vi = relink::locate_vi(&work_dir())?;
     // One walk covers every folder nested under it, so overlapping packages
     // share a run instead of relinking the same tree twice — 18 of the first
     // pass's 109 folders were nested repeats costing 17 of its 61 minutes.
