@@ -436,6 +436,7 @@ fetches them again.
 | `src/lv-src/relink-package.vi` | The relink VI embedded into the executable at build time (LabVIEW 2020) |
 | `scripts/install.ps1` | Download, verify and install the latest release |
 | `scripts/linux-e2e.sh` | End-to-end check against LabVIEW for Linux in NI's container image |
+| `scripts/linux-packages.sh` | Public packages on LabVIEW for Linux: install, mass compile, relink, uninstall, venv |
 
 ## License
 

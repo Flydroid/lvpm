@@ -119,6 +119,13 @@ to `main`, every pull request, and by hand:
   `lvpm-<version>-<commit>`, for handing to testers.
 - **linux-e2e** — `scripts/linux-e2e.sh` with the Linux executable, in
   `nationalinstruments/labview:2026q3-linux` (pinned).
+- **linux-packages** — `scripts/linux-packages.sh` in the same image, with
+  public packages that are plain G and need no NI driver (eleven OpenG
+  libraries and the JKI State Machine, with their dependencies): a headless
+  install that must start no LabVIEW, a LabVIEWCLI mass compile of every
+  folder they own that must report no bad VI, `relink --all`, an uninstall
+  that must leave the LabVIEW tree as it was, and the same set relinked in a
+  venv. Its logs are uploaded.
 
 ## Not done
 

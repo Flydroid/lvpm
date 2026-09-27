@@ -131,3 +131,27 @@ jobs:
       # Pinned, so a new image is a change someone makes on purpose.
       - name: lvpm against LabVIEW 2026 for Linux
         run: LVPM=dist/lvpm scripts/linux-e2e.sh nationalinstruments/labview:2026q3-linux
+
+  linux-packages:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download the Linux executable
+        uses: actions/download-artifact@v4
+        with:
+          name: lvpm-linux-x64
+          path: dist
+
+      - name: Public packages on LabVIEW 2026 for Linux
+        run: LVPM=dist/lvpm OUT=out scripts/linux-packages.sh nationalinstruments/labview:2026q3-linux
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-packages-logs
+          path: out
