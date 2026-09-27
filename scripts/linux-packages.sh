@@ -6,7 +6,7 @@
 #   1. a headless `lvpm install --hooks`: G-Image's PostInstall has to run for
 #      its VIs to work, and every hook must have run;
 #   2. a LabVIEWCLI mass compile of every folder the packages own, which must
-#      report no bad VI;
+#      report no bad VI but the one LUnit's examples ship broken on purpose;
 #   3. `lvpm relink --all` over the same folders;
 #   4. `lvpm uninstall --all`, which must leave the LabVIEW tree as it found it;
 #   5. the same set into a venv with `--relink`, relinked in a LabVIEW started
@@ -99,12 +99,19 @@ import glob, json
 dirs = sorted({d for f in glob.glob("/var/lib/lvpm/*/installed/*.json") for d in json.load(open(f))["relink_folders"]})
 print("\n".join(d for d in dirs if not any(d.startswith(p + "/") for p in dirs)))
 PY
+# Broken on purpose: LUnit's example of how a broken test is reported.
+KNOWN_BROKEN="$LV/examples/Astemes/LUnit/Basic Example/Dummy/Test Broken.vi"
 echo "mass compiling $(wc -l < /work/folders.txt) folder(s)"
 n=0; mc_ok=yes
 while read -r d; do
     n=$((n + 1)); log=$O/masscompile-$n.log
     cli MassCompile -DirectoryToCompile "$d" -MassCompileLogFile "$log" > "$O/masscompile-$n.out" 2>&1
-    if grep -q "MassCompile operation succeeded" "$O/masscompile-$n.out" && [ -f "$log" ] && ! grep -q "Bad VI" "$log"; then
+    rc=$?
+    bad=$( { grep "Bad VI" "$log" 2>/dev/null || true; } | grep -v -F "Path=\"$KNOWN_BROKEN\"" || true)
+    # Exit 3 is the CLI's "bad VIs found"; with none left once the known one is
+    # set aside, the folder compiled.
+    if [ -f "$log" ] && [ -z "$bad" ] &&
+        { { [ $rc = 0 ] && grep -q "MassCompile operation succeeded" "$O/masscompile-$n.out"; } || [ $rc = 3 ]; }; then
         echo "  $d ... ok"
     else
         mc_ok=no

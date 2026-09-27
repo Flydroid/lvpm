@@ -206,6 +206,33 @@ workflow is the work.
   lvpm's own tooling on packages, which is the reading of "modifying
   LabVIEW code" to settle before that step runs on shared infrastructure.
 
+## Integration test VIs
+
+The container jobs test lvpm with packages it does not control:
+`linux-e2e` with the VIs in `tools/`, `linux-packages` with LUnit and
+G-Image as a reference. Neither was made to test an installer, and their
+quirks end up in lvpm's checks (LUnit ships a VI broken on purpose, which the
+mass compile has to be told about). A package of VIs made for the job would
+test exactly what lvpm answers for, on Windows and Linux alike:
+
+- a caller whose subVI sits in another folder of the package, which relink
+  must fix, and a caller outside the package that links into `<vilib>`, for
+  the venv overlay;
+- PreInstall and PostInstall hooks that write a marker file with what they
+  were handed (package name, files installed); today's hook VI only shows
+  that it ran. One of them does setup the package cannot work without, as
+  G-Image's does;
+- a class, a library, a malleable VI, an LLB and a project, each once;
+- a palette `.mnu`, an `<OS User Documents>` group and a Target Dir written
+  with backslashes;
+- a file group into a folder LabVIEW itself uses, such as
+  `<resource>/Framework/Providers/<pkg>`, where relink must stay inside the
+  package's own files;
+- nothing broken, so "no bad VI" stays a plain rule.
+
+Saved in LabVIEW 2020, like the relink VI, and zipped into a `.vip` by the
+test scripts as today.
+
 ## macOS
 
 Not supported, and a macOS build stops with a `compile_error!` in `main.rs`.
@@ -233,6 +260,16 @@ new branch.
 - `Replace Mode = If Newer` compares timestamps instead of "write when absent".
 - Read hook VIs' `error out` back.
 - A failure part-way through unpacking leaves files behind with no manifest.
+- Relink walks a whole Target Dir even when LabVIEW uses it too. LUnit
+  installs into `resource/Framework/Providers`, and `relink --all` walked all
+  of it and saved 45 files there; which of them are LabVIEW's own is not
+  checked. Same logic on Windows.
+- Uninstall leaves the `.aliases` and `.UserState` files LabVIEW writes
+  beside a package's project once it has opened it, and with them the
+  package's folders.
+- `relink --all` never marks a package with nothing to relink, while
+  `install --relink` does, so `lvpm list` shows such a package
+  `NOT relinked` for good.
 - Linux: install, relink, hooks, refresh and venvs verified against LabVIEW
   2026 Q3 in NI's container ([linux.md](linux.md)), and run in CI
   (`.github/workflows/build.yml`). Still open there: `Exclusive_OS` gates,

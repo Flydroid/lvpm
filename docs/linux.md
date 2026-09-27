@@ -127,7 +127,8 @@ in progress.
 - **linux-packages** — `scripts/linux-packages.sh` in the same image, with
   LUnit and G-Image from the public indexes: a headless `install --hooks`
   (G-Image needs its PostInstall) in which every hook must run, a LabVIEWCLI
-  mass compile of every folder they own that must report no bad VI,
+  mass compile of every folder they own that must report no bad VI (but the
+  one LUnit's examples ship broken on purpose),
   `relink --all`, an uninstall that must leave the LabVIEW tree as it was,
   and the same set relinked in a venv. Its logs are uploaded.
 
