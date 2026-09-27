@@ -206,6 +206,28 @@ workflow is the work.
   lvpm's own tooling on packages, which is the reading of "modifying
   LabVIEW code" to settle before that step runs on shared infrastructure.
 
+## macOS
+
+Not supported. The Linux code is `cfg(not(windows))`, so a macOS build
+compiles and gets every LabVIEW-specific answer wrong; until there is a
+macOS branch, those items should be `cfg(target_os = "linux")` and macOS a
+`compile_error!`.
+
+- **What carries over from Linux:** forward slashes, LF ini files, the
+  per-user cache, LabVIEW in its own process group, the VI Server client,
+  venvs.
+- **What needs its own branch, each to be measured on a Mac with LabVIEW:**
+  the install location (likely `/Applications/National Instruments/LabVIEW
+  <year> 64-bit/`), the executable inside the `.app` bundle, the preferences
+  file (likely under `~/Library/Preferences/`), the internal version (likely
+  the bundle's `Info.plist`), the `<OS …>` tokens (run `Get System
+  Directory.vi`, as for Linux), `PTH0` paths (the first component may be the
+  volume name), where install records go, and whether a TIME_WAIT port blocks
+  VI Server as it does on Linux.
+- **The obstacle is testing:** NI publishes no macOS container, so there is
+  no equivalent of `scripts/linux-e2e.sh` in CI without a macOS runner that
+  has a licensed LabVIEW.
+
 ## Housekeeping
 
 - `Replace Mode = If Newer` compares timestamps instead of "write when absent".
