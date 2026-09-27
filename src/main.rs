@@ -1,5 +1,11 @@
 //! lvpm — an open-source package manager for LabVIEW packages.
 
+// lvpm knows where LabVIEW keeps its files on Windows and on Linux. Every
+// other platform would build and then look in the wrong places, so it does not
+// build: macOS needs a branch of its own (docs/roadmap.md).
+#[cfg(not(any(windows, target_os = "linux")))]
+compile_error!("lvpm supports Windows and Linux; macOS is on the roadmap (docs/roadmap.md)");
+
 mod index;
 mod install;
 mod launch;

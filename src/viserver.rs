@@ -971,7 +971,7 @@ impl<'a> Reader<'a> {
         }
         // One root and no drives: "/usr/local" comes back as "usr", "local"
         // and must be rooted again, or it reads as a relative path.
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
         {
             Ok(match kind {
                 0 => format!("/{}", parts.join("/")),
@@ -1635,7 +1635,7 @@ mod tests {
     /// What LabVIEW 2026 Q3 on Linux answered for `Application Directory.vi`:
     /// the same record as on Windows, minus a drive. Read back as `usr\local\...`
     /// it would name a relative path under the working directory.
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
     #[test]
     fn decodes_a_linux_pth0_record_as_a_rooted_path() {
         let rec = b"PTH0\x00\x00\x00\x13\x00\x00\x00\x03\x03usr\x05local\x04x.vi";

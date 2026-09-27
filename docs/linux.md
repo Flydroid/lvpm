@@ -25,8 +25,11 @@ one to ship.
 ### Windows stays as it was
 
 The platform is chosen when lvpm is compiled, not when it runs: each
-difference below is a `#[cfg(windows)]` / `#[cfg(not(windows))]` pair, and
-the Windows half is the code that was there before. What a Windows user can
+difference below is a `#[cfg(windows)]` / `#[cfg(target_os = "linux")]`
+pair, or `#[cfg(not(windows))]` where the Linux half holds on any POSIX
+system (separators, line ends, the per-user cache), and the Windows half is
+the code that was there before. Other platforms do not build (see the
+roadmap's macOS section). What a Windows user can
 see changed is small: the "VI Server is disabled" and "no LabVIEW.exe"
 messages name the full path of the file, and a `Target Dir` such as
 `<vi.lib>/addons/Foo` now expands to `...\vi.lib\addons\Foo` instead of

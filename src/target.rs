@@ -50,7 +50,7 @@ impl LvTarget {
         {
             self.path.join("LabVIEW.ini")
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
         {
             env_path("HOME", "/root")
                 .join("natinst/.config")
@@ -62,7 +62,7 @@ impl LvTarget {
 
 #[cfg(windows)]
 const EXE: &str = "LabVIEW.exe";
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
 const EXE: &str = "labview";
 
 #[cfg(windows)]
@@ -104,7 +104,7 @@ pub fn detect() -> Result<Vec<LvTarget>> {
     Ok(out)
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
 pub fn detect() -> Result<Vec<LvTarget>> {
     // LabVIEW on Linux lives under /usr/local/natinst/LabVIEW-<year>-64 unless
     // its prefix was moved at install time; either way its package links
@@ -138,7 +138,7 @@ pub fn detect() -> Result<Vec<LvTarget>> {
 /// does not carry: a 2026 Q3 is 26.3, and that is what a package's
 /// `Exclusive_LabVIEW_Version` gate is compared against. NI's uninstall
 /// script in the install dir states it as `LV_MAJOR_VER=26` / `LV_MINOR_VER=3`.
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
 fn linux_version(install: &Path) -> Option<f64> {
     let text = std::fs::read_to_string(install.join("readme/UNINSTALL")).ok()?;
     let var = |key: &str| {
@@ -257,7 +257,7 @@ impl Roots {
     /// The machine roots are what LabVIEW's own `Get System Directory.vi`
     /// answers on Linux (2026 Q3, read over VI Server): the `<OS ...>` tokens
     /// are that VI's directory types by name.
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
     pub fn labview(t: &LvTarget) -> Roots {
         let home = env_path("HOME", "/root");
         Roots {
@@ -360,7 +360,7 @@ impl Roots {
     pub fn store_dir(&self) -> PathBuf {
         #[cfg(windows)]
         let machine = env_path("ProgramData", "C:\\ProgramData");
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
         let machine = PathBuf::from("/var/lib");
         match (&self.venv, &self.scratch, &self.target) {
             (Some(v), _, _) => v.join(".lvpm").join("installed"),
@@ -504,7 +504,7 @@ mod tests {
     /// Directory.vi says, and a global install's manifests in /var/lib — not
     /// in a `C:\ProgramData` relative to the working directory, which is what
     /// the Windows fallbacks amount to there.
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
     #[test]
     fn linux_roots_are_the_ones_labview_reports() {
         let t = LvTarget { version: 26.3, bitness: 64, path: PathBuf::from(LV) };
@@ -520,7 +520,7 @@ mod tests {
         assert_eq!(t.ini(), home.join("natinst/.config/LabVIEW-2026/labview.conf"));
     }
 
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
     #[test]
     fn linux_version_comes_from_the_uninstall_script() {
         let dir = std::env::temp_dir().join(format!("lvpm-target-test-{}", std::process::id()));

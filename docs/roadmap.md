@@ -208,10 +208,10 @@ workflow is the work.
 
 ## macOS
 
-Not supported. The Linux code is `cfg(not(windows))`, so a macOS build
-compiles and gets every LabVIEW-specific answer wrong; until there is a
-macOS branch, those items should be `cfg(target_os = "linux")` and macOS a
-`compile_error!`.
+Not supported, and a macOS build stops with a `compile_error!` in `main.rs`.
+What is a fact about LabVIEW on Linux is `cfg(target_os = "linux")`; what is
+true of any POSIX system is `cfg(not(windows))` or `cfg(unix)` and needs no
+new branch.
 
 - **What carries over from Linux:** forward slashes, LF ini files, the
   per-user cache, LabVIEW in its own process group, the VI Server client,

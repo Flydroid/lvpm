@@ -78,7 +78,7 @@ pub fn write_ini(v: &Venv) -> Result<PathBuf> {
         Ok(text) => text,
         // On Linux the file is per user and only exists once this user has
         // started LabVIEW; until then the defaults are all there is to inherit.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound && cfg!(not(windows)) => {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && cfg!(target_os = "linux") => {
             format!("[LabVIEW]{EOL}")
         }
         Err(e) => return Err(e).with_context(|| format!("reading {}", src.display())),
