@@ -19,7 +19,14 @@ IMAGE=${1:-nationalinstruments/labview:latest-linux}
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 WORK=$(mktemp -d)
 NAME=lvpm-e2e-$$
-trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true; rm -rf "$WORK"' EXIT
+# The container writes into $WORK as root; it hands it back before it goes, or
+# a CI runner's user could not remove it.
+cleanup() {
+    docker exec "$NAME" chown -R "$(id -u):$(id -g)" /work >/dev/null 2>&1 || true
+    docker rm -f "$NAME" >/dev/null 2>&1 || true
+    rm -rf "$WORK" || true
+}
+trap cleanup EXIT
 
 # NI's image is Ubuntu 22.04 (glibc 2.35); a static binary runs there whatever
 # the build host's glibc.

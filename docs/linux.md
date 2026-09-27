@@ -126,10 +126,12 @@ branch other than `main` cancels its run still in progress.
 - **linux-packages** — `scripts/linux-packages.sh` in the same image, with
   public packages that are plain G and need no NI driver (eleven OpenG
   libraries and the JKI State Machine, with their dependencies): a headless
-  install that must start no LabVIEW, a LabVIEWCLI mass compile of every
-  folder they own that must report no bad VI, `relink --all`, an uninstall
-  that must leave the LabVIEW tree as it was, and the same set relinked in a
-  venv. Its logs are uploaded.
+  install that must start no LabVIEW; a LabVIEWCLI mass compile of every
+  folder they own, where none of their own files may be a bad VI (a folder
+  shared with LabVIEW holds LabVIEW's files too, and those do not count);
+  `relink --all`; an uninstall that must leave the LabVIEW tree as it was,
+  apart from project files LabVIEW writes itself; and the same set relinked
+  in a venv. Its logs are uploaded.
 
 ## Not done
 
