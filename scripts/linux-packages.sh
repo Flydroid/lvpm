@@ -5,12 +5,17 @@
 # container:
 #   1. a headless `lvpm install --hooks`: G-Image's PostInstall has to run for
 #      its VIs to work, and every hook must have run;
-#   2. a LabVIEWCLI mass compile of every folder the packages own, which must
-#      report no bad VI but the one LUnit's examples ship broken on purpose;
-#   3. `lvpm relink --all` over the same folders;
-#   4. `lvpm uninstall --all`, which must leave the LabVIEW tree as it found it;
+#   2. every file in the install records must be on disk;
+#   3. `lvpm relink --all` over the packages' folders;
+#   4. `lvpm uninstall --all`, after which the LabVIEW tree must be as it was:
+#      no file added, gone or changed;
 #   5. the same set into a venv with `--relink`, relinked in a LabVIEW started
-#      on the venv (a venv runs no hooks).
+#      on the venv (a venv runs no hooks), which must leave the LabVIEW tree
+#      alone.
+#
+# Whether the packages' VIs are broken is not asked: a bad VI in a package, or
+# in LabVIEW's own templates, says nothing about lvpm, and a mass compile
+# writes into the tree the uninstall check compares (docs/linux.md).
 #
 #   scripts/linux-packages.sh [image]     default: nationalinstruments/labview:latest-linux
 #
@@ -80,8 +85,27 @@ cli() { LabVIEWCLI -OperationName "$1" -LabVIEWPath "$LV/labview" "${@:2}" -Head
 fails=0
 check() { if eval "$2"; then echo "ok    $1"; else echo "FAIL  $1"; fails=$((fails + 1)); fi; }
 tree() { find "$LV" -path "$LV/VIObjCache" -prune -o -print | sort; }
+# The LabVIEW tree against snapshot $1: no name added or gone, and no file
+# that was there written since. VIObjCache is LabVIEW's compile cache.
+snapshot() { tree > $O/$1-before.txt; touch /tmp/$1.marker; sleep 1; }
+untouched() {
+    tree > $O/$1-after.txt
+    diff $O/$1-before.txt $O/$1-after.txt > $O/$1-tree.diff
+    find "$LV" -path "$LV/VIObjCache" -prune -o -type f -newer /tmp/$1.marker -print | sort |
+        comm -12 - $O/$1-before.txt > $O/$1-changed.txt
+    [ ! -s $O/$1-tree.diff ] && [ ! -s $O/$1-changed.txt ]
+}
+show_changes() {
+    [ -s $O/$1-tree.diff ] && { echo "  added or gone:"; head -20 $O/$1-tree.diff; }
+    [ -s $O/$1-changed.txt ] && { echo "  changed: $(wc -l < $O/$1-changed.txt) file(s)"; head -20 $O/$1-changed.txt; }
+    true
+}
+close_labview() {
+    cli CloseLabVIEW >> $O/close.log 2>&1 || true
+    for _ in $(seq 30); do pgrep -x labview >/dev/null || break; sleep 1; done
+}
 
-tree > $O/tree-before.txt
+snapshot global
 cd /work/global
 check "headless install --hooks resolves and copies every package" '$L install --hooks > $O/install.log 2>&1'
 cat $O/install.log
@@ -92,53 +116,40 @@ check "lvpm list shows every package asked for" '[ -n "$asked" ] && [ -z "$missi
 [ -n "$missing" ] && echo "  missing: $missing"
 check "every install hook ran" '! grep -q "hooks skipped" $O/list.txt'
 
-# Every folder the packages own, nested ones folded into their parent: the
-# same set the relink pass walks.
-python3 - > /work/folders.txt <<'PY'
-import glob, json
-dirs = sorted({d for f in glob.glob("/var/lib/lvpm/*/installed/*.json") for d in json.load(open(f))["relink_folders"]})
-print("\n".join(d for d in dirs if not any(d.startswith(p + "/") for p in dirs)))
+python3 - > $O/placement.txt <<'PY'
+import glob, json, os
+records = [json.load(open(r)) for r in sorted(glob.glob("/var/lib/lvpm/*/installed/*.json"))]
+files = [(m["name"], f) for m in records for f in m["files"]]
+print(f"{len(files)} file(s) in {len(records)} install record(s)")
+for name, f in files:
+    if not os.path.lexists(f):
+        print(f"not on disk: {name}: {f}")
 PY
-# Broken on purpose: LUnit's example of how a broken test is reported.
-KNOWN_BROKEN="$LV/examples/Astemes/LUnit/Basic Example/Dummy/Test Broken.vi"
-echo "mass compiling $(wc -l < /work/folders.txt) folder(s)"
-n=0; mc_ok=yes
-while read -r d; do
-    n=$((n + 1)); log=$O/masscompile-$n.log
-    cli MassCompile -DirectoryToCompile "$d" -MassCompileLogFile "$log" > "$O/masscompile-$n.out" 2>&1
-    rc=$?
-    bad=$( { grep "Bad VI" "$log" 2>/dev/null || true; } | grep -v -F "Path=\"$KNOWN_BROKEN\"" || true)
-    # Exit 3 is the CLI's "bad VIs found"; with none left once the known one is
-    # set aside, the folder compiled.
-    if [ -f "$log" ] && [ -z "$bad" ] &&
-        { { [ $rc = 0 ] && grep -q "MassCompile operation succeeded" "$O/masscompile-$n.out"; } || [ $rc = 3 ]; }; then
-        echo "  $d ... ok"
-    else
-        mc_ok=no
-        echo "  $d ... FAILED"
-        { [ -f "$log" ] && grep -E "Bad VI|Search failed" "$log" || tail -5 "$O/masscompile-$n.out"; } |
-            sort -u | head -12 | sed 's/^ */      /'
-    fi
-done < /work/folders.txt
-check "mass compile reports no bad VI" '[ $mc_ok = yes ] && [ $n -gt 0 ]'
+head -1 $O/placement.txt
+check "every file in the install records is on disk" \
+    '! grep -q "^0 file" $O/placement.txt && ! grep -q "^not on disk" $O/placement.txt'
+grep "^not on disk" $O/placement.txt | head -20
 
 check "relink --all over the installed packages" '$L relink --all > $O/relink.log 2>&1'
 grep -E "^\s+/|FAILED|saved" $O/relink.log | head -40
 check "lvpm list shows every package relinked" '! $L list 2>/dev/null | grep -q "NOT relinked"'
-cli CloseLabVIEW > $O/close.log 2>&1 || true
-for _ in $(seq 30); do pgrep -x labview >/dev/null || break; sleep 1; done
+close_labview
 
 check "uninstall --all" '$L uninstall --all > $O/uninstall.log 2>&1'
-tree > $O/tree-after.txt
-check "the LabVIEW tree is as it was before the install" 'diff $O/tree-before.txt $O/tree-after.txt > $O/tree.diff'
-[ -s $O/tree.diff ] && head -20 $O/tree.diff
+# The uninstall hooks can start LabVIEW; what it writes as it closes counts too.
+close_labview
+check "the LabVIEW tree is as it was: no file added, gone or changed" 'untouched global'
+show_changes global
 
 cd /work/venv
+snapshot venv
 check "venv create" '$L venv create > $O/venv.log 2>&1'
 check "venv install --relink" '$L install --relink > $O/venv-install.log 2>&1'
 grep -E "^\+|FAILED|relinking|skipped|not run" $O/venv-install.log | head -40
 check "every venv package relinked" \
     '$L list 2>/dev/null | grep -q " relinked" && ! $L list 2>/dev/null | grep -q "NOT relinked"'
+check "the venv left the LabVIEW tree alone" 'untouched venv'
+show_changes venv
 
 echo
 [ "$fails" = 0 ] && echo "all checks passed" || { echo "$fails check(s) failed; logs in the OUT directory"; exit 1; }

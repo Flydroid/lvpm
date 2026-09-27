@@ -86,7 +86,9 @@ Preferences `/etc`, System Installed Libraries `/usr/local/lib`, Public Cache
 LabVIEWCLI on Linux wants `-LabVIEWPath`, the operation name first and
 `-Headless` last; given `-Headless` in between, it prints its usage and exits
 0. A clean mass compile says `MassCompile operation succeeded` and exits 0; a
-broken VI shows as `### Bad VI:` in the log, with exit code 3.
+broken VI shows as `### Bad VI:` in the log, with exit code 3. For each
+project in the folder, the compile writes `<name>.aliases` and
+`.<name>.UserState/` beside it.
 
 ## Verified
 
@@ -126,11 +128,16 @@ in progress.
   `nationalinstruments/labview:2026q3-linux` (pinned).
 - **linux-packages** — `scripts/linux-packages.sh` in the same image, with
   LUnit and G-Image from the public indexes: a headless `install --hooks`
-  (G-Image needs its PostInstall) in which every hook must run, a LabVIEWCLI
-  mass compile of every folder they own that must report no bad VI (but the
-  one LUnit's examples ship broken on purpose),
-  `relink --all`, an uninstall that must leave the LabVIEW tree as it was,
-  and the same set relinked in a venv. Its logs are uploaded.
+  (G-Image needs its PostInstall) in which every hook must run and every
+  recorded file must be on disk, `relink --all`, an uninstall after which no
+  file in the LabVIEW tree is added, gone or changed, and the same set
+  relinked in a venv, which must leave the LabVIEW tree alone. Its logs are
+  uploaded.
+
+  There is no mass compile. A bad VI in a third-party package (LUnit ships
+  one on purpose) or in LabVIEW's own templates says nothing about lvpm, and
+  the compile writes project files into the tree the uninstall check
+  compares.
 
 ## Not done
 

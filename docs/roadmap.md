@@ -210,10 +210,11 @@ workflow is the work.
 
 The container jobs test lvpm with packages it does not control:
 `linux-e2e` with the VIs in `tools/`, `linux-packages` with LUnit and
-G-Image as a reference. Neither was made to test an installer, and their
-quirks end up in lvpm's checks (LUnit ships a VI broken on purpose, which the
-mass compile has to be told about). A package of VIs made for the job would
-test exactly what lvpm answers for, on Windows and Linux alike:
+G-Image as a reference. Neither was made to test an installer: LUnit ships a
+VI broken on purpose, so `linux-packages` cannot ask whether a package's VIs
+work, only whether lvpm put them in place and took them out again. A package
+of VIs made for the job would test exactly what lvpm answers for, on Windows
+and Linux alike:
 
 - a caller whose subVI sits in another folder of the package, which relink
   must fix, and a caller outside the package that links into `<vilib>`, for
@@ -226,9 +227,11 @@ test exactly what lvpm answers for, on Windows and Linux alike:
 - a palette `.mnu`, an `<OS User Documents>` group and a Target Dir written
   with backslashes;
 - a file group into a folder LabVIEW itself uses, such as
-  `<resource>/Framework/Providers/<pkg>`, where relink must stay inside the
+  `<resource>/Framework/Providers/<pkg>`, and a file directly in such a
+  folder, as LUnit's provider library is, where relink must stay inside the
   package's own files;
-- nothing broken, so "no bad VI" stays a plain rule.
+- nothing broken, so the job can run every VI (`vi-run`) and fail on any
+  error.
 
 Saved in LabVIEW 2020, like the relink VI, and zipped into a `.vip` by the
 test scripts as today.
@@ -260,13 +263,18 @@ new branch.
 - `Replace Mode = If Newer` compares timestamps instead of "write when absent".
 - Read hook VIs' `error out` back.
 - A failure part-way through unpacking leaves files behind with no manifest.
-- Relink walks a whole Target Dir even when LabVIEW uses it too. LUnit
-  installs into `resource/Framework/Providers`, and `relink --all` walked all
-  of it and saved 45 files there; which of them are LabVIEW's own is not
-  checked. Same logic on Windows.
-- Uninstall leaves the `.aliases` and `.UserState` files LabVIEW writes
-  beside a package's project once it has opened it, and with them the
-  package's folders.
+- Relink saves LabVIEW's own files. The relink VI takes folders and walks
+  their subfolders too, and a package file that lies directly in a folder
+  LabVIEW fills puts that whole folder in the walk. LUnit's
+  `LUnit Project Provider.lvlib` lies in `resource/Framework/Providers`; a
+  single test VI there made relink save 44 of LabVIEW's files (Actor
+  Framework and AppBuilder providers), still changed after the uninstall.
+  `linux-packages` fails on this. Same code on Windows. Fix: a relink VI
+  that takes the package's files, or no walk of a folder that holds files
+  of others.
+- Uninstall leaves the `.aliases` and `.UserState` files that LabVIEW writes
+  beside a package's project (a mass compile of its folder writes them), and
+  with them the package's folders.
 - `relink --all` never marks a package with nothing to relink, while
   `install --relink` does, so `lvpm list` shows such a package
   `NOT relinked` for good.
