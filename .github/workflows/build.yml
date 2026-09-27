@@ -2,20 +2,32 @@
 # and run lvpm against LabVIEW for Linux in NI's container (docs/linux.md).
 name: build
 
+# Every branch, so a feature branch is tested before it is merged. Tags are
+# left out.
 on:
   push:
-    branches: [main]
+    branches: ['**']
   pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
 
+# A newer push to a branch makes its running build moot; on main every commit
+# keeps its run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   build:
+    # A pull request from a branch of this repository was built by the push
+    # that updated the branch; only one from a fork needs a run of its own.
+    # The jobs below need this one, so they are skipped with it.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
     strategy:
       fail-fast: false
       matrix:

@@ -112,7 +112,8 @@ root.
 ## CI
 
 [.github/workflows/build.yml](../.github/workflows/build.yml), on every push
-to `main`, every pull request, and by hand:
+to any branch, on pull requests from forks, and by hand. A newer push to a
+branch other than `main` cancels its run still in progress.
 
 - **build** — one job per platform on its own runner: `windows-latest`
   (`x86_64-pc-windows-msvc`) and `ubuntu-latest` (static
