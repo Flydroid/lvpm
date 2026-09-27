@@ -24,6 +24,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+/// Where a headless LabVIEW writes what would have been a dialog.
+#[cfg(windows)]
+const HEADLESS_LOG: &str = "%TEMP%\\LabVIEW_*_headless_*_cur.txt";
+#[cfg(target_os = "linux")]
+const HEADLESS_LOG: &str = "/tmp/labview_*_headless_*_cur.txt";
+
 /// Line ending for the ini lvpm writes: LabVIEW's own on each platform.
 #[cfg(windows)]
 const EOL: &str = "\r\n";
@@ -256,13 +262,9 @@ pub fn wait_ready(port: u16, budget: Duration) -> Result<()> {
     // A headless LabVIEW shows no dialogs; what would have been one is in
     // its log instead.
     let hint = if std::env::var_os("LV_RTE_HEADLESS").is_some() {
-        if cfg!(windows) {
-            "(headless LabVIEW: see %TEMP%\\LabVIEW_*_headless_*_cur.txt for what went wrong)"
-        } else {
-            "(headless LabVIEW: see /tmp/labview_*_headless_*_cur.txt for what went wrong)"
-        }
+        format!("(headless LabVIEW: see {HEADLESS_LOG} for what went wrong)")
     } else {
-        "(a dialog may be holding the IDE up — check its window)"
+        "(a dialog may be holding the IDE up — check its window)".to_string()
     };
     bail!(
         "LabVIEW never answered VI Server on port {port} within {}s (last: {last})\n{hint}",

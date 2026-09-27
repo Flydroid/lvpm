@@ -138,7 +138,7 @@ check "both hooks ran" 'grep -q "pre-install ok" /work/log && grep -Eq "lvpm_lin
 check "install records kept in /var/lib/lvpm" '[ -f /var/lib/lvpm/LabVIEW-2026-64bit/installed/lvpm_linux_test.json ]'
 check "a backslashed Target Dir lands in real subfolders" \
     'run install lvpm_linux_relink_test --relink && [ -f "$LV/vi.lib/lvpm_linux_relink_test/sub/Relink Packages.vi" ]'
-check "list shows both relinked" '[ "$($L list 2>/dev/null | grep -c relinked)" = 2 ]'
+check "list shows both relinked" '[ "$($L list 2>/dev/null | grep -v "NOT relinked" | grep -c relinked)" = 2 ]'
 check "run-hooks reruns a PostInstall" 'run run-hooks lvpm_linux_test --labview-version 2026'
 
 VI=$(ls "$HOME"/.cache/lvpm/lvpm-relink-package-*.vi)

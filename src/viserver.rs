@@ -55,14 +55,20 @@ pub fn vi_server_port(target: &LvTarget) -> u16 {
     ini_token(target, "server.tcp.port").and_then(|v| v.parse().ok()).unwrap_or(3363)
 }
 
+/// Whether LabVIEW serves VI Server over TCP when its ini says nothing: on for
+/// Windows; off on Linux, where a 2026 Q3 started on an ini without the key
+/// never listens (NI's Linux container image sets it for that reason).
+#[cfg(windows)]
+const VI_SERVER_DEFAULT: bool = true;
+#[cfg(target_os = "linux")]
+const VI_SERVER_DEFAULT: bool = false;
+
 /// Fail early, and legibly, when a target cannot accept a VI Server client.
 pub fn check_vi_server(target: &LvTarget) -> Result<u16> {
     let enabled = ini_token(target, "server.tcp.enabled")
         .map(|v| v.eq_ignore_ascii_case("true"))
-        // Absent means LabVIEW's own default: on for Windows, off on Linux —
-        // a 2026 Q3 started on an ini without the key never listens. NI's
-        // Linux container image sets it for that reason.
-        .unwrap_or(cfg!(windows));
+        // Absent means LabVIEW's own default.
+        .unwrap_or(VI_SERVER_DEFAULT);
     if !enabled {
         bail!(
             "VI Server is disabled for {} (server.tcp.enabled is not True in {}).\n\

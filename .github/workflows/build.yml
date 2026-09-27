@@ -13,21 +13,17 @@ on:
 permissions:
   contents: read
 
-# A newer push to a branch makes its running build moot; on main every commit
-# keeps its run.
+# A newer push to a branch makes its running build moot. On main each commit
+# gets a group of its own, so none is cancelled or dropped from the queue.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   build:
-    # A pull request from a branch of this repository was built by the push
-    # that updated the branch; only one from a fork needs a run of its own.
-    # The jobs below need this one, so they are skipped with it.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
     strategy:
       fail-fast: false
       matrix:

@@ -112,8 +112,9 @@ root.
 ## CI
 
 [.github/workflows/build.yml](../.github/workflows/build.yml), on every push
-to any branch, on pull requests from forks, and by hand. A newer push to a
-branch other than `main` cancels its run still in progress.
+to any branch, on every pull request (which tests the merge with its base),
+and by hand. A newer push to a branch other than `main` cancels its run still
+in progress.
 
 - **build** — one job per platform on its own runner: `windows-latest`
   (`x86_64-pc-windows-msvc`) and `ubuntu-latest` (static
@@ -124,14 +125,11 @@ branch other than `main` cancels its run still in progress.
 - **linux-e2e** — `scripts/linux-e2e.sh` with the Linux executable, in
   `nationalinstruments/labview:2026q3-linux` (pinned).
 - **linux-packages** — `scripts/linux-packages.sh` in the same image, with
-  public packages that are plain G and need no NI driver (eleven OpenG
-  libraries and the JKI State Machine, with their dependencies): a headless
-  install that must start no LabVIEW; a LabVIEWCLI mass compile of every
-  folder they own, where none of their own files may be a bad VI (a folder
-  shared with LabVIEW holds LabVIEW's files too, and those do not count);
-  `relink --all`; an uninstall that must leave the LabVIEW tree as it was,
-  apart from project files LabVIEW writes itself; and the same set relinked
-  in a venv. Its logs are uploaded.
+  LUnit and G-Image from the public indexes: a headless `install --hooks`
+  (G-Image needs its PostInstall) in which every hook must run, a LabVIEWCLI
+  mass compile of every folder they own that must report no bad VI,
+  `relink --all`, an uninstall that must leave the LabVIEW tree as it was,
+  and the same set relinked in a venv. Its logs are uploaded.
 
 ## Not done
 
