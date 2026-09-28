@@ -49,7 +49,8 @@ struct Cli {
     #[arg(long = "repo", global = true)]
     repos: Vec<String>,
 
-    /// Re-download the indexes instead of using the cache.
+    /// Re-download the indexes now. Without it, a cached index older than an
+    /// hour is re-checked with the server and only downloaded if it changed.
     #[arg(long, global = true)]
     refresh: bool,
 

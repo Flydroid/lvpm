@@ -12,6 +12,7 @@ use anyhow::{Context, Result};
 use md5::{Digest, Md5};
 use std::collections::HashMap;
 use std::path::Path;
+use std::time::{Duration, SystemTime};
 
 /// (index url, base url that `Package.URL` is relative to)
 pub const SOURCES: &[(&str, &str)] = &[
@@ -184,25 +185,146 @@ pub fn load(cache_dir: &Path, refresh: bool, extra: &[String], defaults: bool) -
 
     for (url, base) in &sources {
         let cached = cache_dir.join(format!("{}.idx", cache_name(url)));
-        let body = if cached.exists() && !refresh {
-            std::fs::read_to_string(&cached)?
-        } else {
-            eprintln!("  fetching {url}");
-            let text = reqwest::blocking::Client::builder()
-                .user_agent(concat!("lvpm/", env!("CARGO_PKG_VERSION")))
-                .build()?
-                .get(url)
-                .send()
-                .with_context(|| format!("fetching {url}"))?
-                .error_for_status()?
-                .text()?;
-            std::fs::write(&cached, &text)?;
-            text
+        let meta = cached.with_extension("meta");
+        let body = match (cached.exists(), refresh || is_stale(&cached)) {
+            (true, false) => std::fs::read_to_string(&cached)?,
+            (exists, _) => {
+                // `--refresh` is the escape hatch for a damaged cache, so it
+                // never trusts the copy on disk: no validators, full download.
+                let known = match exists && !refresh {
+                    true => Validators::read(&meta),
+                    false => Validators::default(),
+                };
+                let verb = if known.is_empty() { "fetching" } else { "checking" };
+                eprintln!("  {verb} {url}");
+                match fetch(url, &known) {
+                    Ok(Fetched::Modified(text, fresh)) => {
+                        // Validators go last: a crash in between leaves an
+                        // index with none, which only costs a full download.
+                        let _ = std::fs::remove_file(&meta);
+                        std::fs::write(&cached, &text)?;
+                        fresh.write(&meta)?;
+                        text
+                    }
+                    Ok(Fetched::NotModified) => {
+                        // Restart the clock. If that fails the next run just
+                        // asks again, which is cheap.
+                        let _ = touch(&cached);
+                        std::fs::read_to_string(&cached)?
+                    }
+                    // An expired copy beats none: offline, the feed is only
+                    // a little older than it would otherwise be.
+                    Err(e) if exists => {
+                        eprintln!("  ! {e:#}; using the cached copy");
+                        std::fs::read_to_string(&cached)?
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
         };
         parse_into(&body, base, &mut entries);
     }
 
     Ok(Index { entries })
+}
+
+/// How long a cached index is trusted before the next run asks the server
+/// whether it changed. One hour is also what NI's feed sends as `max-age`.
+const CACHE_MAX_AGE: Duration = Duration::from_secs(60 * 60);
+
+/// True when the cached file is older than [`CACHE_MAX_AGE`]. A file whose
+/// age cannot be read counts as stale, so it gets re-checked.
+fn is_stale(cached: &Path) -> bool {
+    std::fs::metadata(cached)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_none_or(|age| age > CACHE_MAX_AGE)
+}
+
+fn touch(path: &Path) -> std::io::Result<()> {
+    std::fs::File::options()
+        .write(true)
+        .open(path)?
+        .set_modified(SystemTime::now())
+}
+
+/// HTTP cache validators for one feed, kept next to its `.idx` as
+/// `<name>.meta`. Both feeds send an `ETag` and a `Last-Modified`; handing
+/// them back lets an unchanged feed answer 304 instead of re-sending ~1.5 MB.
+#[derive(Debug, Default, PartialEq)]
+struct Validators {
+    etag: Option<String>,
+    last_modified: Option<String>,
+}
+
+impl Validators {
+    fn is_empty(&self) -> bool {
+        self.etag.is_none() && self.last_modified.is_none()
+    }
+
+    /// A missing or unreadable file is no validators: the next check is then
+    /// a full download, never a wrong 304.
+    fn read(path: &Path) -> Self {
+        let text = std::fs::read_to_string(path).unwrap_or_default();
+        let mut v = Self::default();
+        for line in text.lines() {
+            match line.split_once(':') {
+                Some(("ETag", val)) => v.etag = Some(val.trim().to_string()),
+                Some(("Last-Modified", val)) => v.last_modified = Some(val.trim().to_string()),
+                _ => {}
+            }
+        }
+        v
+    }
+
+    fn write(&self, path: &Path) -> Result<()> {
+        if self.is_empty() {
+            return Ok(());
+        }
+        let mut text = String::new();
+        if let Some(e) = &self.etag {
+            text.push_str(&format!("ETag: {e}\n"));
+        }
+        if let Some(l) = &self.last_modified {
+            text.push_str(&format!("Last-Modified: {l}\n"));
+        }
+        std::fs::write(path, text)?;
+        Ok(())
+    }
+}
+
+enum Fetched {
+    Modified(String, Validators),
+    NotModified,
+}
+
+fn fetch(url: &str, known: &Validators) -> Result<Fetched> {
+    use reqwest::header::{ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED};
+
+    let mut req = reqwest::blocking::Client::builder()
+        .user_agent(concat!("lvpm/", env!("CARGO_PKG_VERSION")))
+        .build()?
+        .get(url);
+    if let Some(e) = &known.etag {
+        req = req.header(IF_NONE_MATCH, e);
+    }
+    if let Some(l) = &known.last_modified {
+        req = req.header(IF_MODIFIED_SINCE, l);
+    }
+    let resp = req.send().with_context(|| format!("fetching {url}"))?;
+    if resp.status() == reqwest::StatusCode::NOT_MODIFIED {
+        return Ok(Fetched::NotModified);
+    }
+    let resp = resp.error_for_status()?;
+    let header = |name| {
+        resp.headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
+    };
+    let fresh = Validators { etag: header(ETAG), last_modified: header(LAST_MODIFIED) };
+    Ok(Fetched::Modified(resp.text()?, fresh))
 }
 
 fn parse_into(body: &str, base_url: &str, out: &mut Vec<Entry>) {
@@ -308,6 +430,21 @@ Package.Display Name=A Thing
         assert_eq!(e.requires.len(), 2);
         assert_eq!(e.requires[0].name, "oglib_error");
         assert_eq!(e.requires[0].min.as_ref().unwrap().raw, "4.2.0.23");
+    }
+
+    #[test]
+    fn validators_round_trip() {
+        let dir = std::env::temp_dir().join(format!("lvpm-validators-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("x.meta");
+        let v = Validators {
+            etag: Some("\"9a49df280d3282761a3136447571e294\"".into()),
+            last_modified: Some("Tue, 01 Sep 2026 13:30:13 GMT".into()),
+        };
+        v.write(&path).unwrap();
+        assert_eq!(Validators::read(&path), v);
+        assert!(Validators::read(&dir.join("missing.meta")).is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
