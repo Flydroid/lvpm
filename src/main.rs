@@ -1,5 +1,6 @@
 //! lvpm — an open-source package manager for LabVIEW packages.
 
+mod cache;
 mod config;
 mod index;
 mod install;
@@ -46,7 +47,7 @@ struct Cli {
     #[arg(long, global = true, value_name = "DIR", conflicts_with = "prefix")]
     project: Option<PathBuf>,
 
-    /// Re-download the indexes instead of using the cache.
+    /// Ask each index whether it changed, instead of trusting the cache.
     #[arg(long, global = true)]
     refresh: bool,
 

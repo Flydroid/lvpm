@@ -144,7 +144,7 @@ Flags that apply to every command:
 | `--project <DIR>`          | Use that project's venv instead of looking upwards from the current directory                             |
 | `--global`                 | Use the LabVIEW installation itself, even from inside a project that has a venv                           |
 | `--prefix <DIR>`           | Install into a scratch directory instead of LabVIEW (file copy only; nothing to relink or run hooks with) |
-| `--refresh`                | Re-download the indexes instead of using the cache in `%LOCALAPPDATA%\lvpm\cache`                         |
+| `--refresh`                | Ask each index whether it changed (a conditional request) instead of trusting the cache in `%LOCALAPPDATA%\lvpm\cache` |
 
 `install` flags: `--dry-run` shows every file, relink folder and hook and
 changes nothing; `--no-deps` skips dependencies; `--allow-downgrade` permits
@@ -381,8 +381,14 @@ sections with a `Package.URL`, unchanged since `openg.ogpd` in 2004; `.vipr`
 adds an MD5 per entry. Anything they lack can come from a folder of `.vip` /
 `.ogp` files via the manifest's `[sources]`: a directory of named packages is
 its own index, so a project's `Dependencies` folder works as-is.
-Downloaded indexes are cached in `%LOCALAPPDATA%\lvpm\cache`; `--refresh`
-fetches them again. See [Configuration](#configuration) to move the cache.
+
+Every source lvpm knows is recorded in `%LOCALAPPDATA%\lvpm\cache`, in a
+SQLite index (`lvpm-cache.db`) over a content-addressed store of the bodies
+themselves. Without `--refresh` the stored body is used and nothing goes out
+to the network. With it, the `ETag` and `Last-Modified` the server last gave
+are sent back as a conditional request: only a feed that actually changed is
+downloaded again, and an unchanged one answers `304` and costs no bytes. See
+[Configuration](#configuration) to move the cache.
 
 ## Configuration
 
@@ -397,7 +403,7 @@ empty value counts as unset. Precedence, highest first:
 
 | Variable            | Default                                                                                       | What it sets                        |
 | ------------------- | --------------------------------------------------------------------------------------------- | ----------------------------------- |
-| `LVPM_CONFIG_CACHE` | `%LOCALAPPDATA%\lvpm\cache` (Linux: `$XDG_CACHE_HOME/lvpm/cache`, else `~/.cache/lvpm/cache`) | Where downloaded indexes are cached |
+| `LVPM_CONFIG_CACHE` | `%LOCALAPPDATA%\lvpm\cache` (Linux: `$XDG_CACHE_HOME/lvpm/cache`, else `~/.cache/lvpm/cache`) | Where the cache DB and the downloaded bodies live |
 
 ```powershell
 $env:LVPM_CONFIG_CACHE = 'D:\lvpm-cache'   # this shell only
@@ -434,6 +440,7 @@ runs.
 | ------------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
 | `main.rs`                      | The CLI: commands, target and venv selection, the install plan                                                          |
 | `index.rs`                     | Fetch and parse package directories (`.ogpd` / `index.vipr`), resolve names to versions, scan local repositories        |
+| `cache.rs`                     | The cache: the SQLite index of known sources and the content-addressed store of what they served                        |
 | `spec.rs`                      | The `spec` manifest inside a package (the OGPT `.ogp` format and VIPM's `.vip` dialect)                                 |
 | `project.rs`                   | The project manifest `lvpm.toml`: dependencies and their constraints, sources, minimum LabVIEW, lookup from a directory |
 | `target.rs`                    | LabVIEW detection, and where each `Target Dir` token points                                                             |

@@ -1,10 +1,12 @@
 # Package cache — design (draft)
 
-Status: initial draft, for discussion. Nothing here is implemented yet;
-`index.rs`'s per-URL `.idx` file in `%LOCALAPPDATA%\lvpm\cache` (Windows) —
-lvpm also runs on Linux (see `target.rs`'s non-Windows `detect()`), where the
-same cache today would live under `$XDG_CACHE_HOME/lvpm/cache` or
-`~/.cache/lvpm/cache` — is what exists today and is what this replaces.
+Status: partly implemented. `cache.rs` holds the SQLite DB
+(`lvpm-cache.db`), the content store (`content/sha256/<aa>/<hex>`) and the
+`sources` table, and `index.rs` fetches feed bodies through them — the
+per-URL `.idx` file this replaces is gone. `sources` stands in for the
+`remote_files` table described below and also carries local sources, which
+is why it has a `kind` column; `packages`, `feed_entries` and `lvpm cache
+add` are still design only.
 
 ## Goals
 
