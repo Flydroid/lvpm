@@ -103,7 +103,7 @@ impl Default for Project {
 }
 
 impl Project {
-    /// The `[sources]` as `--repo` arguments: URLs as written, folders made
+    /// The `[sources]` as index arguments: URLs as written, folders made
     /// absolute against the manifest's directory. A folder that does not
     /// exist is an error here rather than a silent miss in the index.
     pub fn resolved_sources(&self, manifest_dir: &Path) -> Result<Vec<String>> {

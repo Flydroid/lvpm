@@ -24,7 +24,8 @@ same cache today would live under `$XDG_CACHE_HOME/lvpm/cache` or
 - A path for the MD5-only world we live in today (VIPM's `index.vipr` /
   JKI's `.ogpd`) to interoperate with a SHA-256-addressed store, so the
   design does not have to wait for those feeds to grow SHA-256.
-- Replace `--repo` with a persistent `lvpm cache add`, so a local folder or
+- Replace the removed `--repo` flag with a persistent `lvpm cache add`, so a
+  local folder or
   local index only has to be registered once, not repeated on every command
   line.
 
@@ -337,9 +338,10 @@ source_ref IN (...)` — a DB read — instead of from `parse_into()` — a
   and a feed entry never downloaded has no cache bytes to point `packages`
   at. `lvpm search` queries both and reports which hits are already cached.
 
-## `lvpm cache add`: replacing `--repo`
+## `lvpm cache add`: what replaces `--repo`
 
-`--repo` was per-invocation and per-command; nothing persisted. `lvpm cache
+The `--repo <URL-or-DIR>` flag is gone: it was per-invocation and
+per-command; nothing persisted. `lvpm cache
 add` registers a source once, and every later command sees it — the local
 counterpart to how the public feeds are always-on, and the first of a
 `lvpm cache <verb>` family that also holds `list`/`remove` here and, later,
@@ -374,13 +376,13 @@ $ lvpm cache remove C:\my\packages\
   they're actually installed, same as a remote feed's entries are.
 - Local sources persist in the global cache DB, not in `lvpm.toml`. A
   project's `[sources]` table is unaffected — that stays the per-project way
-  to add a feed. `lvpm cache add` is the per-_machine_ way, replacing the
-  ad-hoc `--repo` flag.
+  to add a feed. `lvpm cache add` is the per-_machine_ way, taking over from
+  the removed `--repo` flag.
 - This also fully replaces `index.rs`'s `is_local_repo`/`scan_local_repo`
-  path (a `--repo <dir>` naming a folder on disk instead of a URL, scanned
+  path (a `[sources]` entry naming a folder on disk instead of a URL, scanned
   fresh via `entry_from_vip` on every single command): that scan is now a
   one-time `lvpm cache add <dir>`, persisted, instead of being repeated on
-  every invocation that happens to pass `--repo`.
+  every invocation that resolves against a local folder.
 
 ## MD5 vs SHA-256: the transition
 
@@ -460,6 +462,7 @@ digests, one cache, no rewriting the feeds:
 This design is the "package cache shared between venvs" item under
 _Packaging and distribution_, done in a way that also gives the "lvpm.lock"
 item (under _The manifest and the lockfile_) something concrete to key
-against, and replaces `--repo` with `lvpm cache add` as described in the
+against, and takes over from the removed `--repo` flag with `lvpm cache add`
+as described in the
 manifest section of the README. Implementation should land as its own
 roadmap iteration once this draft settles.

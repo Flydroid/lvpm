@@ -144,7 +144,6 @@ Flags that apply to every command:
 | `--project <DIR>`          | Use that project's venv instead of looking upwards from the current directory                             |
 | `--global`                 | Use the LabVIEW installation itself, even from inside a project that has a venv                           |
 | `--prefix <DIR>`           | Install into a scratch directory instead of LabVIEW (file copy only; nothing to relink or run hooks with) |
-| `--repo <URL-or-DIR>`      | Add a repository: a hosted `index.vipr` folder, or a plain local directory of `.vip` files. Repeatable    |
 | `--refresh`                | Re-download the indexes instead of using the cache in `%LOCALAPPDATA%\lvpm\cache`                         |
 
 `install` flags: `--dry-run` shows every file, relink folder and hook and
@@ -380,8 +379,8 @@ cover roughly 98% of the packages listed on vipm.io:
 Both are OGPM's Package Directory format, `[Package <name>-<version>]`
 sections with a `Package.URL`, unchanged since `openg.ogpd` in 2004; `.vipr`
 adds an MD5 per entry. Anything they lack can come from a folder of `.vip` /
-`.ogp` files via `--repo` or the manifest's `[sources]`: a directory of named
-packages is its own index, so a project's `Dependencies` folder works as-is.
+`.ogp` files via the manifest's `[sources]`: a directory of named packages is
+its own index, so a project's `Dependencies` folder works as-is.
 Downloaded indexes are cached in `%LOCALAPPDATA%\lvpm\cache`; `--refresh`
 fetches them again. See [Configuration](#configuration) to move the cache.
 

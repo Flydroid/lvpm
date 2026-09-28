@@ -46,10 +46,6 @@ struct Cli {
     #[arg(long, global = true, value_name = "DIR", conflicts_with = "prefix")]
     project: Option<PathBuf>,
 
-    /// Extra repository folder URL (e.g. http://host:8090/files). Repeatable.
-    #[arg(long = "repo", global = true)]
-    repos: Vec<String>,
-
     /// Re-download the indexes instead of using the cache.
     #[arg(long, global = true)]
     refresh: bool,
@@ -478,10 +474,10 @@ fn manifest_for(
 }
 
 /// Every index the command should see: the manifest's `[sources]` (folders
-/// relative to the manifest) and `--repo`, on top of the public ones unless
-/// the manifest turns those off.
+/// relative to the manifest), on top of the public ones unless the manifest
+/// turns those off.
 fn load_index(cli: &Cli, manifest: Option<&(PathBuf, project::Project)>) -> Result<index::Index> {
-    let mut repos = cli.repos.clone();
+    let mut repos: Vec<String> = Vec::new();
     let mut defaults = true;
     if let Some((path, proj)) = manifest {
         let dir = path.parent().unwrap_or(Path::new("."));
@@ -836,8 +832,8 @@ fn cmd_install(
     if !unresolved.is_empty() {
         bail!(
             "not found in the configured indexes:\n  {}\n\
-             hint: `lvpm search <name>` to see what is available; `--repo <URL-or-DIR>` or \
-             a [sources] entry in {} adds a repository",
+             hint: `lvpm search <name>` to see what is available; a [sources] entry \
+             in {} adds a repository",
             unresolved.join("\n  "),
             project::FILE_NAME
         );

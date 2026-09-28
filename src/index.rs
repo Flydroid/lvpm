@@ -103,7 +103,7 @@ fn cache_name(url: &str) -> String {
     md5_hex(url.as_bytes()).to_uppercase()
 }
 
-/// True for a `--repo` that names a directory on this machine rather than an
+/// True for a source that names a directory on this machine rather than an
 /// HTTP folder. A local repo has no index file to fetch — the packages are the
 /// index, so each one's own `spec` is read instead.
 pub fn is_local_repo(repo: &str) -> bool {
@@ -163,8 +163,8 @@ fn entry_from_vip(path: &Path) -> Result<Entry> {
 }
 
 /// Load every index: the public ones (unless `defaults` is off), then `extra`
-/// — `--repo` arguments and a manifest's `[sources]`, each an index URL or a
-/// local folder of packages.
+/// — a manifest's `[sources]`, each an index URL or a local folder of
+/// packages.
 pub fn load(cache_dir: &Path, refresh: bool, extra: &[String], defaults: bool) -> Result<Index> {
     std::fs::create_dir_all(cache_dir)?;
     let mut entries = Vec::new();
