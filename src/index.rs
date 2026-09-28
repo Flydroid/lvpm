@@ -15,7 +15,7 @@ use reqwest::StatusCode;
 use reqwest::blocking::Client;
 use reqwest::header::{ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// (index url, base url that `Package.URL` is relative to)
 pub const SOURCES: &[(&str, &str)] = &[
@@ -102,24 +102,12 @@ pub fn md5_hex(bytes: &[u8]) -> String {
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// True for a source that names a directory on this machine rather than an
-/// HTTP folder. A local repo has no index file to fetch — the packages are the
-/// index, so each one's own `spec` is read instead.
-pub fn is_local_repo(repo: &str) -> bool {
-    !repo.starts_with("http://") && !repo.starts_with("https://") && Path::new(repo).is_dir()
-}
-
 /// An entry's download location, once resolved: a URL to fetch or a file to read.
 pub fn is_local_url(url: &str) -> bool {
     !url.starts_with("http://") && !url.starts_with("https://")
 }
 
-/// Index every `.vip` in a directory, straight from each package's own `spec`.
-///
-/// A published index carries exactly what a `spec` carries — name, version,
-/// dependency ranges, LabVIEW gate — so a folder of packages resolves like any
-/// feed, dependencies included. There is no MD5: the bytes never travel, so
-/// there is nothing to verify them against.
+/// Index every `.vip` in a local package directory from each package's spec.
 fn scan_local_repo(dir: &Path, out: &mut Vec<Entry>) -> Result<()> {
     let mut vips: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
         .with_context(|| format!("reading repo directory {}", dir.display()))?
@@ -130,8 +118,6 @@ fn scan_local_repo(dir: &Path, out: &mut Vec<Entry>) -> Result<()> {
     vips.sort();
 
     for path in vips {
-        // A package that will not open or parse is reported and skipped: one
-        // bad file in a folder must not make the other packages unresolvable.
         match entry_from_vip(&path) {
             Ok(e) => out.push(e),
             Err(e) => eprintln!("  ! ignoring {}: {e:#}", path.display()),
@@ -161,27 +147,36 @@ fn entry_from_vip(path: &Path) -> Result<Entry> {
     })
 }
 
-/// Load every index: the public ones (unless `defaults` is off), then `extra`
-/// — a manifest's `[sources]`, each an index URL or a local folder of
-/// packages.
-pub fn load(cache_dir: &Path, refresh: bool, extra: &[String], defaults: bool) -> Result<Index> {
-    let cache = Cache::open(cache_dir)?;
+/// Load public indexes, global local package folders, and hosted manifest sources.
+pub fn load(
+    cache_dir: &Path,
+    refresh: bool,
+    extra: &[String],
+    local_sources: &[PathBuf],
+    defaults: bool,
+) -> Result<Index> {
     let mut entries = Vec::new();
+
+    for dir in local_sources {
+        if !dir.is_dir() {
+            anyhow::bail!("local source {} is not a directory", dir.display());
+        }
+        scan_local_repo(dir, &mut entries)?;
+    }
 
     let mut sources: Vec<(String, String)> = match defaults {
         true => SOURCES.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect(),
         false => Vec::new(),
     };
     for repo in extra {
-        if is_local_repo(repo) {
-            let dir = Path::new(repo);
-            scan_local_repo(dir, &mut entries)?;
-            record_local_repo(&cache, dir)?;
-            continue;
-        }
         let base = if repo.ends_with('/') { repo.clone() } else { format!("{repo}/") };
         sources.push((format!("{base}index.vipr"), base));
     }
+
+    if sources.is_empty() {
+        return Ok(Index { entries });
+    }
+    let cache = Cache::open(cache_dir)?;
 
     let client = Client::builder()
         .user_agent(concat!("lvpm/", env!("CARGO_PKG_VERSION")))
@@ -275,27 +270,6 @@ fn feed_body(
     let sha = cache.store(&bytes)?;
     cache.record(url, "remote", base, &SourceState { sha256: Some(sha), ..fresh })?;
     Ok(String::from_utf8_lossy(&bytes).into_owned())
-}
-
-/// Register a local folder, fingerprinted by what it holds: a `.vip` is named
-/// for its own version, so names and sizes change whenever the folder does.
-fn record_local_repo(cache: &Cache, dir: &Path) -> Result<()> {
-    let mut listing: Vec<String> = std::fs::read_dir(dir)?
-        .flatten()
-        .filter(|e| e.path().extension().is_some_and(|x| x.eq_ignore_ascii_case("vip")))
-        .map(|e| {
-            let len = e.metadata().map(|m| m.len()).unwrap_or_default();
-            format!("{}\t{len}", e.file_name().to_string_lossy())
-        })
-        .collect();
-    listing.sort();
-
-    let path = dir.to_string_lossy().into_owned();
-    let st = SourceState {
-        sha256: Some(crate::cache::sha256_hex(listing.join("\n").as_bytes())),
-        ..SourceState::default()
-    };
-    cache.record(&path, "local", &path, &st)
 }
 
 fn parse_into(body: &str, base_url: &str, out: &mut Vec<Entry>) {
@@ -414,6 +388,40 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
         let cache = Cache::open(&root).unwrap();
         (root, cache)
+    }
+
+    #[test]
+    fn local_package_directories_resolve_from_specs_without_cache_blobs() {
+        let root = std::env::temp_dir()
+            .join(format!("lvpm-local-source-test-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let packages = root.join("packages");
+        std::fs::create_dir_all(&packages).unwrap();
+
+        let archive = packages.join("local_thing-1.0.0.vip");
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        writer
+            .start_file("spec", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        writer
+            .write_all(
+                b"[Package]\nName=local_thing\nVersion=1.0.0\nDisplay Name=Local Thing\n[Dependencies]\nRequires=foo>=1.2\n",
+            )
+            .unwrap();
+        std::fs::write(&archive, writer.finish().unwrap().into_inner()).unwrap();
+
+        let idx = load(&root.join("cache"), false, &[], std::slice::from_ref(&packages), false).unwrap();
+        assert_eq!(idx.entries.len(), 1);
+        let entry = &idx.entries[0];
+        assert_eq!(entry.name, "local_thing");
+        assert_eq!(entry.display_name.as_deref(), Some("Local Thing"));
+        assert_eq!(entry.requires[0].name, "foo");
+        assert!(is_local_url(&entry.url));
+        assert_eq!(std::fs::read(&entry.url).unwrap(), std::fs::read(&archive).unwrap());
+        assert_eq!(std::fs::read_dir(root.join("cache/content/sha256")).err().unwrap().kind(), std::io::ErrorKind::NotFound);
+        assert!(!root.join("cache/lvpm-cache.db").exists());
+
+        std::fs::remove_dir_all(&root).ok();
     }
 
     const BODY: &str = "[Self]\nSelf.Name=Test\n";

@@ -3,8 +3,9 @@
 An open-source package manager for LabVIEW.
 
 lvpm resolves `.vip` / `.ogp` packages by name from the public package
-directories or a local folder, downloads them, verifies the MD5 and unpacks
-them into a LabVIEW installation or a project's own venv.
+directories, hosted indexes, or local package folders configured globally.
+It downloads hosted packages, verifies the MD5 and unpacks them into a
+LabVIEW installation or a project's own venv.
 It then relinks the installed VIs and runs the packages' install hooks
 through LabVIEW's VI Server.
 
@@ -157,8 +158,9 @@ started for a venv relink running.
 
 ## The project manifest
 
-`lvpm.toml` at the repo root says what a project depends on, and where from.
-Any `lvpm` command run at or below it picks it up; its `[sources]` apply to
+`lvpm.toml` at the repo root says what a project depends on and which hosted
+indexes to use. Local package folders are configured globally instead. Any
+`lvpm` command run at or below it picks it up; hosted `[sources]` apply to
 `search` and to a single-package `install` as much as to a full one.
 
 ```toml
@@ -168,8 +170,7 @@ version = "0.1.0"
 labview = "2025"                  # the oldest LabVIEW the project is meant for
 
 [sources]                         # repositories beyond the public indexes
-local = "./Dependencies"          # a folder of .vip files, relative to this file
-mirror = "http://host:8090/files" # or a hosted index.vipr folder
+mirror = "http://host:8090/files" # a hosted index.vipr folder
 defaults = true                   # false: only the sources listed here
 
 [dependencies]
@@ -378,9 +379,12 @@ cover roughly 98% of the packages listed on vipm.io:
 
 Both are OGPM's Package Directory format, `[Package <name>-<version>]`
 sections with a `Package.URL`, unchanged since `openg.ogpd` in 2004; `.vipr`
-adds an MD5 per entry. Anything they lack can come from a folder of `.vip` /
-`.ogp` files via the manifest's `[sources]`: a directory of named packages is
-its own index, so a project's `Dependencies` folder works as-is.
+adds an MD5 per entry. Anything they lack can come from an index folder of
+your own, named in the manifest's `[sources]`. A `[sources]` entry is an
+`http://` or `https://` folder holding an `index.vipr`. Local directories of
+`.vip` files are configured globally with `lvpm config set sources.local`
+instead; lvpm reads their specs and package files directly. These local
+packages are not stored in the cache yet.
 
 Every source lvpm knows is recorded in `%LOCALAPPDATA%\lvpm\cache`, in a
 SQLite index (`lvpm-cache.db`) over a content-addressed store of the bodies
@@ -397,16 +401,22 @@ variable is `LVPM_CONFIG_<KEY>` (or lowercase `lvpm_config_<key>`), and an
 empty value counts as unset. Precedence, highest first:
 
 1. Environment variable `LVPM_CONFIG_<KEY>`.
-2. User config file written by `lvpm config set <key> <value>` —
-   **not implemented yet** (see the [roadmap](docs/roadmap.md#configuration)).
+2. User config file at `%LOCALAPPDATA%\lvpm\config.toml` (Linux:
+  `$XDG_CONFIG_HOME/lvpm/config.toml`, else `~/.config/lvpm/config.toml`),
+  written by `lvpm config set`.
 3. Built-in default.
 
-| Variable            | Default                                                                                       | What it sets                        |
-| ------------------- | --------------------------------------------------------------------------------------------- | ----------------------------------- |
-| `LVPM_CONFIG_CACHE` | `%LOCALAPPDATA%\lvpm\cache` (Linux: `$XDG_CACHE_HOME/lvpm/cache`, else `~/.cache/lvpm/cache`) | Where the cache DB and the downloaded bodies live |
+| Variable | Default | What it sets |
+| --- | --- | --- |
+| `LVPM_CONFIG_CACHE` | `%LOCALAPPDATA%\lvpm\cache` (Linux: `$XDG_CACHE_HOME/lvpm/cache`, else `~/.cache/lvpm/cache`) | Where the cache DB and downloaded feed bodies live |
+| `LVPM_CONFIG_SOURCES_LOCAL` | Empty | Local `.vip` directories; separate paths with `;` on Windows or `:` on Linux |
 
 ```powershell
-$env:LVPM_CONFIG_CACHE = 'D:\lvpm-cache'   # this shell only
+lvpm config set sources.local D:\LabVIEW\Packages
+lvpm config get sources.local
+lvpm config set sources.local                 # clear configured local sources
+# Or set LVPM_CONFIG_SOURCES_LOCAL for this shell; it overrides config.toml.
+$env:LVPM_CONFIG_SOURCES_LOCAL = 'D:\LabVIEW\Packages;E:\MorePackages'
 lvpm search caraya
 ```
 
@@ -439,7 +449,7 @@ runs.
 | Module                         | Responsibility                                                                                                          |
 | ------------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
 | `main.rs`                      | The CLI: commands, target and venv selection, the install plan                                                          |
-| `index.rs`                     | Fetch and parse package directories (`.ogpd` / `index.vipr`), resolve names to versions, scan local repositories        |
+| `index.rs`                     | Fetch and parse package directories (`.ogpd` / `index.vipr`), resolve names to versions                                |
 | `cache.rs`                     | The cache: the SQLite index of known sources and the content-addressed store of what they served                        |
 | `spec.rs`                      | The `spec` manifest inside a package (the OGPT `.ogp` format and VIPM's `.vip` dialect)                                 |
 | `project.rs`                   | The project manifest `lvpm.toml`: dependencies and their constraints, sources, minimum LabVIEW, lookup from a directory |

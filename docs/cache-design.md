@@ -2,11 +2,12 @@
 
 Status: partly implemented. `cache.rs` holds the SQLite DB
 (`lvpm-cache.db`), the content store (`content/sha256/<aa>/<hex>`) and the
-`sources` table, and `index.rs` fetches feed bodies through them — the
-per-URL `.idx` file this replaces is gone. `sources` stands in for the
-`remote_files` table described below and also carries local sources, which
-is why it has a `kind` column; `packages`, `feed_entries` and `lvpm cache
-add` are still design only.
+`sources` table, and `index.rs` fetches remote feed bodies through them — the
+per-URL `.idx` file this replaces is gone. The implemented `sources` rows are
+for remote feeds only. Local package directories are set in the user-level
+`config.toml` (or `LVPM_CONFIG_SOURCES_LOCAL`) and scanned directly; their
+packages are not yet stored in the cache. `packages`, `feed_entries` and
+`lvpm cache add` remain design only.
 
 ## Goals
 

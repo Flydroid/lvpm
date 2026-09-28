@@ -7,7 +7,7 @@
 //! labview = "2025"                  # the oldest LabVIEW the project is meant for
 //!
 //! [sources]                         # repositories beyond the public indexes
-//! local = "./Dependencies"          # a folder of .vip files, or an index URL
+//! mirror = "http://host:8090/files" # a hosted index.vipr folder
 //! defaults = true                   # false: only the sources listed here
 //!
 //! [dependencies]
@@ -19,10 +19,8 @@
 //! ni-daqmx-labview-support = "26.0"
 //! ```
 //!
-//! `[sources]` folders are relative to the manifest, so a project's own
-//! `Dependencies` directory works from any working directory, and on any
-//! machine that has the checkout. `labview` is a minimum: a venv binds to that
-//! version or a newer one, never an older one.
+//! `labview` is a minimum: a venv binds to that version or a newer one, never
+//! an older one.
 
 use crate::version::Version;
 use anyhow::{Context, Result, bail};
@@ -78,7 +76,7 @@ pub struct Project {
     /// meant for. A venv binds to this version or a newer one; a global
     /// install still takes its target from `--labview-version`.
     pub labview: Option<String>,
-    /// `[sources]`, in file order: a name, and a URL or a folder as written.
+    /// `[sources]`, in file order: a name and an index URL as written.
     pub sources: Vec<(String, String)>,
     /// Whether the public indexes are consulted too (`sources.defaults`).
     pub default_sources: bool,
@@ -103,23 +101,15 @@ impl Default for Project {
 }
 
 impl Project {
-    /// The `[sources]` as index arguments: URLs as written, folders made
-    /// absolute against the manifest's directory. A folder that does not
-    /// exist is an error here rather than a silent miss in the index.
-    pub fn resolved_sources(&self, manifest_dir: &Path) -> Result<Vec<String>> {
-        let mut out = Vec::new();
+    /// The `[sources]` as index arguments. Only hosted index folders: a path
+    /// on disk is refused here rather than silently resolving nothing.
+    pub fn resolved_sources(&self) -> Result<Vec<String>> {
         for (name, s) in &self.sources {
-            if s.starts_with("http://") || s.starts_with("https://") {
-                out.push(s.clone());
-                continue;
+            if !s.starts_with("http://") && !s.starts_with("https://") {
+                bail!("[sources] {name}: {s:?} is not an http:// or https:// index folder");
             }
-            let p = manifest_dir.join(s);
-            if !p.is_dir() {
-                bail!("[sources] {name}: {} is not a folder", p.display());
-            }
-            out.push(std::path::absolute(&p)?.to_string_lossy().into_owned());
         }
-        Ok(out)
+        Ok(self.sources.iter().map(|(_, s)| s.clone()).collect())
     }
 }
 
@@ -173,7 +163,7 @@ pub fn parse(text: &str) -> Result<Project> {
             ("defaults", toml::Value::Boolean(b)) => p.default_sources = b,
             (_, toml::Value::String(s)) => p.sources.push((key, s)),
             (k, other) => {
-                bail!("[sources] {k}: expected a URL or folder string, got {}", other.type_str())
+                bail!("[sources] {k}: expected an index URL string, got {}", other.type_str())
             }
         }
     }
@@ -202,8 +192,8 @@ version = "0.1.0"
 labview = "2025"
 
 [sources]
-local = "./Dependencies"
 mirror = "http://host:8090/files"
+backup = "https://host/other"
 
 [dependencies]
 oglib_array = "6.0.1.20"
@@ -223,8 +213,8 @@ ni-daqmx-labview-support = "26.0.0.49434-0+f282"
         assert_eq!(
             p.sources,
             vec![
-                ("local".into(), "./Dependencies".into()),
-                ("mirror".into(), "http://host:8090/files".into())
+                ("mirror".into(), "http://host:8090/files".into()),
+                ("backup".into(), "https://host/other".into())
             ]
         );
         assert!(p.default_sources);
@@ -272,17 +262,11 @@ ni-daqmx-labview-support = "26.0.0.49434-0+f282"
     }
 
     #[test]
-    fn source_folders_resolve_against_the_manifest_dir() {
-        let dir = std::env::temp_dir().join(format!("lvpm-project-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("Dependencies")).unwrap();
-        let p = parse("[sources]\nlocal = \"./Dependencies\"\nnet = \"http://h/x\"\n").unwrap();
-        let r = p.resolved_sources(&dir).unwrap();
-        assert_eq!(r.len(), 2);
-        assert!(Path::new(&r[0]).is_absolute() && r[0].ends_with("Dependencies"), "{}", r[0]);
-        assert_eq!(r[1], "http://h/x");
-        let missing = parse("[sources]\nlocal = \"./nope\"\n").unwrap();
-        assert!(missing.resolved_sources(&dir).is_err());
-        let _ = std::fs::remove_dir_all(&dir);
+    fn sources_must_be_hosted_index_folders() {
+        let p = parse("[sources]\nnet = \"http://h/x\"\nsecure = \"https://h/y\"\n").unwrap();
+        assert_eq!(p.resolved_sources().unwrap(), ["http://h/x", "https://h/y"]);
+
+        let folder = parse("[sources]\nlocal = \"./Dependencies\"\n").unwrap();
+        assert!(folder.resolved_sources().is_err(), "a path on disk is not a source");
     }
 }

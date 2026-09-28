@@ -67,8 +67,9 @@ wins over the overlay; `LVAddons.AdditionalLocations` needs LabVIEW 2024 Q1.
 
 ## The manifest and the lockfile - WIP
 
-`lvpm.toml` (done: exact pins, `>=` floors, `*`, `[sources]` with relative
-folders and `defaults = false`, `labview` minimum, `[nipm.dependencies]`).
+`lvpm.toml` (done: exact pins, `>=` floors, `*`, hosted `[sources]` and
+`defaults = false`, `labview` minimum, `[nipm.dependencies]`). Local package
+directories are user-level `sources.local` settings, not manifest sources.
 
 - **`lvpm.lock`** — the resolved closure (name, version, source URL, MD5) so
   `lvpm install` restores the identical venv on another machine and only
@@ -85,13 +86,10 @@ folders and `defaults = false`, `labview` minimum, `[nipm.dependencies]`).
 
 ## Configuration
 
-Done: settings resolve from `LVPM_CONFIG_<KEY>` environment variables, else
-the built-in default (`src/config.rs`); `cache` is the first key.
-
-- **`lvpm config set | get | list | delete <key> [value]`** — persist
-  settings in a user-level config file (npm's `npm config set`), so moving
-  the cache does not need an environment variable in every shell. Precedence
-  becomes environment, then that file, then the default.
+Done: `lvpm config set|get` persists `cache` and `sources.local` in the
+user's `config.toml`; `LVPM_CONFIG_<KEY>` overrides either value. Local
+package directories are global sources, read directly from disk and not yet
+stored in the content cache.
 
 ## Dependency analysis: `lvpm check` / `lvpm tree`
 

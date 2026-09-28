@@ -237,7 +237,7 @@ That last clause is exactly lvpm's relink pass.
 | Path root keywords | `target.rs` (VIPM spelling) | done |
 | Per-file-group `Exclusive_OS` / `Exclusive_LabVIEW_Version` | package-level `lv_gate` only; `<OS …>` groups skipped in a venv | partial |
 | Package Directory `.ogpd` / `Root.ogpd` | `index.rs`; `lvpm.toml [sources]` | done |
-| Local repository, checked first | `[sources] local` | done |
+| Local repository, checked first | global `sources.local` config | done |
 | Package cache | roadmap | planned |
 | Installed-package `_db` | per-package install manifest, `lvpm list` | done |
 | `Requires` with `>=` | `Requirement.min`; other operators and `Conflicts` unparsed | partial |
