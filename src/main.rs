@@ -1,5 +1,6 @@
 //! lvpm — an open-source package manager for LabVIEW packages.
 
+mod config;
 mod index;
 mod install;
 mod launch;
@@ -428,14 +429,6 @@ fn headless_roots(cli: &Cli, repo: &Path) -> Result<Roots> {
     Ok(Roots::labview(&t))
 }
 
-/// The index cache is per-user, not per-target — the feeds are the same.
-fn cache_dir() -> PathBuf {
-    let base = std::env::var("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| std::env::temp_dir());
-    base.join("lvpm").join("cache")
-}
-
 fn cmd_start(cli: &Cli, wait: u64) -> Result<()> {
     let roots = roots_for(cli)?;
     let Some(t) = roots.target else {
@@ -495,7 +488,7 @@ fn load_index(cli: &Cli, manifest: Option<&(PathBuf, project::Project)>) -> Resu
         repos.extend(proj.resolved_sources(dir)?);
         defaults = proj.default_sources;
     }
-    index::load(&cache_dir(), cli.refresh, &repos, defaults)
+    index::load(&config::load()?.cache, cli.refresh, &repos, defaults)
 }
 
 fn cmd_search(cli: &Cli, query: &str) -> Result<()> {
