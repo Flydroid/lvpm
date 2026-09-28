@@ -86,17 +86,17 @@ rather than only ever reading `LOCALAPPDATA`.
 
 ### Overriding the location
 
-An `LVPM_CACHE_DIR` environment variable, checked before any OS default,
-lets it be pointed anywhere — the same idea as `CARGO_HOME`/`npm_config_cache`.
-This matters most in CI: a pipeline can point every job at a cache on a
-persistent runner volume or a job artifact restored between runs, instead of
-downloading every package fresh each build.
+Implemented in `src/config.rs`, npm-style (`npm_config_<key>`): every lvpm
+setting resolves from `LVPM_CONFIG_<KEY>` in the environment, else the
+built-in default. `cache` is the first such key. This matters most in CI: a
+pipeline can point every job at a cache on a persistent runner volume or a
+job artifact restored between runs, instead of downloading every package
+fresh each build.
 
-- `LVPM_CACHE_DIR` set → used as `<root>` directly (so the cache ends up at
-  `$LVPM_CACHE_DIR/cache/...`, keeping the same one-root-many-purposes shape
-  as the OS defaults rather than being special-cased).
-- Unset → the OS default from the table above.
-- `cache_dir()` becomes the one place that resolves this precedence, so
+- `LVPM_CONFIG_CACHE` set → used as the cache directory itself, like
+  `npm_config_cache`.
+- Else the OS default from the table above.
+- `config::load()` is the one place that resolves this precedence, so
   every caller (index loading, the content store, `lvpm cache add`) agrees
   on where things live without re-checking the environment itself.
 
