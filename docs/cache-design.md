@@ -146,7 +146,8 @@ that:
 1. Creates `<root>\cache\`, `content\`, and `tmp\` if they don't exist —
    exactly `create_dir_all`, as today.
 2. Opens (or creates) `lvpm-cache.db`, sets `PRAGMA journal_mode=WAL`, and
-   runs `CREATE TABLE IF NOT EXISTS` / `CREATE VIRTUAL TABLE IF NOT EXISTS`
+  checks the major schema in `PRAGMA user_version`, then runs
+  `CREATE TABLE IF NOT EXISTS` / `CREATE VIRTUAL TABLE IF NOT EXISTS`
    for every table and trigger in this doc.
 3. Returns a ready-to-query handle.
 
@@ -159,11 +160,11 @@ than adding a new lifecycle concept: first run creates it silently, every
 run after is a no-op, and there is never a state where some other command
 runs before the cache exists.
 
-Schema changes later (a column added to `packages`, a new table) need actual
-migration handling once there's data to preserve — plain `IF NOT EXISTS`
-stops being enough the day the shape of an existing table changes. Out of
-scope for this draft; noted so it isn't forgotten when the first migration
-is needed.
+The database currently uses schema version `1` in `PRAGMA user_version`. A
+new SQLite database starts at `0` and is marked `1` after its current schema
+is created. A database with a newer major version is refused rather than read
+with the wrong schema. A future breaking schema change increments this major;
+migration or database replacement can be designed at that point.
 
 ### `packages` — content lookup by name/version
 

@@ -13,6 +13,7 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 const DB_FILE: &str = "lvpm-cache.db";
+const CACHE_SCHEMA_VERSION: i32 = 1;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS sources (
@@ -51,9 +52,18 @@ impl Cache {
         std::fs::create_dir_all(root.join("tmp"))?;
         let db = Connection::open(root.join(DB_FILE))
             .with_context(|| format!("opening {}", root.join(DB_FILE).display()))?;
+        let version: i32 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if version > CACHE_SCHEMA_VERSION {
+            anyhow::bail!(
+                "cache database schema version {version} is newer than lvpm supports ({CACHE_SCHEMA_VERSION}); upgrade lvpm"
+            );
+        }
         // WAL so a search and an install can read the cache concurrently.
         db.pragma_update(None, "journal_mode", "WAL")?;
         db.execute_batch(SCHEMA)?;
+        if version < CACHE_SCHEMA_VERSION {
+            db.pragma_update(None, "user_version", CACHE_SCHEMA_VERSION)?;
+        }
         Ok(Cache { db, root: root.to_path_buf() })
     }
 
@@ -207,6 +217,36 @@ mod tests {
         Cache::open(&root).unwrap().record("dir", "local", "dir", &st).unwrap();
 
         assert_eq!(Cache::open(&root).unwrap().state("dir").unwrap(), Some(st));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn opening_a_cache_records_the_schema_version() {
+        let root = temp_root("version");
+        let c = Cache::open(&root).unwrap();
+        let version: i32 = c.db.pragma_query_value(None, "user_version", |row| row.get(0)).unwrap();
+        assert_eq!(version, CACHE_SCHEMA_VERSION);
+        drop(c);
+
+        let db = Connection::open(root.join(DB_FILE)).unwrap();
+        let version: i32 = db.pragma_query_value(None, "user_version", |row| row.get(0)).unwrap();
+        assert_eq!(version, CACHE_SCHEMA_VERSION);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn opening_a_newer_cache_schema_fails_before_use() {
+        let root = temp_root("newer-version");
+        std::fs::create_dir_all(&root).unwrap();
+        let db = Connection::open(root.join(DB_FILE)).unwrap();
+        db.pragma_update(None, "user_version", CACHE_SCHEMA_VERSION + 1).unwrap();
+        drop(db);
+
+        let error = match Cache::open(&root) {
+            Ok(_) => panic!("a newer schema must not open"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("newer than lvpm supports"));
         std::fs::remove_dir_all(&root).ok();
     }
 }
