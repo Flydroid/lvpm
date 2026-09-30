@@ -1,4 +1,4 @@
-//! `lvpm pack`: build a package from the `[package]` table of an `lvpm.toml`,
+//! `lvpm package build`: build a package from the `[package]` table of an `lvpm.toml`,
 //! without LabVIEW or VIPM.
 //!
 //! The output is the vip 2017 format VIPM writes and `install` reads: a ZIP
