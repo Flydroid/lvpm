@@ -4,6 +4,7 @@ mod config;
 mod index;
 mod install;
 mod launch;
+mod pack;
 mod project;
 mod refresh;
 mod relink;
@@ -233,6 +234,19 @@ enum Cmd {
     List,
     /// Search the indexes.
     Search { query: String },
+    /// Build the package the `[package]` table of an `lvpm.toml` describes,
+    /// without LabVIEW or VIPM.
+    Pack {
+        /// The manifest; default: the nearest `lvpm.toml` at or above here.
+        #[arg(long, value_name = "FILE")]
+        manifest: Option<PathBuf>,
+        /// Write the package here instead of `[package] output`.
+        #[arg(long, value_name = "DIR")]
+        output: Option<PathBuf>,
+        /// Use this version instead of `[package] version`, e.g. from CI.
+        #[arg(long = "set-version", value_name = "VERSION")]
+        set_version: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -293,7 +307,35 @@ fn main() -> Result<()> {
         Cmd::Launch { lvproj } => cmd_launch(&cli, lvproj.as_deref()),
         Cmd::List => cmd_list(&cli),
         Cmd::Search { query } => cmd_search(&cli, query),
+        Cmd::Pack { manifest, output, set_version } => {
+            cmd_pack(manifest.as_deref(), output.as_deref(), set_version.as_deref())
+        }
     }
+}
+
+fn cmd_pack(manifest: Option<&Path>, output: Option<&Path>, set_version: Option<&str>) -> Result<()> {
+    let path = match manifest {
+        Some(p) => p.to_path_buf(),
+        None => project::find_manifest(&std::env::current_dir()?)
+            .context("no lvpm.toml here or above; pass --manifest")?,
+    };
+    let text = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let base = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let mut pkg = pack::parse(&text, base).with_context(|| format!("[package] in {}", path.display()))?;
+    if let Some(v) = set_version {
+        pack::check_version(v)?;
+        pkg.version = v.to_string();
+    }
+    if let Some(o) = output {
+        pkg.output = o.to_path_buf();
+    }
+    let out = pkg.build()?;
+    println!("packed {} {} ({} files)", pkg.name, pkg.version, pkg.files.len());
+    for (file, _) in &pkg.files {
+        println!("  {file}");
+    }
+    println!("-> {}", out.display());
+    Ok(())
 }
 
 /// Resolve `--labview` / `--prefix` into a set of roots.
