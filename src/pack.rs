@@ -15,6 +15,7 @@
 //! vendor = "NFG"
 //! labview = "25.0"                      # minimum LabVIEW version
 //! output = "dist"                       # relative to lvpm.toml, default "dist"
+//! icon = "icon.bmp"                     # optional BMP; default: a plain 36x36 icon
 //!
 //! [package.requires]                    # optional, same syntax as [dependencies]
 //! oglib_error = ">=6.0.1"
@@ -28,7 +29,7 @@
 use crate::index::md5_hex;
 use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
-use std::io::{Seek, Write};
+use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
@@ -50,6 +51,56 @@ pub struct Package {
     /// (path below the LabVIEW directory with `/`, file on disk), sorted.
     pub files: Vec<(String, PathBuf)>,
     pub output: PathBuf,
+    /// Package icon (BMP); a plain default icon if not set.
+    pub icon: Option<PathBuf>,
+}
+
+/// A plain 36×36 24-bit BMP, the size and format of VIPM's own icons: a grey
+/// tile with a dark border.
+pub fn default_icon() -> Vec<u8> {
+    const SIZE: u32 = 36;
+    let row = (SIZE * 3).div_ceil(4) * 4;
+    let data_len = row * SIZE;
+    let mut bmp = Vec::with_capacity(54 + data_len as usize);
+    bmp.extend_from_slice(b"BM");
+    bmp.extend_from_slice(&(54 + data_len).to_le_bytes()); // file size
+    bmp.extend_from_slice(&0u32.to_le_bytes()); // reserved
+    bmp.extend_from_slice(&54u32.to_le_bytes()); // pixel data offset
+    bmp.extend_from_slice(&40u32.to_le_bytes()); // BITMAPINFOHEADER
+    bmp.extend_from_slice(&(SIZE as i32).to_le_bytes());
+    bmp.extend_from_slice(&(SIZE as i32).to_le_bytes());
+    bmp.extend_from_slice(&1u16.to_le_bytes()); // planes
+    bmp.extend_from_slice(&24u16.to_le_bytes()); // bits per pixel
+    bmp.extend_from_slice(&0u32.to_le_bytes()); // no compression
+    bmp.extend_from_slice(&data_len.to_le_bytes());
+    bmp.extend_from_slice(&[0u8; 16]); // resolution, palette: unused
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let border = x < 2 || y < 2 || x >= SIZE - 2 || y >= SIZE - 2;
+            bmp.extend_from_slice(if border { &[0x40, 0x40, 0x40] } else { &[0xD0, 0xD0, 0xD0] });
+        }
+        bmp.resize(bmp.len() + (row - SIZE * 3) as usize, 0);
+    }
+    bmp
+}
+
+/// Zero the external file attributes of every central-directory entry, as
+/// VIPM writes them. The `zip` crate always stores a Unix file mode there.
+fn clear_external_attributes(bytes: &mut [u8]) -> Result<()> {
+    let u16_at = |b: &[u8], i: usize| u16::from_le_bytes([b[i], b[i + 1]]) as usize;
+    let u32_at = |b: &[u8], i: usize| u32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]) as usize;
+    let eocd = (0..=bytes.len().saturating_sub(22))
+        .rev()
+        .find(|&i| bytes[i..].starts_with(b"PK\x05\x06"))
+        .context("no end of central directory")?;
+    let entries = u16_at(bytes, eocd + 10);
+    let mut i = u32_at(bytes, eocd + 16);
+    for _ in 0..entries {
+        ensure!(bytes[i..].starts_with(b"PK\x01\x02"), "corrupt central directory");
+        bytes[i + 38..i + 42].fill(0);
+        i += 46 + u16_at(bytes, i + 28) + u16_at(bytes, i + 30) + u16_at(bytes, i + 32);
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -73,6 +124,7 @@ struct PackageTable {
     release_notes: String,
     labview: String,
     output: Option<String>,
+    icon: Option<String>,
     #[serde(default)]
     requires: toml::Table,
     #[serde(default)]
@@ -141,6 +193,7 @@ pub fn parse(text: &str, base_dir: &Path) -> Result<Package> {
         requires,
         files,
         output: base_dir.join(t.output.as_deref().unwrap_or("dist")),
+        icon: t.icon.map(|icon| base_dir.join(icon)),
     })
 }
 
@@ -356,15 +409,26 @@ impl Package {
         lines.join("\r\n")
     }
 
-    /// Write the package: the files, then `spec` last (as VIPM does).
-    pub fn write<W: Write + Seek>(&self, out: W) -> Result<W> {
+    /// Write the package as VIPM lays it out: `icon.bmp` first, the files,
+    /// `spec` last, and no file attributes in the central directory.
+    pub fn write<W: Write>(&self, mut out: W) -> Result<W> {
         let spec = self.spec();
         ensure!(
             spec.is_ascii(),
             "package metadata and file names must be ASCII (the spec is)"
         );
+        let icon = match &self.icon {
+            Some(path) => {
+                let bmp = std::fs::read(path).with_context(|| format!("reading icon {}", path.display()))?;
+                ensure!(bmp.starts_with(b"BM"), "icon {} is not a BMP file", path.display());
+                bmp
+            }
+            None => default_icon(),
+        };
         let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
-        let mut zip = ZipWriter::new(out);
+        let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
+        zip.start_file("icon.bmp", options)?;
+        zip.write_all(&icon)?;
         for (path, source) in &self.files {
             zip.start_file(format!("File Group 0/{path}"), options)?;
             std::io::copy(
@@ -375,10 +439,14 @@ impl Package {
         }
         zip.start_file("spec", options)?;
         zip.write_all(spec.as_bytes())?;
-        Ok(zip.finish()?)
+        let mut bytes = zip.finish()?.into_inner();
+        clear_external_attributes(&mut bytes)?;
+        out.write_all(&bytes)?;
+        Ok(out)
     }
 
-    /// Write `<output>/<name>-<version>.vip`; returns its path.
+    /// Write `<output>/<name>-<version>.vip` (replacing one of that name);
+    /// returns its path.
     pub fn build(&self) -> Result<PathBuf> {
         std::fs::create_dir_all(&self.output)
             .with_context(|| format!("creating {}", self.output.display()))?;
@@ -509,6 +577,55 @@ target = "vi.lib/NFG/ADLINK PXI Trigger/"
             spec.script_vis.iter().all(|(_, vi)| vi.is_empty()),
             "no hooks"
         );
+    }
+
+    #[test]
+    fn layout_matches_vipm_icon_first_and_no_file_attributes() {
+        let dir = sources();
+        let p = parse(MANIFEST, dir.path()).unwrap();
+        let bytes = p.write(Vec::new()).unwrap();
+
+        let mut zip = zip::ZipArchive::new(Cursor::new(bytes.clone())).unwrap();
+        assert_eq!(zip.by_index(0).unwrap().name(), "icon.bmp");
+        let mut icon = Vec::new();
+        zip.by_index(0).unwrap().read_to_end(&mut icon).unwrap();
+        assert_eq!(icon, default_icon());
+
+        // Every central directory entry: external attributes 0, as VIPM writes.
+        let cd = bytes.windows(4).enumerate().filter(|(_, w)| *w == b"PK\x01\x02").map(|(i, _)| i).collect::<Vec<_>>();
+        assert_eq!(cd.len(), zip.len());
+        for i in cd {
+            assert_eq!(&bytes[i + 38..i + 42], &[0, 0, 0, 0], "attributes at {i}");
+        }
+    }
+
+    #[test]
+    fn default_icon_is_a_36x36_24bit_bmp() {
+        let bmp = default_icon();
+        let u32_at = |i: usize| u32::from_le_bytes(bmp[i..i + 4].try_into().unwrap());
+        assert_eq!(&bmp[..2], b"BM");
+        assert_eq!(u32_at(2) as usize, bmp.len());
+        assert_eq!((u32_at(18), u32_at(22)), (36, 36));
+        assert_eq!(u16::from_le_bytes([bmp[28], bmp[29]]), 24);
+        assert_eq!(bmp.len(), 54 + 36 * 108);
+    }
+
+    #[test]
+    fn custom_icon_is_used_and_must_be_a_bmp() {
+        let dir = sources();
+        std::fs::write(dir.path().join("icon.bmp"), b"BMcustom").unwrap();
+        std::fs::write(dir.path().join("icon.png"), b"\x89PNG").unwrap();
+        let with = |icon: &str| MANIFEST.replace("labview = \"25.0\"", &format!("labview = \"25.0\"\nicon = \"{icon}\""));
+
+        let p = parse(&with("icon.bmp"), dir.path()).unwrap();
+        let bytes = p.write(Vec::new()).unwrap();
+        let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+        let mut icon = Vec::new();
+        zip.by_name("icon.bmp").unwrap().read_to_end(&mut icon).unwrap();
+        assert_eq!(icon, b"BMcustom");
+
+        let p = parse(&with("icon.png"), dir.path()).unwrap();
+        assert!(format!("{:#}", p.write(Vec::new()).unwrap_err()).contains("not a BMP"));
     }
 
     #[test]
