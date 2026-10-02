@@ -127,6 +127,10 @@ records) and make it first-class:
   - Own `User-Agent` stays `lvpm/<version>`: honest, and the first thing to
   check if a public index starts closing connections on us.
 
+## lvpm build command
+- Run a standard or custom "Build.vi"
+- support passing arguments to Pre-Build and Post-Build VIs
+
 ## From the OGPM design, not yet started
 
 - **`lvpm verify <pkg>`** — OGPM Package Verification: compare installed files
