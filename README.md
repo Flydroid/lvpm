@@ -97,8 +97,8 @@ For a project, write an `lvpm.toml` (next section), then:
 
 ```console
 $ cd C:\Git\MyProject
-$ lvpm venv create --labview-version 2026   # .project/ beside lvpm.toml
-$ lvpm install                              # everything lvpm.toml lists, into .project
+$ lvpm venv create --labview-version 2026   # .lv-venv/ beside lvpm.toml by default
+$ lvpm install                              # everything lvpm.toml lists, into .lv-venv
 $ lvpm launch MyProject.lvproj              # a LabVIEW that sees the venv
 ```
 
@@ -195,19 +195,19 @@ on the machine.
 ```console
 $ cd C:\Git\MyProject
 $ lvpm venv create --labview-version 2026
-created C:\Git\MyProject\.project
+created C:\Git\MyProject\.lv-venv
   bound to       LabVIEW 2026 (64-bit)  v26.3
   VI Server port 3735
 
-$ lvpm install                    # everything lvpm.toml lists, into .project
-$ lvpm install oglib_error        # one more package, into .project
+$ lvpm install                    # everything lvpm.toml lists, into .lv-venv
+$ lvpm install oglib_error        # one more package, into .lv-venv
 $ lvpm launch MyProject.lvproj    # a LabVIEW that sees the venv
 ```
 
-- `lvpm venv create` makes `.project/` beside `lvpm.toml` and binds it to a
+- `lvpm venv create` makes `.lv-venv/` beside `lvpm.toml` by default and binds it to a
   LabVIEW version: `--labview-version`, else the manifest's `labview`.
   Binding to a newer IDE than the manifest's minimum is fine; an older one is
-  refused. `.project/` ignores itself in git; the manifest is what you
+  refused. The venv directory ignores itself in git; the manifest is what you
   commit. `lvpm venv status` shows the binding, `lvpm venv remove` deletes
   the venv and everything in it.
 - No activation step. Like cargo or npm, any `lvpm` command run at or below a
@@ -220,7 +220,7 @@ $ lvpm launch MyProject.lvproj    # a LabVIEW that sees the venv
   target's `LabVIEW.ini` with the venv mounted and VI Server on a port of its
   own, handed over with `-pref`. Your primary LabVIEW, if open, is untouched.
 
-How it works: `.project/` is an [LVAddons](https://labviewwiki.org/wiki/LVAddons)
+How it works: the venv directory is an [LVAddons](https://labviewwiki.org/wiki/LVAddons)
 location, one addon per package, each mirroring the LabVIEW install dir
 under `<pkg>/1/`. A LabVIEW started with `LVAddons.AdditionalLocations`
 pointing there overlays them onto its own tree, so a package in the venv
@@ -410,13 +410,18 @@ empty value counts as unset. Precedence, highest first:
 | --- | --- | --- |
 | `LVPM_CONFIG_CACHE` | `%LOCALAPPDATA%\lvpm\cache` (Linux: `$XDG_CACHE_HOME/lvpm/cache`, else `~/.cache/lvpm/cache`) | Where the cache DB and downloaded feed bodies live |
 | `LVPM_CONFIG_SOURCES_LOCAL` | Empty | Local `.vip` directories; separate paths with `;` on Windows or `:` on Linux |
+| `LVPM_CONFIG_VENV_DIR` | `.lv-venv` | Project-relative venv directory (or an absolute path) |
 
 ```powershell
 lvpm config set sources.local D:\LabVIEW\Packages
 lvpm config get sources.local
 lvpm config set sources.local                 # clear configured local sources
+lvpm config set venv.dir .venv
+lvpm config get venv.dir
 # Or set LVPM_CONFIG_SOURCES_LOCAL for this shell; it overrides config.toml.
 $env:LVPM_CONFIG_SOURCES_LOCAL = 'D:\LabVIEW\Packages;E:\MorePackages'
+# Relative venv.dir values resolve from each project root; absolute paths are used as-is.
+$env:LVPM_CONFIG_VENV_DIR = '.venv'
 lvpm search caraya
 ```
 
@@ -455,7 +460,7 @@ runs.
 | `project.rs`                   | The project manifest `lvpm.toml`: dependencies and their constraints, sources, minimum LabVIEW, lookup from a directory |
 | `target.rs`                    | LabVIEW detection, and where each `Target Dir` token points                                                             |
 | `install.rs`                   | Plan, unpack, extract hook VIs, record a manifest, uninstall                                                            |
-| `venv.rs`                      | A project's `.project/` venv: binding, lookup from the working directory, `lvpm venv`                                   |
+| `venv.rs`                      | A project's `.lv-venv/` venv by default: binding, lookup from the working directory, `lvpm venv`                       |
 | `launch.rs`                    | Start LabVIEW on a venv: the `-pref` ini, readiness by handshake, detached spawning                                     |
 | `relink.rs`                    | Drive the embedded relink VI over installed folders; folder collapsing and retries                                      |
 | `refresh.rs`                   | Rebuild palettes and menus through LabVIEW's own shipping VIs                                                           |
