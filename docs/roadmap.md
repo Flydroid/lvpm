@@ -13,7 +13,7 @@ document is the checklist.
 
 ## Per-project dependencies (venvs)
 
-A project keeps its packages under `.project/`, mounted into LabVIEW as an
+A project keeps its packages under `.lv-venv/` by default, mounted into LabVIEW as an
 LVAddons location. Background and the measurements behind the design: the
 overlay gives `<vilib>`-relative linkage (portable, identical to a global
 install); LabVIEW reads addon contents at launch; the real install always
