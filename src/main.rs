@@ -1,5 +1,6 @@
 //! lvpm — an open-source package manager for LabVIEW packages.
 
+mod cache;
 mod config;
 mod index;
 mod install;
@@ -46,11 +47,7 @@ struct Cli {
     #[arg(long, global = true, value_name = "DIR", conflicts_with = "prefix")]
     project: Option<PathBuf>,
 
-    /// Extra repository folder URL (e.g. http://host:8090/files). Repeatable.
-    #[arg(long = "repo", global = true)]
-    repos: Vec<String>,
-
-    /// Re-download the indexes instead of using the cache.
+    /// Ask each index whether it changed, instead of trusting the cache.
     #[arg(long, global = true)]
     refresh: bool,
 
@@ -220,6 +217,9 @@ enum Cmd {
     /// mounted into LabVIEW as an LVAddons location by `lvpm launch`.
     #[command(subcommand)]
     Venv(VenvCmd),
+    /// Read or change user-level lvpm settings.
+    #[command(subcommand)]
+    Config(ConfigCmd),
     /// Start LabVIEW on the project's venv, optionally opening a project file.
     ///
     /// LabVIEW reads the venv's contents when it starts, so a LabVIEW that
@@ -248,6 +248,14 @@ enum VenvCmd {
         #[arg(long, short = 'y')]
         yes: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum ConfigCmd {
+    /// Set a user-level setting. `sources.local` accepts directories; omit them to clear the list.
+    Set { key: String, values: Vec<String> },
+    /// Show the effective value of a setting.
+    Get { key: String },
 }
 
 fn main() -> Result<()> {
@@ -290,6 +298,17 @@ fn main() -> Result<()> {
             cmd_vi_run(&cli, vi, sets, gets, *get_all, *timeout, watch.as_deref(), *poll_ms, done)
         }
         Cmd::Venv(sub) => cmd_venv(&cli, sub),
+        Cmd::Config(ConfigCmd::Set { key, values }) => {
+            config::set(key, values)?;
+            println!("set {key}");
+            Ok(())
+        }
+        Cmd::Config(ConfigCmd::Get { key }) => {
+            for value in config::get(key)? {
+                println!("{value}");
+            }
+            Ok(())
+        }
         Cmd::Launch { lvproj } => cmd_launch(&cli, lvproj.as_deref()),
         Cmd::List => cmd_list(&cli),
         Cmd::Search { query } => cmd_search(&cli, query),
@@ -477,18 +496,17 @@ fn manifest_for(
     }
 }
 
-/// Every index the command should see: the manifest's `[sources]` (folders
-/// relative to the manifest) and `--repo`, on top of the public ones unless
-/// the manifest turns those off.
+/// Every index the command should see: global local folders plus hosted
+/// manifest sources, on top of the public indexes unless disabled.
 fn load_index(cli: &Cli, manifest: Option<&(PathBuf, project::Project)>) -> Result<index::Index> {
-    let mut repos = cli.repos.clone();
+    let config = config::load()?;
+    let mut repos: Vec<String> = Vec::new();
     let mut defaults = true;
-    if let Some((path, proj)) = manifest {
-        let dir = path.parent().unwrap_or(Path::new("."));
-        repos.extend(proj.resolved_sources(dir)?);
+    if let Some((_, proj)) = manifest {
+        repos.extend(proj.resolved_sources()?);
         defaults = proj.default_sources;
     }
-    index::load(&config::load()?.cache, cli.refresh, &repos, defaults)
+    index::load(&config.cache, cli.refresh, &repos, &config.local_sources, defaults)
 }
 
 fn cmd_search(cli: &Cli, query: &str) -> Result<()> {
@@ -836,8 +854,8 @@ fn cmd_install(
     if !unresolved.is_empty() {
         bail!(
             "not found in the configured indexes:\n  {}\n\
-             hint: `lvpm search <name>` to see what is available; `--repo <URL-or-DIR>` or \
-             a [sources] entry in {} adds a repository",
+             hint: `lvpm search <name>` to see what is available; a [sources] entry \
+             in {} adds a repository",
             unresolved.join("\n  "),
             project::FILE_NAME
         );
@@ -930,8 +948,6 @@ fn cmd_install(
         print!("{} {} {} ... ", if dry_run { "?" } else { "+" }, e.name, e.version);
         std::io::stdout().flush().ok();
 
-        // A local repo's entries carry a path, not a URL, and their bytes never
-        // travel — so there is no MD5 to check either.
         let bytes = if index::is_local_url(&e.url) {
             std::fs::read(&e.url).with_context(|| format!("reading {}", e.url))?
         } else {

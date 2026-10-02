@@ -1,10 +1,13 @@
 # Package cache — design (draft)
 
-Status: initial draft, for discussion. Nothing here is implemented yet;
-`index.rs`'s per-URL `.idx` file in `%LOCALAPPDATA%\lvpm\cache` (Windows) —
-lvpm also runs on Linux (see `target.rs`'s non-Windows `detect()`), where the
-same cache today would live under `$XDG_CACHE_HOME/lvpm/cache` or
-`~/.cache/lvpm/cache` — is what exists today and is what this replaces.
+Status: partly implemented. `cache.rs` holds the SQLite DB
+(`lvpm-cache.db`), the content store (`content/sha256/<aa>/<hex>`) and the
+`sources` table, and `index.rs` fetches remote feed bodies through them — the
+per-URL `.idx` file this replaces is gone. The implemented `sources` rows are
+for remote feeds only. Local package directories are set in the user-level
+`config.toml` (or `LVPM_CONFIG_SOURCES_LOCAL`) and scanned directly; their
+packages are not yet stored in the cache. `packages`, `feed_entries` and
+`lvpm cache add` remain design only.
 
 ## Goals
 
@@ -24,7 +27,8 @@ same cache today would live under `$XDG_CACHE_HOME/lvpm/cache` or
 - A path for the MD5-only world we live in today (VIPM's `index.vipr` /
   JKI's `.ogpd`) to interoperate with a SHA-256-addressed store, so the
   design does not have to wait for those feeds to grow SHA-256.
-- Replace `--repo` with a persistent `lvpm cache add`, so a local folder or
+- Replace the removed `--repo` flag with a persistent `lvpm cache add`, so a
+  local folder or
   local index only has to be registered once, not repeated on every command
   line.
 
@@ -142,7 +146,8 @@ that:
 1. Creates `<root>\cache\`, `content\`, and `tmp\` if they don't exist —
    exactly `create_dir_all`, as today.
 2. Opens (or creates) `lvpm-cache.db`, sets `PRAGMA journal_mode=WAL`, and
-   runs `CREATE TABLE IF NOT EXISTS` / `CREATE VIRTUAL TABLE IF NOT EXISTS`
+  checks the major schema in `PRAGMA user_version`, then runs
+  `CREATE TABLE IF NOT EXISTS` / `CREATE VIRTUAL TABLE IF NOT EXISTS`
    for every table and trigger in this doc.
 3. Returns a ready-to-query handle.
 
@@ -155,11 +160,11 @@ than adding a new lifecycle concept: first run creates it silently, every
 run after is a no-op, and there is never a state where some other command
 runs before the cache exists.
 
-Schema changes later (a column added to `packages`, a new table) need actual
-migration handling once there's data to preserve — plain `IF NOT EXISTS`
-stops being enough the day the shape of an existing table changes. Out of
-scope for this draft; noted so it isn't forgotten when the first migration
-is needed.
+The database currently uses schema version `1` in `PRAGMA user_version`. A
+new SQLite database starts at `0` and is marked `1` after its current schema
+is created. A database with a newer major version is refused rather than read
+with the wrong schema. A future breaking schema change increments this major;
+migration or database replacement can be designed at that point.
 
 ### `packages` — content lookup by name/version
 
@@ -337,9 +342,10 @@ source_ref IN (...)` — a DB read — instead of from `parse_into()` — a
   and a feed entry never downloaded has no cache bytes to point `packages`
   at. `lvpm search` queries both and reports which hits are already cached.
 
-## `lvpm cache add`: replacing `--repo`
+## `lvpm cache add`: what replaces `--repo`
 
-`--repo` was per-invocation and per-command; nothing persisted. `lvpm cache
+The `--repo <URL-or-DIR>` flag is gone: it was per-invocation and
+per-command; nothing persisted. `lvpm cache
 add` registers a source once, and every later command sees it — the local
 counterpart to how the public feeds are always-on, and the first of a
 `lvpm cache <verb>` family that also holds `list`/`remove` here and, later,
@@ -374,13 +380,13 @@ $ lvpm cache remove C:\my\packages\
   they're actually installed, same as a remote feed's entries are.
 - Local sources persist in the global cache DB, not in `lvpm.toml`. A
   project's `[sources]` table is unaffected — that stays the per-project way
-  to add a feed. `lvpm cache add` is the per-_machine_ way, replacing the
-  ad-hoc `--repo` flag.
+  to add a feed. `lvpm cache add` is the per-_machine_ way, taking over from
+  the removed `--repo` flag.
 - This also fully replaces `index.rs`'s `is_local_repo`/`scan_local_repo`
-  path (a `--repo <dir>` naming a folder on disk instead of a URL, scanned
+  path (a `[sources]` entry naming a folder on disk instead of a URL, scanned
   fresh via `entry_from_vip` on every single command): that scan is now a
   one-time `lvpm cache add <dir>`, persisted, instead of being repeated on
-  every invocation that happens to pass `--repo`.
+  every invocation that resolves against a local folder.
 
 ## MD5 vs SHA-256: the transition
 
@@ -460,6 +466,7 @@ digests, one cache, no rewriting the feeds:
 This design is the "package cache shared between venvs" item under
 _Packaging and distribution_, done in a way that also gives the "lvpm.lock"
 item (under _The manifest and the lockfile_) something concrete to key
-against, and replaces `--repo` with `lvpm cache add` as described in the
+against, and takes over from the removed `--repo` flag with `lvpm cache add`
+as described in the
 manifest section of the README. Implementation should land as its own
 roadmap iteration once this draft settles.

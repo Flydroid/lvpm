@@ -7,11 +7,15 @@
 //! resolver needs. A local directory of named packages is a "local repository"
 //! and indexes itself from each package's own spec.
 
+use crate::cache::{Cache, SourceState};
 use crate::version::{split_id, Version};
 use anyhow::{Context, Result};
 use md5::{Digest, Md5};
+use reqwest::StatusCode;
+use reqwest::blocking::Client;
+use reqwest::header::{ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// (index url, base url that `Package.URL` is relative to)
 pub const SOURCES: &[(&str, &str)] = &[
@@ -98,29 +102,12 @@ pub fn md5_hex(bytes: &[u8]) -> String {
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Cache file name: the uppercase MD5 of the source URL.
-fn cache_name(url: &str) -> String {
-    md5_hex(url.as_bytes()).to_uppercase()
-}
-
-/// True for a `--repo` that names a directory on this machine rather than an
-/// HTTP folder. A local repo has no index file to fetch — the packages are the
-/// index, so each one's own `spec` is read instead.
-pub fn is_local_repo(repo: &str) -> bool {
-    !repo.starts_with("http://") && !repo.starts_with("https://") && Path::new(repo).is_dir()
-}
-
 /// An entry's download location, once resolved: a URL to fetch or a file to read.
 pub fn is_local_url(url: &str) -> bool {
     !url.starts_with("http://") && !url.starts_with("https://")
 }
 
-/// Index every `.vip` in a directory, straight from each package's own `spec`.
-///
-/// A published index carries exactly what a `spec` carries — name, version,
-/// dependency ranges, LabVIEW gate — so a folder of packages resolves like any
-/// feed, dependencies included. There is no MD5: the bytes never travel, so
-/// there is nothing to verify them against.
+/// Index every `.vip` in a local package directory from each package's spec.
 fn scan_local_repo(dir: &Path, out: &mut Vec<Entry>) -> Result<()> {
     let mut vips: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
         .with_context(|| format!("reading repo directory {}", dir.display()))?
@@ -131,8 +118,6 @@ fn scan_local_repo(dir: &Path, out: &mut Vec<Entry>) -> Result<()> {
     vips.sort();
 
     for path in vips {
-        // A package that will not open or parse is reported and skipped: one
-        // bad file in a folder must not make the other packages unresolvable.
         match entry_from_vip(&path) {
             Ok(e) => out.push(e),
             Err(e) => eprintln!("  ! ignoring {}: {e:#}", path.display()),
@@ -162,47 +147,129 @@ fn entry_from_vip(path: &Path) -> Result<Entry> {
     })
 }
 
-/// Load every index: the public ones (unless `defaults` is off), then `extra`
-/// — `--repo` arguments and a manifest's `[sources]`, each an index URL or a
-/// local folder of packages.
-pub fn load(cache_dir: &Path, refresh: bool, extra: &[String], defaults: bool) -> Result<Index> {
-    std::fs::create_dir_all(cache_dir)?;
+/// Load public indexes, global local package folders, and hosted manifest sources.
+pub fn load(
+    cache_dir: &Path,
+    refresh: bool,
+    extra: &[String],
+    local_sources: &[PathBuf],
+    defaults: bool,
+) -> Result<Index> {
     let mut entries = Vec::new();
+
+    for dir in local_sources {
+        if !dir.is_dir() {
+            anyhow::bail!("local source {} is not a directory", dir.display());
+        }
+        scan_local_repo(dir, &mut entries)?;
+    }
 
     let mut sources: Vec<(String, String)> = match defaults {
         true => SOURCES.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect(),
         false => Vec::new(),
     };
     for repo in extra {
-        if is_local_repo(repo) {
-            scan_local_repo(Path::new(repo), &mut entries)?;
-            continue;
-        }
         let base = if repo.ends_with('/') { repo.clone() } else { format!("{repo}/") };
         sources.push((format!("{base}index.vipr"), base));
     }
 
+    if sources.is_empty() {
+        return Ok(Index { entries });
+    }
+    let cache = Cache::open(cache_dir)?;
+
+    let client = Client::builder()
+        .user_agent(concat!("lvpm/", env!("CARGO_PKG_VERSION")))
+        .build()?;
     for (url, base) in &sources {
-        let cached = cache_dir.join(format!("{}.idx", cache_name(url)));
-        let body = if cached.exists() && !refresh {
-            std::fs::read_to_string(&cached)?
-        } else {
-            eprintln!("  fetching {url}");
-            let text = reqwest::blocking::Client::builder()
-                .user_agent(concat!("lvpm/", env!("CARGO_PKG_VERSION")))
-                .build()?
-                .get(url)
-                .send()
-                .with_context(|| format!("fetching {url}"))?
-                .error_for_status()?
-                .text()?;
-            std::fs::write(&cached, &text)?;
-            text
-        };
+        let body = feed_body(&cache, &client, url, base, refresh)?;
         parse_into(&body, base, &mut entries);
     }
 
     Ok(Index { entries })
+}
+
+/// A feed's body, from the cache when the server says it has not changed.
+///
+/// Without `refresh` the cached body is used outright, no network at all.
+/// With it, the stored `ETag`/`Last-Modified` go out as a conditional `GET`:
+/// a `304` means the cached bytes are still current and none crossed the wire.
+fn feed_body(
+    cache: &Cache,
+    client: &Client,
+    url: &str,
+    base: &str,
+    refresh: bool,
+) -> Result<String> {
+    let st = cache.state(url)?.unwrap_or_default();
+    let cached = match &st.sha256 {
+        Some(sha) => cache.load(sha)?,
+        None => None,
+    };
+    if let Some(bytes) = &cached
+        && !refresh
+    {
+        return Ok(String::from_utf8_lossy(bytes).into_owned());
+    }
+
+    // The validators belong to wherever the body actually came from: JKI's
+    // `.ogpd` is a 301 to S3, and asking the redirect saves following it.
+    let target = st.resolved_url.clone().unwrap_or_else(|| url.to_string());
+    let mut req = client.get(&target);
+    if cached.is_some() {
+        if let Some(etag) = &st.etag {
+            req = req.header(IF_NONE_MATCH, etag);
+        }
+        if let Some(lm) = &st.last_modified {
+            req = req.header(IF_MODIFIED_SINCE, lm);
+        }
+    }
+    // A cold feed is a few seconds of silence otherwise, and the line has to
+    // reach the terminal before the wait, not after it.
+    let started = std::time::Instant::now();
+    match cached.is_some() {
+        true => eprint!("  checking feed {url} ... "),
+        false => eprint!("  downloading feed {url} (first run) ... "),
+    }
+    std::io::Write::flush(&mut std::io::stderr()).ok();
+    let mut resp = req.send().with_context(|| format!("fetching {url}"))?;
+
+    if resp.status() == StatusCode::NOT_MODIFIED {
+        match cached {
+            Some(bytes) => {
+                eprintln!("unchanged ({:.1}s)", started.elapsed().as_secs_f32());
+                return Ok(String::from_utf8_lossy(&bytes).into_owned());
+            }
+            // A 304 carries no body, so one we have nothing cached for (a
+            // server answering it unasked) leaves us with nothing to parse.
+            None => {
+                resp = client
+                    .get(&target)
+                    .send()
+                    .with_context(|| format!("fetching {url} unconditionally"))?
+            }
+        }
+    }
+
+    let resp = resp.error_for_status()?;
+    let header = |name: reqwest::header::HeaderName| {
+        resp.headers().get(name).and_then(|v| v.to_str().ok()).map(str::to_string)
+    };
+    let fresh = SourceState {
+        resolved_url: Some(resp.url().to_string()),
+        etag: header(ETAG),
+        last_modified: header(LAST_MODIFIED),
+        sha256: None,
+    };
+    let bytes = resp.bytes()?;
+    eprintln!(
+        "{:.1} MB in {:.1}s",
+        bytes.len() as f32 / 1_048_576.0,
+        started.elapsed().as_secs_f32()
+    );
+    let sha = cache.store(&bytes)?;
+    cache.record(url, "remote", base, &SourceState { sha256: Some(sha), ..fresh })?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 fn parse_into(body: &str, base_url: &str, out: &mut Vec<Entry>) {
@@ -282,6 +349,117 @@ fn parse_lv_gate(s: &str) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::sync::{Arc, Mutex};
+
+    /// A server that answers each connection with the next canned response and
+    /// keeps the request it got, so a test can assert what went out.
+    struct Stub {
+        url: String,
+        requests: Arc<Mutex<Vec<String>>>,
+    }
+
+    fn stub(responses: &'static [&'static str]) -> Stub {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/index.vipr", listener.local_addr().unwrap());
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let log = requests.clone();
+        std::thread::spawn(move || {
+            for (conn, response) in listener.incoming().zip(responses) {
+                let mut conn = conn.unwrap();
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") {
+                    if conn.read(&mut byte).unwrap_or(0) == 0 {
+                        break;
+                    }
+                    head.push(byte[0]);
+                }
+                log.lock().unwrap().push(String::from_utf8_lossy(&head).into_owned());
+                conn.write_all(response.as_bytes()).ok();
+            }
+        });
+        Stub { url, requests }
+    }
+
+    fn test_cache(name: &str) -> (std::path::PathBuf, Cache) {
+        let root = std::env::temp_dir()
+            .join(format!("lvpm-index-test-{name}-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let cache = Cache::open(&root).unwrap();
+        (root, cache)
+    }
+
+    #[test]
+    fn local_package_directories_resolve_from_specs_without_cache_blobs() {
+        let root = std::env::temp_dir()
+            .join(format!("lvpm-local-source-test-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let packages = root.join("packages");
+        std::fs::create_dir_all(&packages).unwrap();
+
+        let archive = packages.join("local_thing-1.0.0.vip");
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        writer
+            .start_file("spec", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        writer
+            .write_all(
+                b"[Package]\nName=local_thing\nVersion=1.0.0\nDisplay Name=Local Thing\n[Dependencies]\nRequires=foo>=1.2\n",
+            )
+            .unwrap();
+        std::fs::write(&archive, writer.finish().unwrap().into_inner()).unwrap();
+
+        let idx = load(&root.join("cache"), false, &[], std::slice::from_ref(&packages), false).unwrap();
+        assert_eq!(idx.entries.len(), 1);
+        let entry = &idx.entries[0];
+        assert_eq!(entry.name, "local_thing");
+        assert_eq!(entry.display_name.as_deref(), Some("Local Thing"));
+        assert_eq!(entry.requires[0].name, "foo");
+        assert!(is_local_url(&entry.url));
+        assert_eq!(std::fs::read(&entry.url).unwrap(), std::fs::read(&archive).unwrap());
+        assert_eq!(std::fs::read_dir(root.join("cache/content/sha256")).err().unwrap().kind(), std::io::ErrorKind::NotFound);
+        assert!(!root.join("cache/lvpm-cache.db").exists());
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    const BODY: &str = "[Self]\nSelf.Name=Test\n";
+    const OK: &str = "HTTP/1.1 200 OK\r\nContent-Length: 22\r\nETag: \"v1\"\r\nConnection: close\r\n\r\n[Self]\nSelf.Name=Test\n";
+    const NOT_MODIFIED: &str = "HTTP/1.1 304 Not Modified\r\nETag: \"v1\"\r\nConnection: close\r\n\r\n";
+
+    #[test]
+    fn a_304_on_a_cached_feed_serves_the_stored_body() {
+        let s = stub(&[OK, NOT_MODIFIED]);
+        let (root, cache) = test_cache("revalidate");
+        let client = Client::new();
+
+        assert_eq!(feed_body(&cache, &client, &s.url, "http://b/", false).unwrap(), BODY);
+        assert_eq!(feed_body(&cache, &client, &s.url, "http://b/", true).unwrap(), BODY);
+
+        let reqs = s.requests.lock().unwrap();
+        assert!(!reqs[0].contains("if-none-match"), "nothing was cached to revalidate against");
+        assert!(
+            reqs[1].to_lowercase().contains("if-none-match: \"v1\""),
+            "the stored ETag goes back out: {}",
+            reqs[1]
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_304_with_nothing_cached_falls_back_to_a_plain_get() {
+        // A 304 carries no body; answering one unasked would otherwise leave
+        // the feed empty.
+        let s = stub(&[NOT_MODIFIED, OK]);
+        let (root, cache) = test_cache("unsolicited-304");
+
+        let body = feed_body(&cache, &Client::new(), &s.url, "http://b/", false).unwrap();
+
+        assert_eq!(body, BODY);
+        assert_eq!(s.requests.lock().unwrap().len(), 2, "the 304 was retried unconditionally");
+        std::fs::remove_dir_all(&root).ok();
+    }
 
     const SAMPLE: &str = "\
 [Self]
