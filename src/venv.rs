@@ -1,6 +1,6 @@
 //! A project's own package tree — the LabVIEW counterpart of a virtualenv.
 //!
-//! `.project/` in the repo root is an LVAddons *location*: one addon per
+//! `.lv-venv/` by default is an LVAddons *location*: one addon per
 //! package, each mirroring the LabVIEW install dir under `<pkg>/1/`. A LabVIEW
 //! started with `LVAddons.AdditionalLocations` pointing here overlays them onto
 //! its own tree, so a package in the venv links exactly as it would from the
@@ -12,14 +12,13 @@
 //! project uses that project's venv; `--project <DIR>` names one from outside,
 //! and `--global` says the installation itself is meant.
 
+use crate::config;
 use crate::project;
 use crate::target::{self, LvTarget, Roots};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// The venv directory, beside `lvpm.toml`.
-pub const DIR: &str = ".project";
 /// `LVAddons.AdditionalLocations` exists from LabVIEW 2024 Q1 on.
 const MIN_LV: f64 = 24.0;
 
@@ -27,7 +26,7 @@ const MIN_LV: f64 = 24.0;
 pub struct Venv {
     /// The repo root — where `lvpm.toml` lives.
     pub repo: PathBuf,
-    /// `repo/.project`, the LVAddons location.
+    /// The configured project directory, used as an LVAddons location.
     pub dir: PathBuf,
     /// The LabVIEW this venv's payload is saved for.
     pub target: LvTarget,
@@ -96,9 +95,14 @@ pub enum Found {
 }
 
 /// Walk up from `cwd` to the first venv or manifest, whichever comes first.
-pub fn probe(cwd: &Path) -> Found {
+pub fn probe(cwd: &Path) -> Result<Found> {
+    let venv_dir = config::load()?.venv_dir;
+    Ok(probe_in(cwd, &venv_dir))
+}
+
+fn probe_in(cwd: &Path, venv_dir: &Path) -> Found {
     for dir in cwd.ancestors() {
-        if binding_path(&dir.join(DIR)).is_file() {
+        if binding_path(&dir.join(venv_dir)).is_file() {
             return Found::Venv(dir.to_path_buf());
         }
         if dir.join(project::FILE_NAME).is_file() {
@@ -114,7 +118,7 @@ pub fn probe(cwd: &Path) -> Found {
 /// the user believes they are installing into a project is the one outcome
 /// that must never happen quietly.
 pub fn locate(cwd: &Path) -> Result<Option<PathBuf>> {
-    match probe(cwd) {
+    match probe(cwd)? {
         Found::Venv(dir) => Ok(Some(dir)),
         Found::ManifestOnly(dir) => bail!(
             "{} has a {} but no venv\n\
@@ -141,7 +145,7 @@ pub fn find(project: Option<&Path>, cwd: &Path) -> Result<Option<Venv>> {
 /// Read a venv's binding and find the LabVIEW it names on this machine.
 pub fn load(repo: &Path) -> Result<Venv> {
     let repo = std::path::absolute(repo)?;
-    let dir = repo.join(DIR);
+    let dir = repo.join(config::load()?.venv_dir);
     let bp = binding_path(&dir);
     let text = std::fs::read_to_string(&bp)
         .with_context(|| format!("no venv in {} — `lvpm venv create` makes one", repo.display()))?;
@@ -161,7 +165,7 @@ pub fn load(repo: &Path) -> Result<Venv> {
     Ok(Venv { repo, dir, target, port: b.port })
 }
 
-/// Create `.project/` for the project at or above `start` (or at `start`
+/// Create the configured venv directory for the project at or above `start` (or at `start`
 /// itself, with a manifest skeleton, when there is none) and bind it to a
 /// LabVIEW: `--labview-version` if given, else the manifest's own — which is
 /// the project's *minimum*, so a newer IDE may be chosen over it, never an
@@ -172,7 +176,7 @@ pub fn create(start: &Path, labview_version: Option<&str>) -> Result<Venv> {
         Some(m) => m.parent().map(Path::to_path_buf).unwrap_or(start),
         None => start,
     };
-    let dir = repo.join(DIR);
+    let dir = repo.join(config::load()?.venv_dir);
     if binding_path(&dir).is_file() {
         bail!(
             "{} already has a venv — `lvpm venv remove` first to bind it afresh",
@@ -296,10 +300,10 @@ mod tests {
 
     #[test]
     fn port_is_stable_in_range_and_indifferent_to_case_and_slashes() {
-        let a = port_for(Path::new(r"C:\Git\Repo\.project"));
-        assert_eq!(a, port_for(Path::new("c:/git/repo/.project")));
+        let a = port_for(Path::new(r"C:\Git\Repo\.lv-venv"));
+        assert_eq!(a, port_for(Path::new("c:/git/repo/.lv-venv")));
         assert!((3400..4000).contains(&a));
-        assert_ne!(a, port_for(Path::new(r"C:\Git\Other\.project")));
+        assert_ne!(a, port_for(Path::new(r"C:\Git\Other\.lv-venv")));
     }
 
     #[test]
@@ -317,11 +321,14 @@ mod tests {
         // probe underneath still names the repo, for the headless case.
         std::fs::write(repo.join(project::FILE_NAME), "[project]\n").unwrap();
         assert!(locate(&deep).is_err());
-        assert!(matches!(probe(&deep), Found::ManifestOnly(ref d) if d == &repo));
+        assert!(
+            matches!(probe_in(&deep, Path::new(config::DEFAULT_VENV_DIR)), Found::ManifestOnly(ref d) if d == &repo)
+        );
 
         // Once created, found from anywhere below.
-        std::fs::create_dir_all(repo.join(DIR).join(".lvpm")).unwrap();
-        std::fs::write(binding_path(&repo.join(DIR)), "{}").unwrap();
+        let venv_dir = repo.join(config::DEFAULT_VENV_DIR);
+        std::fs::create_dir_all(venv_dir.join(".lvpm")).unwrap();
+        std::fs::write(binding_path(&venv_dir), "{}").unwrap();
         assert_eq!(locate(&deep).unwrap().as_deref(), Some(repo.as_path()));
         assert_eq!(locate(&repo).unwrap().as_deref(), Some(repo.as_path()));
 

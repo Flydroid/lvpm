@@ -213,7 +213,7 @@ enum Cmd {
         #[arg(long, value_name = "NAME", default_value = "Done")]
         done: String,
     },
-    /// Manage the project's venv: its own package tree under `.project/`,
+    /// Manage the project's venv: its own package tree under `.lv-venv/` by default,
     /// mounted into LabVIEW as an LVAddons location by `lvpm launch`.
     #[command(subcommand)]
     Venv(VenvCmd),
@@ -237,7 +237,7 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum VenvCmd {
-    /// Create `.project/` for the project here and bind it to a LabVIEW:
+    /// Create `.lv-venv/` for the project here by default and bind it to a LabVIEW:
     /// `--labview-version`, else the manifest's `labview-version`.
     Create,
     /// Which venv commands run here would use, and what it is bound to.
@@ -402,7 +402,7 @@ fn destination(cli: &Cli) -> Result<Destination> {
     let cwd = std::env::current_dir()?;
     if headless()
         && cli.project.is_none()
-        && let venv::Found::ManifestOnly(repo) = venv::probe(&cwd)
+        && let venv::Found::ManifestOnly(repo) = venv::probe(&cwd)?
     {
         return headless_roots(cli, &repo).map(Destination::Global);
     }

@@ -5,12 +5,16 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+pub const DEFAULT_VENV_DIR: &str = ".lv-venv";
+
 #[derive(Debug, PartialEq)]
 pub struct Config {
     /// Where downloaded indexes (and later, packages) are cached.
     pub cache: PathBuf,
     /// Local directories scanned for package files.
     pub local_sources: Vec<PathBuf>,
+    /// Project-relative venv directory, unless configured as an absolute path.
+    pub venv_dir: PathBuf,
 }
 
 pub fn load() -> Result<Config> {
@@ -23,12 +27,19 @@ pub fn load() -> Result<Config> {
 struct FileConfig {
     cache: Option<String>,
     sources: SourcesConfig,
+    venv: VenvConfig,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
 struct SourcesConfig {
     local: Vec<String>,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(default)]
+struct VenvConfig {
+    dir: Option<String>,
 }
 
 fn resolve(file: &FileConfig, env: impl Fn(&str) -> Option<String>) -> Result<Config> {
@@ -43,7 +54,10 @@ fn resolve(file: &FileConfig, env: impl Fn(&str) -> Option<String>) -> Result<Co
         Some(v) => std::env::split_paths(&v).collect(),
         None => file.sources.local.iter().map(PathBuf::from).collect(),
     };
-    Ok(Config { cache, local_sources })
+    let venv_dir = env_value(&env, "venv.dir")
+        .or_else(|| file.venv.dir.clone().filter(|v| !v.is_empty()))
+        .unwrap_or_else(|| DEFAULT_VENV_DIR.to_string());
+    Ok(Config { cache, local_sources, venv_dir: PathBuf::from(venv_dir) })
 }
 
 pub fn set(key: &str, values: &[String]) -> Result<()> {
@@ -60,8 +74,10 @@ pub fn set(key: &str, values: &[String]) -> Result<()> {
                 .map(|p| p.to_string_lossy().into_owned())
                 .collect();
         }
+        "venv.dir" if values.len() == 1 => file.venv.dir = Some(values[0].clone()),
         "cache" => bail!("`config set cache` expects one value"),
-        _ => bail!("unknown config key {key:?}; supported keys: cache, sources.local"),
+        "venv.dir" => bail!("`config set venv.dir` expects one value"),
+        _ => bail!("unknown config key {key:?}; supported keys: cache, sources.local, venv.dir"),
     }
     let path = config_file();
     if let Some(parent) = path.parent() {
@@ -76,7 +92,8 @@ pub fn get(key: &str) -> Result<Vec<String>> {
     match key {
         "cache" => Ok(vec![cfg.cache.to_string_lossy().into_owned()]),
         "sources.local" => Ok(cfg.local_sources.iter().map(|p| p.to_string_lossy().into_owned()).collect()),
-        _ => bail!("unknown config key {key:?}; supported keys: cache, sources.local"),
+        "venv.dir" => Ok(vec![cfg.venv_dir.to_string_lossy().into_owned()]),
+        _ => bail!("unknown config key {key:?}; supported keys: cache, sources.local, venv.dir"),
     }
 }
 
@@ -141,6 +158,7 @@ mod tests {
         let cfg = resolve(&FileConfig::default(), |_| None).unwrap();
         assert_eq!(cfg.cache, default_cache());
         assert!(cfg.local_sources.is_empty());
+        assert_eq!(cfg.venv_dir, PathBuf::from(DEFAULT_VENV_DIR));
     }
 
     #[test]
@@ -166,15 +184,20 @@ mod tests {
         let file = FileConfig {
             cache: Some("from-file".into()),
             sources: SourcesConfig { local: vec!["packages-a".into()] },
+            venv: VenvConfig { dir: Some(".from-file".into()) },
         };
+        let from_file = resolve(&file, |_| None).unwrap();
+        assert_eq!(from_file.venv_dir, PathBuf::from(".from-file"));
         let cfg = resolve(&file, |key| match key {
             "LVPM_CONFIG_CACHE" => Some("from-env".into()),
             "LVPM_CONFIG_SOURCES_LOCAL" => Some("packages-b".into()),
+            "LVPM_CONFIG_VENV_DIR" => Some(".custom-venv".into()),
             _ => None,
         })
         .unwrap();
         assert_eq!(cfg.cache, std::path::absolute("from-env").unwrap());
         assert_eq!(cfg.local_sources, std::env::split_paths("packages-b").collect::<Vec<_>>());
+        assert_eq!(cfg.venv_dir, PathBuf::from(".custom-venv"));
     }
 
     #[test]
@@ -182,6 +205,7 @@ mod tests {
         let file = FileConfig {
             cache: None,
             sources: SourcesConfig { local: vec!["one".into(), "two".into()] },
+            venv: VenvConfig::default(),
         };
         let encoded = toml::to_string_pretty(&file).unwrap();
         let decoded: FileConfig = toml::from_str(&encoded).unwrap();

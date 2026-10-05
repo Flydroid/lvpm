@@ -139,7 +139,7 @@ pub struct Roots {
     system_core: PathBuf,
     /// Set when this is a sandbox, so nothing can escape the prefix.
     scratch: Option<PathBuf>,
-    /// Set when this is a project venv: the `.project` dir that LabVIEW mounts
+    /// Set when this is a project venv: the configured directory LabVIEW mounts
     /// as an LVAddons location. Nothing LabVIEW-class may land outside it.
     venv: Option<PathBuf>,
     pub target: Option<LvTarget>,
@@ -382,14 +382,14 @@ mod tests {
     #[test]
     fn project_roots_put_labview_tokens_in_the_addon_and_leave_machine_roots_alone() {
         let t = LvTarget { version: 26.3, bitness: 64, path: PathBuf::from(r"C:\LV2026") };
-        let venv = Path::new(r"C:\repo\.project");
+        let venv = Path::new(r"C:\repo\.lv-venv");
         let r = Roots::project(venv, &t, "oglib_error");
 
         assert_eq!(
             r.expand("<vi.lib>/_OpenG.lib/error").unwrap(),
-            Path::new(r"C:\repo\.project\oglib_error\1\vi.lib\_OpenG.lib\error")
+            Path::new(r"C:\repo\.lv-venv\oglib_error\1\vi.lib\_OpenG.lib\error")
         );
-        assert_eq!(r.expand("<application>").unwrap(), Path::new(r"C:\repo\.project\oglib_error\1"));
+        assert_eq!(r.expand("<application>").unwrap(), Path::new(r"C:\repo\.lv-venv\oglib_error\1"));
         assert!(!r.expand("<OS Public Application Data>").unwrap().starts_with(r"C:\repo"));
         assert!(!r.expand("<temp>").unwrap().starts_with(r"C:\repo"));
 
@@ -398,7 +398,7 @@ mod tests {
         r.check_contained(&r.expand("<menus>/Categories").unwrap()).unwrap();
         assert!(r.check_contained(&r.expand("<temp>").unwrap()).is_err());
 
-        assert_eq!(r.store_dir(), Path::new(r"C:\repo\.project\.lvpm\installed"));
+        assert_eq!(r.store_dir(), Path::new(r"C:\repo\.lv-venv\.lvpm\installed"));
         assert_eq!(Roots::project_store(venv, &t).store_dir(), r.store_dir());
         assert_eq!(Roots::project_store(venv, &t).application, venv);
         assert_eq!(r.venv(), Some(venv));
