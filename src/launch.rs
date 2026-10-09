@@ -330,8 +330,10 @@ mod tests {
         );
         assert_eq!(
             out,
-            "[LabVIEW]\r\nserver.tcp.port=3400\r\nserver.tcp.acl=\"+*\"\r\n\
-             LVAddons.AdditionalLocations=C:\\r\\.lv-venv\r\n"
+            format!(
+                "[LabVIEW]{EOL}server.tcp.port=3400{EOL}server.tcp.acl=\"+*\"{EOL}\
+                 LVAddons.AdditionalLocations=C:\\r\\.lv-venv{EOL}"
+            )
         );
     }
 
