@@ -22,7 +22,7 @@ use crate::spec::Spec;
 use crate::target::Roots;
 use crate::viserver::{self, Connection, LvValue, VIRef};
 use anyhow::{Context, Result, bail};
-use std::path::{Path, PathBuf};
+use std::path::{MAIN_SEPARATOR, MAIN_SEPARATOR_STR, Path, PathBuf};
 use std::time::{Duration, Instant};
 
 /// The control the folder goes into, and the indicator that says it finished.
@@ -40,10 +40,13 @@ const LOG_INDICATOR: &str = "report log out";
 /// ordinary filename character. So `C:/vi.lib/Foo` arrives as a single
 /// unparseable component, the relink walks nothing, and it reports success
 /// over an empty list. Install manifests store forward slashes, which is how
-/// a whole relink pass came back reporting nothing at all.
+/// a whole relink pass came back reporting nothing at all. On Linux it is the
+/// other way round, so there the path goes as it is.
 fn lv_folder(folder: &Path) -> String {
-    let s = folder.to_string_lossy().replace('/', "\\");
-    s.trim_end_matches('\\').to_string()
+    let s = folder.to_string_lossy();
+    #[cfg(windows)]
+    let s = s.replace('/', "\\");
+    s.trim_end_matches(MAIN_SEPARATOR).to_string()
 }
 
 /// How many saved files to name before summarising the rest — the same
@@ -65,10 +68,13 @@ pub fn summarize_log(log: &str, folder: &Path) -> Vec<String> {
     if saved.is_empty() {
         return vec!["saved nothing".to_string()];
     }
-    let base = lv_folder(folder) + "\\";
+    let base = lv_folder(folder) + MAIN_SEPARATOR_STR;
     let mut out = vec![format!("saved {} file(s)", saved.len())];
     for p in saved.iter().take(SHOWN_SAVES) {
+        #[cfg(windows)]
         let rel = p.replace('/', "\\");
+        #[cfg(not(windows))]
+        let rel = p.clone();
         let rel = rel.strip_prefix(&base).unwrap_or(&rel);
         out.push(format!("  {rel}"));
     }
@@ -94,15 +100,13 @@ const RELINK_VI_BYTES: &[u8] = include_bytes!(concat!(
     "/src/lv-src/relink-package.vi"
 ));
 
-/// Materialize the bundled relink VI so LabVIEW can open it by path.
+/// Materialize the bundled relink VI in `dir` so LabVIEW can open it by path.
 ///
 /// The VI is embedded in the executable at compile time, so the installed
 /// executable does not depend on the source checkout or a companion file.
-pub fn locate_vi() -> Result<PathBuf> {
-    let p = std::env::temp_dir().join(format!(
-        "lvpm-relink-package-{}.vi",
-        env!("CARGO_PKG_VERSION")
-    ));
+pub fn locate_vi(dir: &Path) -> Result<PathBuf> {
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let p = dir.join(format!("lvpm-relink-package-{}.vi", env!("CARGO_PKG_VERSION")));
     std::fs::write(&p, RELINK_VI_BYTES)
         .with_context(|| format!("materializing relink VI at {}", p.display()))?;
     Ok(p)
@@ -113,8 +117,25 @@ pub fn locate_vi() -> Result<PathBuf> {
 /// Separators are normalised on the way through: a `Target Dir` carries its own
 /// forward slashes, which survive `join` and would otherwise reach LabVIEW —
 /// and the print-out — as `...\LabVIEW 2026\examples/10X Engineering`.
+fn overlaps_providers(dir: &Path) -> bool {
+    let parts: Vec<_> = dir.components().collect();
+    parts.iter().enumerate().any(|(index, part)| {
+        if !part.as_os_str().to_string_lossy().eq_ignore_ascii_case("resource") {
+            return false;
+        }
+        let tail = &parts[index + 1..];
+        tail.iter().zip(["Framework", "Providers"]).all(|(part, expected)| {
+            part.as_os_str().to_string_lossy().eq_ignore_ascii_case(expected)
+        })
+    })
+}
+
 fn collapse(dirs: Vec<PathBuf>) -> Vec<PathBuf> {
-    let mut dirs: Vec<PathBuf> = dirs.iter().map(|d| d.components().collect()).collect();
+    let mut dirs: Vec<PathBuf> = dirs
+        .iter()
+        .map(|d| d.components().collect::<PathBuf>())
+        .filter(|dir| !overlaps_providers(dir))
+        .collect();
     // Shallowest first, so a parent is always seen before its children.
     dirs.sort_by_key(|d| d.components().count());
     let mut out: Vec<PathBuf> = Vec::new();
@@ -144,7 +165,10 @@ pub fn collapse_work(work: &[(String, Vec<PathBuf>)]) -> Vec<(PathBuf, Vec<Strin
     let mut flat: Vec<(PathBuf, &str)> = Vec::new();
     for (pkg, dirs) in work {
         for d in dirs {
-            flat.push((d.components().collect(), pkg));
+            let dir = d.components().collect::<PathBuf>();
+            if !overlaps_providers(&dir) {
+                flat.push((dir, pkg));
+            }
         }
     }
     flat.sort_by_key(|(d, _)| d.components().count());
@@ -177,6 +201,8 @@ pub fn collapse_work(work: &[(String, Vec<PathBuf>)]) -> Vec<(PathBuf, Vec<Strin
 /// dropped. So is the shared-root case: a group targeting `<vi.lib>` or
 /// `<user.lib>` itself would put every other package inside the walk, so that
 /// group falls back to the folders its own files actually landed in.
+/// The shared `resource/Framework/Providers` tree is excluded, including
+/// parent walks that would also traverse unrelated providers.
 pub fn folders_for_spec(roots: &Roots, spec: &Spec) -> Result<Vec<PathBuf>> {
     let mut dirs: Vec<PathBuf> = Vec::new();
 
@@ -431,6 +457,7 @@ mod tests {
 
     /// The report as LabVIEW writes it: a JSON array of absolute paths, which
     /// becomes a count and folder-relative names, capped past six.
+    #[cfg(windows)]
     #[test]
     fn summarize_log_counts_and_relativises() {
         let folder = Path::new(r"C:\Program Files\National Instruments\LabVIEW 2026\examples\DQMH");
@@ -453,6 +480,19 @@ mod tests {
         assert!(summarize_log("", folder).is_empty());
     }
 
+    /// The same report from LabVIEW on Linux, whose paths use forward slashes.
+    #[cfg(not(windows))]
+    #[test]
+    fn summarize_log_relativises_linux_paths() {
+        let folder = Path::new("/usr/local/natinst/LabVIEW-2026-64/examples/DQMH/");
+        let log = r#"["/usr/local/natinst/LabVIEW-2026-64/examples/DQMH/Libraries/A/A.lvlib", "/usr/local/natinst/LabVIEW-2026-64/examples/DQMH/B.lvlib"]"#;
+        assert_eq!(
+            summarize_log(log, folder),
+            vec!["saved 2 file(s)", "  Libraries/A/A.lvlib", "  B.lvlib"]
+        );
+        assert_eq!(summarize_log("[]", folder), vec!["saved nothing"]);
+    }
+
     /// The cross-package version of `collapse`: a folder covered by another
     /// package's folder joins that folder's run instead of getting its own,
     /// and exact duplicates merge. Order and per-folder attribution both
@@ -460,22 +500,23 @@ mod tests {
     #[test]
     fn collapse_work_merges_overlapping_packages() {
         let work = vec![
-            ("caraya".to_string(), vec![PathBuf::from(r"C:\lv\vi.lib\addons\Caraya")]),
-            ("h5".to_string(), vec![PathBuf::from(r"C:\lv\vi.lib\addons")]),
-            ("caraya_cli".to_string(), vec![PathBuf::from(r"C:\lv\vi.lib\addons\Caraya")]),
-            ("dqmh".to_string(), vec![PathBuf::from(r"C:\lv\project\DQMH")]),
+            ("caraya".to_string(), vec![PathBuf::from("/lv/vi.lib/addons/Caraya")]),
+            ("h5".to_string(), vec![PathBuf::from("/lv/vi.lib/addons")]),
+            ("caraya_cli".to_string(), vec![PathBuf::from("/lv/vi.lib/addons/Caraya")]),
+            ("dqmh".to_string(), vec![PathBuf::from("/lv/project/DQMH")]),
         ];
         let plan = collapse_work(&work);
         assert_eq!(plan.len(), 2);
-        assert_eq!(plan[0].0, PathBuf::from(r"C:\lv\project\DQMH"));
+        assert_eq!(plan[0].0, PathBuf::from("/lv/project/DQMH"));
         assert_eq!(plan[0].1, ["dqmh"]);
-        assert_eq!(plan[1].0, PathBuf::from(r"C:\lv\vi.lib\addons"));
+        assert_eq!(plan[1].0, PathBuf::from("/lv/vi.lib/addons"));
         assert_eq!(plan[1].1, ["h5", "caraya", "caraya_cli"]);
     }
 
     /// Install manifests store forward slashes; LabVIEW needs backslashes, or
     /// it takes the whole path for one filename and relinks nothing while
     /// reporting success. A whole 101-folder pass came back empty this way.
+    #[cfg(windows)]
     #[test]
     fn folders_reach_labview_with_native_separators() {
         let m = "C:/Program Files/National Instruments/LabVIEW 2026/vi.lib/Delacor/Libraries";
@@ -487,6 +528,15 @@ mod tests {
         assert_eq!(lv_folder(Path::new(r"C:\vi.lib\Foo")), r"C:\vi.lib\Foo");
         assert_eq!(lv_folder(Path::new(r"C:\vi.lib/Foo\")), r"C:\vi.lib\Foo");
         assert_eq!(lv_folder(Path::new("C:/vi.lib/Foo/")), r"C:\vi.lib\Foo");
+    }
+
+    /// On Linux the manifest's forward slashes are already LabVIEW's own; a
+    /// backslash there would be part of a file name.
+    #[cfg(not(windows))]
+    #[test]
+    fn folders_reach_linux_labview_as_they_are() {
+        let m = "/usr/local/natinst/LabVIEW-2026-64/vi.lib/Delacor/Libraries/";
+        assert_eq!(lv_folder(Path::new(m)), m.trim_end_matches('/'));
     }
 
     fn f(paths: &[&str]) -> Vec<String> {
@@ -542,6 +592,45 @@ mod tests {
         )
         .unwrap();
         assert_eq!(got, vec![PathBuf::from("/box/LabVIEW/user.lib/Thing")]);
+    }
+
+    #[test]
+    fn skips_shared_providers_groups_but_keeps_package_folders() {
+        let roots = Roots::scratch(Path::new("/box"));
+        let got = folders_for_spec(
+            &roots,
+            &spec(vec![
+                group(1, "<resource>/Framework/Providers", &["Thing/Provider.vi"]),
+                group(2, "<vi.lib>/addons/Thing", &["Main.vi"]),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(got, vec![PathBuf::from("/box/LabVIEW/vi.lib/addons/Thing")]);
+    }
+
+    #[test]
+    fn skips_providers_in_legacy_file_lists() {
+        let got = folders_for(&f(&[
+            "/lv/resource/Framework/Providers/Thing/Provider.vi",
+            "/lv/vi.lib/Thing/Main.vi",
+        ]));
+        assert_eq!(got, vec![PathBuf::from("/lv/vi.lib/Thing")]);
+    }
+
+    #[test]
+    fn recorded_work_cannot_walk_providers_or_their_parents() {
+        let work = vec![("thing".into(), vec![
+            PathBuf::from("/lv/resource"),
+            PathBuf::from("/lv/resource/Framework"),
+            PathBuf::from("/lv/resource/Framework/Providers"),
+            PathBuf::from("/lv/resource/Framework/Providers/Thing"),
+            PathBuf::from("/lv/resource/Framework/Other"),
+            PathBuf::from("/lv/vi.lib/Thing"),
+        ])];
+        assert_eq!(collapse_work(&work), vec![
+            (PathBuf::from("/lv/resource/Framework/Other"), vec!["thing".into()]),
+            (PathBuf::from("/lv/vi.lib/Thing"), vec!["thing".into()]),
+        ]);
     }
 
     #[test]

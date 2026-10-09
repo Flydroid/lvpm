@@ -33,8 +33,10 @@ Not affiliated with JKI or NI. Working, in active development; see
 
 ## Install lvpm
 
-Windows 10/11 with LabVIEW 2020 or later. Linux target detection exists but
-is untested.
+Windows 10/11 with LabVIEW 2020 or later. On Linux, lvpm is verified against
+LabVIEW 2026 Q3 in NI's container image; take `lvpm-<version>-linux-x64.tar.gz`
+from the artifacts of a CI run, or build it from source, and see
+[docs/linux.md](docs/linux.md) for what differs there.
 
 ### With the install script
 
@@ -357,6 +359,11 @@ differently in the container than on your machine, `--hooks` is the first
 thing to try; it starts a headless LabVIEW for them. `--relink` likewise
 when the job's output _is_ relinked packages.
 
+NI's Linux image (`nationalinstruments/labview:2026q3-linux`) works the same
+way; [docs/linux.md](docs/linux.md) has the differences, and
+[.github/workflows/build.yml](.github/workflows/build.yml) runs lvpm in it on
+every push.
+
 Two container facts worth knowing. LabVIEW allows one mode at a time per
 machine, headless or IDE, so a headless job cannot share a host with an open
 IDE. And any LabVIEW that is started (by `--hooks`, `--relink`, or the job
@@ -439,7 +446,9 @@ runs.
   but runs to completion reports as ok.
 - A failure part-way through unpacking leaves files behind with no manifest,
   and one failed download aborts the rest of the plan.
-- Windows is the tested platform.
+- Windows is the tested platform. Linux is verified against LabVIEW 2026 Q3
+  in NI's container image only, and does not yet honour a package's
+  `Exclusive_OS` ([docs/linux.md](docs/linux.md)).
 - In a venv, install hooks are extracted but never run (they act on the
   LabVIEW installation, not on an overlay), and file groups aimed at machine
   locations (`<OS ...>`, `<temp>`) are skipped. Both are recorded in the
@@ -468,6 +477,8 @@ runs.
 | `version.rs`                   | Package version ordering: OGPT `version-release`, VIPM's four-part form; not semver                                     |
 | `src/lv-src/relink-package.vi` | The relink VI embedded into the executable at build time (LabVIEW 2020)                                                 |
 | `scripts/install.ps1`          | Download, verify and install the latest release                                                                         |
+| `scripts/linux-e2e.sh` | End-to-end check against LabVIEW for Linux in NI's container image |
+| `scripts/linux-packages.sh` | Public packages on LabVIEW for Linux: install with hooks, relink, uninstall, venv; the LabVIEW tree must come out unchanged |
 
 ## License
 

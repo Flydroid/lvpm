@@ -214,9 +214,80 @@ Toolkits\Caraya\Caraya CLI.vi" -- -s <tests folder> -x <junit.xml>` —
   lvpm's own tooling on packages, which is the reading of "modifying
   LabVIEW code" to settle before that step runs on shared infrastructure.
 
+## Integration test VIs
+
+The container jobs test lvpm with packages it does not control:
+`linux-e2e` with the VIs in `tools/`, `linux-packages` with LUnit and
+G-Image as a reference. Neither was made to test an installer: LUnit ships a
+VI broken on purpose, so `linux-packages` cannot ask whether a package's VIs
+work, only whether lvpm put them in place and took them out again. A package
+of VIs made for the job would test exactly what lvpm answers for, on Windows
+and Linux alike:
+
+- a caller whose subVI sits in another folder of the package, which relink
+  must fix, and a caller outside the package that links into `<vilib>`, for
+  the venv overlay;
+- PreInstall and PostInstall hooks that write a marker file with what they
+  were handed (package name, files installed); today's hook VI only shows
+  that it ran. One of them does setup the package cannot work without, as
+  G-Image's does;
+- a class, a library, a malleable VI, an LLB and a project, each once;
+- a palette `.mnu`, an `<OS User Documents>` group and a Target Dir written
+  with backslashes;
+- a file group into a folder LabVIEW itself uses, such as
+  `<resource>/Framework/Providers/<pkg>`, and a file directly in such a
+  folder, as LUnit's provider library is, where relink must stay inside the
+  package's own files;
+- nothing broken, so the job can run every VI (`vi-run`) and fail on any
+  error.
+
+Saved in LabVIEW 2020, like the relink VI, and zipped into a `.vip` by the
+test scripts as today.
+
+## macOS
+
+Not supported, and a macOS build stops with a `compile_error!` in `main.rs`.
+What is a fact about LabVIEW on Linux is `cfg(target_os = "linux")`; what is
+true of any POSIX system is `cfg(not(windows))` or `cfg(unix)` and needs no
+new branch.
+
+- **What carries over from Linux:** forward slashes, LF ini files, the
+  per-user cache, LabVIEW in its own process group, the VI Server client,
+  venvs.
+- **What needs its own branch, each to be measured on a Mac with LabVIEW:**
+  the install location (likely `/Applications/National Instruments/LabVIEW
+  <year> 64-bit/`), the executable inside the `.app` bundle, the preferences
+  file (likely under `~/Library/Preferences/`), the internal version (likely
+  the bundle's `Info.plist`), the `<OS …>` tokens (run `Get System
+  Directory.vi`, as for Linux), `PTH0` paths (the first component may be the
+  volume name), where install records go, and whether a TIME_WAIT port blocks
+  VI Server as it does on Linux.
+- **The obstacle is testing:** NI publishes no macOS container, so there is
+  no equivalent of `scripts/linux-e2e.sh` in CI without a macOS runner that
+  has a licensed LabVIEW.
+
 ## Housekeeping
 
 - `Replace Mode = If Newer` compares timestamps instead of "write when absent".
 - Read hook VIs' `error out` back.
 - A failure part-way through unpacking leaves files behind with no manifest.
-- Linux target detection exists but is untested.
+- Relink saves LabVIEW's own files. The relink VI takes folders and walks
+  their subfolders too, and a package file that lies directly in a folder
+  LabVIEW fills puts that whole folder in the walk. LUnit's
+  `LUnit Project Provider.lvlib` lies in `resource/Framework/Providers`; a
+  single test VI there made relink save 44 of LabVIEW's files (Actor
+  Framework and AppBuilder providers), still changed after the uninstall.
+  `linux-packages` fails on this. Same code on Windows. Fix: a relink VI
+  that takes the package's files, or no walk of a folder that holds files
+  of others.
+- Uninstall leaves the `.aliases` and `.UserState` files that LabVIEW writes
+  beside a package's project (a mass compile of its folder writes them), and
+  with them the package's folders.
+- `relink --all` never marks a package with nothing to relink, while
+  `install --relink` does, so `lvpm list` shows such a package
+  `NOT relinked` for good.
+- Linux: install, relink, hooks, refresh and venvs verified against LabVIEW
+  2026 Q3 in NI's container ([linux.md](linux.md)), and run in CI
+  (`.github/workflows/build.yml`). Still open there: `Exclusive_OS` gates,
+  root ownership of the install tree, case sensitivity, a Linux release
+  artifact.

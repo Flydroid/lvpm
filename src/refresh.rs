@@ -23,11 +23,12 @@
 //!
 //! | | VI |
 //! |---|---|
-//! | palettes | `vi.lib\Palette API\Refresh Palettes.vi` |
-//! | menus | `resource\plugins\PopupMenus\support\Refresh Menus.vi` |
+//! | palettes | `vi.lib/Palette API/Refresh Palettes.vi` |
+//! | menus | `resource/plugins/PopupMenus/support/Refresh Menus.vi` |
 //!
-//! Present in every install checked (2015, 2025, 2026). So this module is only
-//! plumbing: find the two VIs, run them, report what happened.
+//! Present in every install checked (2015, 2025, 2026, and 2026 on Linux). So
+//! this module is only plumbing: find the two VIs, run them, report what
+//! happened.
 
 use crate::target::LvTarget;
 use crate::viserver::{self, Connection};
@@ -43,8 +44,8 @@ use std::time::{Duration, Instant};
 /// wrapper around `Menus:Refresh` — a fair reason to expect its path to move
 /// one day, which is why a missing VI is reported rather than fatal.
 const REFRESH_VIS: [(&str, &str); 2] = [
-    ("palettes", r"vi.lib\Palette API\Refresh Palettes.vi"),
-    ("menus", r"resource\plugins\PopupMenus\support\Refresh Menus.vi"),
+    ("palettes", "vi.lib/Palette API/Refresh Palettes.vi"),
+    ("menus", "resource/plugins/PopupMenus/support/Refresh Menus.vi"),
 ];
 
 /// One refresh: what it was, and how it went.
@@ -65,7 +66,10 @@ pub fn run(target: &LvTarget, timeout: Duration) -> Result<Vec<Outcome>> {
 
     let mut out = Vec::with_capacity(REFRESH_VIS.len());
     for (what, rel) in REFRESH_VIS {
-        out.push(Outcome { what, result: run_one(&mut conn, target.path.join(rel)) });
+        // Joined a component at a time: a separator inside one `join` is only
+        // a separator on Windows.
+        let vi = rel.split('/').fold(target.path.clone(), |p, c| p.join(c));
+        out.push(Outcome { what, result: run_one(&mut conn, vi) });
     }
     conn.close();
     Ok(out)
