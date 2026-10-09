@@ -196,7 +196,7 @@ pub struct Roots {
     system_core: PathBuf,
     /// Set when this is a sandbox, so nothing can escape the prefix.
     scratch: Option<PathBuf>,
-    /// Set when this is a project venv: the `.project` dir that LabVIEW mounts
+    /// Set when this is a project venv: the configured directory LabVIEW mounts
     /// as an LVAddons location. Nothing LabVIEW-class may land outside it.
     venv: Option<PathBuf>,
     pub target: Option<LvTarget>,
@@ -476,7 +476,7 @@ mod tests {
     #[test]
     fn project_roots_put_labview_tokens_in_the_addon_and_leave_machine_roots_alone() {
         let t = LvTarget { version: 26.3, bitness: 64, path: PathBuf::from(LV) };
-        let venv = &Path::new(REPO).join(".project");
+        let venv = &Path::new(REPO).join(".lv-venv");
         let r = Roots::project(venv, &t, "oglib_error");
         let addon = venv.join("oglib_error").join("1");
 

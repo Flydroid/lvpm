@@ -326,13 +326,12 @@ mod tests {
         let ini = "[LabVIEW]\r\nserver.tcp.port=3364\r\nserver.tcp.acl=\"+*\"\r\nserver.tcp.port = 9\r\n";
         let out = override_keys(
             ini,
-            &[("server.tcp.port", "3400"), ("LVAddons.AdditionalLocations", "C:\\r\\.project")],
+            &[("server.tcp.port", "3400"), ("LVAddons.AdditionalLocations", "C:\\r\\.lv-venv")],
         );
         assert_eq!(
             out,
             "[LabVIEW]\r\nserver.tcp.port=3400\r\nserver.tcp.acl=\"+*\"\r\n\
-             LVAddons.AdditionalLocations=C:\\r\\.project\r\n"
-                .replace("\r\n", EOL)
+             LVAddons.AdditionalLocations=C:\\r\\.lv-venv\r\n"
         );
     }
 

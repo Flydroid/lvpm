@@ -13,7 +13,7 @@ document is the checklist.
 
 ## Per-project dependencies (venvs)
 
-A project keeps its packages under `.project/`, mounted into LabVIEW as an
+A project keeps its packages under `.lv-venv/` by default, mounted into LabVIEW as an
 LVAddons location. Background and the measurements behind the design: the
 overlay gives `<vilib>`-relative linkage (portable, identical to a global
 install); LabVIEW reads addon contents at launch; the real install always
@@ -47,7 +47,7 @@ wins over the overlay; `LVAddons.AdditionalLocations` needs LabVIEW 2024 Q1.
   else. Per-dependency `hooks = "run" | "skip"` in the manifest makes it an
   explicit opt-in.
 - **Relink what a partial run left behind.** A rerun after a failed install
-  only relinks the packages *it* copied; packages the first run copied stay
+  only relinks the packages _it_ copied; packages the first run copied stay
   `NOT relinked` until `lvpm relink --all`. The venv install should relink
   everything still unrelinked in the store.
 - **Survive one bad download.** A single failed download aborts the plan;
@@ -67,8 +67,9 @@ wins over the overlay; `LVAddons.AdditionalLocations` needs LabVIEW 2024 Q1.
 
 ## The manifest and the lockfile - WIP
 
-`lvpm.toml` (done: exact pins, `>=` floors, `*`, `[sources]` with relative
-folders and `defaults = false`, `labview` minimum, `[nipm.dependencies]`).
+`lvpm.toml` (done: exact pins, `>=` floors, `*`, hosted `[sources]` and
+`defaults = false`, `labview` minimum, `[nipm.dependencies]`). Local package
+directories are user-level `sources.local` settings, not manifest sources.
 
 - **`lvpm.lock`** — the resolved closure (name, version, source URL, MD5) so
   `lvpm install` restores the identical venv on another machine and only
@@ -83,6 +84,13 @@ folders and `defaults = false`, `labview` minimum, `[nipm.dependencies]`).
 - `[venv]` overrides: `dir`, `vi-server-port`, `bitness`.
 - Constraints beyond `>=`: `~` / `^` if they turn out to be wanted.
 
+## Configuration
+
+Done: `lvpm config set|get` persists `cache` and `sources.local` in the
+user's `config.toml`; `LVPM_CONFIG_<KEY>` overrides either value. Local
+package directories are global sources, read directly from disk and not yet
+stored in the content cache.
+
 ## Dependency analysis: `lvpm check` / `lvpm tree`
 
 Port `tools/deptree.py` to Rust (`linker.rs`: RSRC block walker, `PTH0`
@@ -95,7 +103,7 @@ records) and make it first-class:
   `--mermaid`.
 - Known gaps in `deptree.py` to close in the port: it misses the `PTH0`
   flavour old OpenG packages use (reports "no linker tables" on every VI in
-  `oglib_*`); `resolvable()` accepts a path if *any* ancestor directory exists,
+  `oglib_*`); `resolvable()` accepts a path if _any_ ancestor directory exists,
   so shadowing cases pass; `.llb` archive members are skipped entirely.
 
 ## Packaging and distribution (from idea.txt)
@@ -124,8 +132,8 @@ records) and make it first-class:
   channel — so today the hash catches corruption, not tampering. Try `https`
   on both hops (S3 and download.ni.com both serve it) and fall back only if a
   source has no TLS.
-  - Own `User-Agent` stays `lvpm/<version>`: honest, and the first thing to
-  check if a public index starts closing connections on us.
+    - Own `User-Agent` stays `lvpm/<version>`: honest, and the first thing to
+      check if a public index starts closing connections on us.
 
 ## From the OGPM design, not yet started
 
@@ -160,7 +168,7 @@ workflow is the work.
   LabVIEW from the registry; `lvpm search` reaches both public indexes.
   Proves the MSVC build needs nothing the image lacks.
 - **Step 2 — a global install with relink.** `lvpm install jki_lib_caraya
-  --labview-version 2026 --relink`: 10 packages, 1386 files, 14 folders
+--labview-version 2026 --relink`: 10 packages, 1386 files, 14 folders
   relinked, `lvpm list` shows every package `relinked`. This is the test of
   the VI Server client against a headless LabVIEW: the handshake retry
   (error 63 for the first ~8 s after the port opens), `Relink Package.vi`
@@ -179,13 +187,13 @@ workflow is the work.
   (`tasklist`). Seconds. With `--hooks` the same install runs 6 PreInstall
   and 6 PostInstall hooks `ok` in about a minute.
 - **Step 4 — the product compiles against it.** `LabVIEWCLI -OperationName
-  MassCompile -DirectoryToCompile <project copy> -MassCompileLogFile <log>
-  -Headless`; assert `MassCompile operation succeeded` and a log with no
+MassCompile -DirectoryToCompile <project copy> -MassCompileLogFile <log>
+-Headless`; assert `MassCompile operation succeeded` and a log with no
   bad-VI lines. This is the claim behind "relink off in CI": the compile
   resolves the links of an unrelinked install itself. 47 s on the DQMH
   project.
 - **Step 5 — the tests run.** `LabVIEW.exe "<vi.lib>\addons\_JKI
-  Toolkits\Caraya\Caraya CLI.vi" -- -s <tests folder> -x <junit.xml>` —
+Toolkits\Caraya\Caraya CLI.vi" -- -s <tests folder> -x <junit.xml>` —
   Caraya's own entry point, which needs no LabVIEW to be running beforehand
   (an existing instance swallows the open and the arguments with it — seen
   once, when hooks had left one behind). Assert the JUnit file exists and
