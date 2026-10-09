@@ -75,11 +75,18 @@ Target Dir="<OS User Documents>/lvpm_linux_test"
 Replace Mode="Always"
 Num Files=1
 File 0="readme.txt"
+
+[File Group 2]
+Target Dir="<resource>/Framework/Providers"
+Replace Mode="Always"
+Num Files=1
+File 0="lvpm_linux_provider_test.vi"
 ''', [
     ("File Group 0/Relink Packages.vi", "Relink Packages.vi"),
     ("File Group 0/Test - Relink Packages E2E.vi", "Test - Relink Packages E2E.vi"),
     ("File Group 0/E2E Call VI.vi", "E2E Call VI.vi"),
     ("File Group 1/readme.txt", None),
+    ("File Group 2/lvpm_linux_provider_test.vi", "E2E Call VI.vi"),
     ("PreInstall.vi", "E2E Call VI.vi"),
     ("PostInstall.vi", "E2E Call VI.vi"),
 ])
@@ -109,7 +116,6 @@ name = "{name}"
 labview = "2026"
 
 [sources]
-local = "../pkgs"
 defaults = false
 
 [dependencies]
@@ -121,6 +127,7 @@ docker run -d --init --name "$NAME" -e LV_RTE_HEADLESS=1 -v "$WORK:/work" "$IMAG
 docker exec -i "$NAME" bash -s <<'SH'
 set -u
 L=/work/lvpm
+export LVPM_CONFIG_SOURCES_LOCAL=/work/pkgs
 LV=$($L targets | awk '{print $NF; exit}')
 fails=0
 check() { if eval "$2"; then echo "ok    $1"; else echo "FAIL  $1"; fails=$((fails + 1)); fi; }
@@ -131,7 +138,13 @@ check "targets: detects LabVIEW 2026 with its minor version" \
     '$L targets | grep -Eq "LabVIEW 2026 \(64-bit\) +v26\.[0-9] .*/usr/local/natinst/LabVIEW-2026-64"'
 
 cd /work/global
+PROVIDER_SENTINEL="$LV/resource/Framework/Providers/lvpm-e2e-unrelated.vi"
+mkdir -p "$(dirname "$PROVIDER_SENTINEL")"
+cp /work/caller/caller.vi "$PROVIDER_SENTINEL"
+PROVIDER_HASH=$(sha256sum "$PROVIDER_SENTINEL")
 check "headless global install with --relink --hooks" 'run install --relink --hooks'
+check "provider file installed without relinking unrelated providers" \
+    '[ -f "$LV/resource/Framework/Providers/lvpm_linux_provider_test.vi" ] && [ "$(sha256sum "$PROVIDER_SENTINEL")" = "$PROVIDER_HASH" ]'
 check "files in vi.lib and in <OS User Documents> (\$HOME/Documents)" \
     '[ -f "$LV/vi.lib/lvpm_linux_test/E2E Call VI.vi" ] && [ -f "$HOME/Documents/lvpm_linux_test/readme.txt" ]'
 check "both hooks ran" 'grep -q "pre-install ok" /work/log && grep -Eq "lvpm_linux_test \.\.\. ok" /work/log'
@@ -141,16 +154,20 @@ check "a backslashed Target Dir lands in real subfolders" \
 check "list shows both relinked" '[ "$($L list 2>/dev/null | grep -v "NOT relinked" | grep -c relinked)" = 2 ]'
 check "run-hooks reruns a PostInstall" 'run run-hooks lvpm_linux_test --labview-version 2026'
 
-VI=$(ls "$HOME"/.cache/lvpm/lvpm-relink-package-*.vi)
+CACHE=$($L config get cache)
+VI=$(ls "$CACHE"/lvpm-relink-package-*.vi)
 check "relink VI walks a Linux folder (finds caller and subVI)" \
     '$L vi-run "$VI" --labview-version 2026 --set "Folder to relink=str:$LV/vi.lib/lvpm_linux_relink_test" --get "all lv items" 2>&1 | grep -q "sub/Relink Packages.vi"'
 out=$($L refresh --labview-version 2026 2>&1)
 check "refresh: both LabVIEW refresh VIs found and run" \
     'grep -Eq "palettes +ok" <<<"$out" && grep -Eq "menus +ok" <<<"$out"'
 check "relink --all" 'run relink --all'
+check "relink --all leaves unrelated providers unchanged" \
+    '[ "$(sha256sum "$PROVIDER_SENTINEL")" = "$PROVIDER_HASH" ]'
 check "vi-save of a caller relinks it to <vilib>" 'run vi-save /work/caller/caller.vi --labview-version 2026'
 check "uninstall --all leaves vi.lib clean" \
     'run uninstall --all && ! ls "$LV/vi.lib" | grep -q lvpm_ && [ ! -e "$HOME/Documents/lvpm_linux_test" ]'
+rm -f "$PROVIDER_SENTINEL"
 
 # The plain LabVIEW has had the package's VIs in memory, and a caller links a
 # subVI of the same name that is still loaded; only a fresh one is a fair
@@ -158,11 +175,12 @@ check "uninstall --all leaves vi.lib clean" \
 pkill -x labview; for _ in $(seq 30); do pgrep -x labview >/dev/null || break; sleep 1; done
 
 cd /work/venv
+VENV_DIR=$($L config get venv.dir)
 check "venv create" 'run venv create'
 check "venv install with relink in a LabVIEW started with -pref" 'run install --relink'
 check "venv ini mounts the venv with forward slashes" \
-    'grep -qx "LVAddons.AdditionalLocations=/work/venv/.project" .project/.lvpm/labview.ini'
-PORT=$(python3 -c 'import json; print(json.load(open(".project/.lvpm/venv.json"))["port"])')
+    'grep -Fxq "LVAddons.AdditionalLocations=/work/venv/$VENV_DIR" "$VENV_DIR/.lvpm/labview.ini"'
+PORT=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["port"])' "$VENV_DIR/.lvpm/venv.json")
 run launch
 for _ in $(seq 60); do listening "$PORT" && break; sleep 2; done
 check "launch straight after install still gets VI Server (TIME_WAIT)" 'listening "$PORT"'

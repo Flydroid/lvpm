@@ -117,8 +117,25 @@ pub fn locate_vi(dir: &Path) -> Result<PathBuf> {
 /// Separators are normalised on the way through: a `Target Dir` carries its own
 /// forward slashes, which survive `join` and would otherwise reach LabVIEW —
 /// and the print-out — as `...\LabVIEW 2026\examples/10X Engineering`.
+fn overlaps_providers(dir: &Path) -> bool {
+    let parts: Vec<_> = dir.components().collect();
+    parts.iter().enumerate().any(|(index, part)| {
+        if !part.as_os_str().to_string_lossy().eq_ignore_ascii_case("resource") {
+            return false;
+        }
+        let tail = &parts[index + 1..];
+        tail.iter().zip(["Framework", "Providers"]).all(|(part, expected)| {
+            part.as_os_str().to_string_lossy().eq_ignore_ascii_case(expected)
+        })
+    })
+}
+
 fn collapse(dirs: Vec<PathBuf>) -> Vec<PathBuf> {
-    let mut dirs: Vec<PathBuf> = dirs.iter().map(|d| d.components().collect()).collect();
+    let mut dirs: Vec<PathBuf> = dirs
+        .iter()
+        .map(|d| d.components().collect::<PathBuf>())
+        .filter(|dir| !overlaps_providers(dir))
+        .collect();
     // Shallowest first, so a parent is always seen before its children.
     dirs.sort_by_key(|d| d.components().count());
     let mut out: Vec<PathBuf> = Vec::new();
@@ -148,7 +165,10 @@ pub fn collapse_work(work: &[(String, Vec<PathBuf>)]) -> Vec<(PathBuf, Vec<Strin
     let mut flat: Vec<(PathBuf, &str)> = Vec::new();
     for (pkg, dirs) in work {
         for d in dirs {
-            flat.push((d.components().collect(), pkg));
+            let dir = d.components().collect::<PathBuf>();
+            if !overlaps_providers(&dir) {
+                flat.push((dir, pkg));
+            }
         }
     }
     flat.sort_by_key(|(d, _)| d.components().count());
@@ -181,6 +201,8 @@ pub fn collapse_work(work: &[(String, Vec<PathBuf>)]) -> Vec<(PathBuf, Vec<Strin
 /// dropped. So is the shared-root case: a group targeting `<vi.lib>` or
 /// `<user.lib>` itself would put every other package inside the walk, so that
 /// group falls back to the folders its own files actually landed in.
+/// The shared `resource/Framework/Providers` tree is excluded, including
+/// parent walks that would also traverse unrelated providers.
 pub fn folders_for_spec(roots: &Roots, spec: &Spec) -> Result<Vec<PathBuf>> {
     let mut dirs: Vec<PathBuf> = Vec::new();
 
@@ -570,6 +592,45 @@ mod tests {
         )
         .unwrap();
         assert_eq!(got, vec![PathBuf::from("/box/LabVIEW/user.lib/Thing")]);
+    }
+
+    #[test]
+    fn skips_shared_providers_groups_but_keeps_package_folders() {
+        let roots = Roots::scratch(Path::new("/box"));
+        let got = folders_for_spec(
+            &roots,
+            &spec(vec![
+                group(1, "<resource>/Framework/Providers", &["Thing/Provider.vi"]),
+                group(2, "<vi.lib>/addons/Thing", &["Main.vi"]),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(got, vec![PathBuf::from("/box/LabVIEW/vi.lib/addons/Thing")]);
+    }
+
+    #[test]
+    fn skips_providers_in_legacy_file_lists() {
+        let got = folders_for(&f(&[
+            "/lv/resource/Framework/Providers/Thing/Provider.vi",
+            "/lv/vi.lib/Thing/Main.vi",
+        ]));
+        assert_eq!(got, vec![PathBuf::from("/lv/vi.lib/Thing")]);
+    }
+
+    #[test]
+    fn recorded_work_cannot_walk_providers_or_their_parents() {
+        let work = vec![("thing".into(), vec![
+            PathBuf::from("/lv/resource"),
+            PathBuf::from("/lv/resource/Framework"),
+            PathBuf::from("/lv/resource/Framework/Providers"),
+            PathBuf::from("/lv/resource/Framework/Providers/Thing"),
+            PathBuf::from("/lv/resource/Framework/Other"),
+            PathBuf::from("/lv/vi.lib/Thing"),
+        ])];
+        assert_eq!(collapse_work(&work), vec![
+            (PathBuf::from("/lv/resource/Framework/Other"), vec!["thing".into()]),
+            (PathBuf::from("/lv/vi.lib/Thing"), vec!["thing".into()]),
+        ]);
     }
 
     #[test]

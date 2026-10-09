@@ -454,32 +454,18 @@ fn headless_roots(cli: &Cli, repo: &Path) -> Result<Roots> {
     Ok(Roots::labview(&t))
 }
 
-/// The index cache is per-user, not per-target — the feeds are the same.
-/// `%LOCALAPPDATA%\lvpm\cache` on Windows, `~/.cache/lvpm` (XDG) elsewhere.
-fn cache_dir() -> PathBuf {
-    #[cfg(windows)]
-    let dir = std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join("lvpm").join("cache"));
-    #[cfg(not(windows))]
-    let dir = std::env::var_os("XDG_CACHE_HOME")
-        .filter(|d| !d.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
-        .map(|d| d.join("lvpm"));
-    dir.unwrap_or_else(|| std::env::temp_dir().join("lvpm").join("cache"))
-}
-
 /// Where lvpm puts files a LabVIEW has to open by path: the relink VI, and a
 /// PostUninstall hook that must outlive its package. `%TEMP%` is the user's
 /// own on Windows; `/tmp` is shared on Linux, where a name another user took
-/// first is one this user cannot write — so there it is the per-user cache.
-fn work_dir() -> PathBuf {
+/// first is one this user cannot write — so there it is the configured cache.
+fn work_dir() -> Result<PathBuf> {
     #[cfg(windows)]
     {
-        std::env::temp_dir()
+        Ok(std::env::temp_dir())
     }
     #[cfg(not(windows))]
     {
-        cache_dir()
+        Ok(config::load()?.cache)
     }
 }
 
@@ -679,11 +665,13 @@ fn uninstall_one(
     // hook VI itself, so it runs from a copy that outlives the uninstall.
     let post = match &before.post_uninstall_vi {
         Some(hook) if hooks => {
-            let dir = work_dir();
-            let tmp = dir.join(format!("lvpm-{}-PostUninstall.vi", before.name));
-            std::fs::create_dir_all(&dir)
-                .and_then(|()| std::fs::copy(hook, &tmp))
-                .map(|_| tmp)
+            work_dir()
+                .and_then(|dir| {
+                    let tmp = dir.join(format!("lvpm-{}-PostUninstall.vi", before.name));
+                    std::fs::create_dir_all(&dir)?;
+                    std::fs::copy(hook, &tmp)?;
+                    Ok(tmp)
+                })
                 .map_err(|e| println!("note: cannot stage PostUninstall.vi ({e}) — not running it"))
                 .ok()
         }
@@ -1369,7 +1357,7 @@ fn run_relink(
     args: &RelinkArgs,
     work: &[(String, Vec<PathBuf>)],
 ) -> Result<()> {
-    let vi = relink::locate_vi(&work_dir())?;
+    let vi = relink::locate_vi(&work_dir()?)?;
     // One walk covers every folder nested under it, so overlapping packages
     // share a run instead of relinking the same tree twice — 18 of the first
     // pass's 109 folders were nested repeats costing 17 of its 61 minutes.
