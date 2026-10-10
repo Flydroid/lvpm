@@ -7,8 +7,10 @@ per-URL `.idx` file this replaces is gone. The implemented `sources` rows are
 for remote feeds only. Local package directories are set in the user-level
 `config.toml` (or `LVPM_CONFIG_SOURCES_LOCAL`) and scanned on each index load;
 their parsed metadata is cached in `local_files`, but their package bytes
-are not yet stored in the content store. `packages`, `feed_entries` and
-`lvpm cache add` remain design only.
+are not stored in the content store automatically. `lvpm cache add` imports
+local `.vip`/`.ogp` files or directories into the content store and `packages`.
+`feed_entries`, FTS search, local feed registration, cache list/remove/prune,
+and caching remote package downloads remain design only.
 
 ### Local directory metadata cache (implemented)
 
@@ -26,7 +28,24 @@ stats are a performance hint, not an integrity check: a replacement preserving
 both size and modification time requires refresh to detect. If modification
 time is unavailable, the file is parsed without caching its metadata. Invalid
 archives invalidate any old metadata and are skipped as before. Installation
-still reads the original archive, not cached package bytes.
+still reads the original archive for unimported packages.
+
+`local_files` also has a nullable `sha256` column. A successful `cache add`
+links the original file's stats to its imported content address; a metadata
+reparse clears that link, without deleting any imported package. Existing
+metadata-only databases gain this column on open. Unchanged repeat imports
+check that the blob exists without reading it; consumption verifies its hash,
+and `--refresh cache add` re-reads and repairs corrupt blobs. The import row
+and local-file link are written in one transaction after the blob is stored.
+
+The implemented `packages` table stores the proposed name/version, SHA-256,
+MD5, source kind/reference, display name and added timestamp, plus a JSON
+`entry` carrying dependencies and the LabVIEW minimum. MD5 is computed for
+every imported archive. Imported entries are loaded into the existing
+in-memory search/resolver; their `cache:<sha256>` location is read through
+`Cache::load()` during installation, independently of the original path.
+Deleting originals leaves the inventory and blobs intact. Stale local-file
+rows and unreferenced blobs can be handled by a future prune command.
 
 ## Goals
 
@@ -362,6 +381,9 @@ source_ref IN (...)` — a DB read — instead of from `parse_into()` — a
 
 ## `lvpm cache add`: what replaces `--repo`
 
+Implemented now: single `.vip`/`.ogp` files and non-recursive directories.
+The local index registration and list/remove commands below remain planned.
+
 The `--repo <URL-or-DIR>` flag is gone: it was per-invocation and
 per-command; nothing persisted. `lvpm cache
 add` registers a source once, and every later command sees it — the local
@@ -381,14 +403,14 @@ $ lvpm cache remove C:\my\packages\
   written with `source_kind = 'local-add-cache'` and `source_ref` = the path
   it came from (so re-running `cache add` on an unchanged file is a no-op —
   same hash, same row).
-- A directory: every `.vip` in it goes through `entry_from_vip` (already in
-  `index.rs`) to get name/version/deps, then through the single-file path
-  above. `cache add` on a directory is always a fresh re-scan, not a
-  one-shot snapshot: every run walks the directory again, hashes every
-  `.vip` it finds, and upserts a row for each — a file whose hash is
-  already in `packages` is a no-op (the `UNIQUE (name, version, source_ref)`
-  constraint plus a matching `sha256` short-circuits it), a changed or new
-  file gets hashed and stored. Nothing is watched between runs; re-running
+- A directory: every immediate `.vip`/`.ogp` file is considered. `cache add`
+  always lists the directory again, but uses `local_files` stats and its
+  SHA-256 link to skip an unchanged, previously imported file whose blob
+  still exists. New or changed files are read once, parsed for metadata,
+  hashed, stored, and upserted into `packages`. `--refresh` bypasses the
+  stat shortcut. Invalid archives fail the command with their path; files
+  imported earlier in the same run remain imported. Nothing is watched
+  between runs; re-running
   `lvpm cache add <dir>` by hand (or from a CI step) after the folder
   changes is how the cache learns about it.
 - A local `index.vipr`/`.ogpd` file: registered as a feed the same shape as
@@ -400,11 +422,10 @@ $ lvpm cache remove C:\my\packages\
   project's `[sources]` table is unaffected — that stays the per-project way
   to add a feed. `lvpm cache add` is the per-_machine_ way, taking over from
   the removed `--repo` flag.
-- This also fully replaces `index.rs`'s `is_local_repo`/`scan_local_repo`
-  path (a `[sources]` entry naming a folder on disk instead of a URL, scanned
-  fresh via `entry_from_vip` on every single command): that scan is now a
-  one-time `lvpm cache add <dir>`, persisted, instead of being repeated on
-  every invocation that resolves against a local folder.
+- `sources.local` remains a live view of configured directories with cached
+  metadata. `cache add` is an explicit import, not a source registration:
+  imported packages participate in resolution without configuring their
+  original directory, and remain available if that directory disappears.
 
 ## MD5 vs SHA-256: the transition
 

@@ -384,9 +384,26 @@ your own, named in the manifest's `[sources]`. A `[sources]` entry is an
 `http://` or `https://` folder holding an `index.vipr`. Local directories of
 `.vip` files are configured globally with `lvpm config set sources.local`
 instead; lvpm reads their specs and package files directly. These local
-packages are not stored in the cache yet.
+directories reuse cached spec metadata when file size and modification time
+match; installation still reads their original archives unless imported.
 
-Every source lvpm knows is recorded in `%LOCALAPPDATA%\lvpm\cache`, in a
+Use `lvpm cache add` to import a `.vip` or `.ogp`, or all such files directly
+inside a directory, into the shared content-addressed cache:
+
+```powershell
+lvpm cache add D:\LabVIEW\Packages\some_lib-1.2.3.vip
+lvpm cache add D:\LabVIEW\Packages
+lvpm --refresh cache add D:\LabVIEW\Packages
+```
+
+Imports record SHA-256, MD5, package metadata, and the original path. Repeated
+imports skip unchanged files when their cached blob still exists; `--refresh`
+reads and hashes them again. Imported packages are available to search and
+installation even after the originals are deleted. Cache reads verify the
+SHA-256 and installation also checks MD5. Local index files and cache
+list/remove/prune commands are not implemented yet.
+
+Remote feeds and imported packages are recorded in `%LOCALAPPDATA%\lvpm\cache`, in a
 SQLite index (`lvpm-cache.db`) over a content-addressed store of the bodies
 themselves. Without `--refresh` the stored body is used and nothing goes out
 to the network. With it, the `ETag` and `Last-Modified` the server last gave
@@ -408,7 +425,7 @@ empty value counts as unset. Precedence, highest first:
 
 | Variable | Default | What it sets |
 | --- | --- | --- |
-| `LVPM_CONFIG_CACHE` | `%LOCALAPPDATA%\lvpm\cache` (Linux: `$XDG_CACHE_HOME/lvpm/cache`, else `~/.cache/lvpm/cache`) | Where the cache DB and downloaded feed bodies live |
+| `LVPM_CONFIG_CACHE` | `%LOCALAPPDATA%\lvpm\cache` (Linux: `$XDG_CACHE_HOME/lvpm/cache`, else `~/.cache/lvpm/cache`) | Where the cache DB, feed bodies, and imported package archives live |
 | `LVPM_CONFIG_SOURCES_LOCAL` | Empty | Local `.vip` directories; separate paths with `;` on Windows or `:` on Linux |
 | `LVPM_CONFIG_VENV_DIR` | `.lv-venv` | Project-relative venv directory (or an absolute path) |
 

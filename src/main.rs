@@ -47,7 +47,7 @@ struct Cli {
     #[arg(long, global = true, value_name = "DIR", conflicts_with = "prefix")]
     project: Option<PathBuf>,
 
-    /// Ask each index whether it changed, instead of trusting the cache.
+    /// Revalidate remote feeds and re-read local packages instead of trusting cached stats.
     #[arg(long, global = true)]
     refresh: bool,
 
@@ -220,6 +220,9 @@ enum Cmd {
     /// Read or change user-level lvpm settings.
     #[command(subcommand)]
     Config(ConfigCmd),
+    /// Import package archives into the shared cache.
+    #[command(subcommand)]
+    Cache(CacheCmd),
     /// Start LabVIEW on the project's venv, optionally opening a project file.
     ///
     /// LabVIEW reads the venv's contents when it starts, so a LabVIEW that
@@ -248,6 +251,12 @@ enum VenvCmd {
         #[arg(long, short = 'y')]
         yes: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum CacheCmd {
+    /// Import a .vip/.ogp file or the packages directly inside a directory.
+    Add { path: PathBuf },
 }
 
 #[derive(Subcommand)]
@@ -298,6 +307,15 @@ fn main() -> Result<()> {
             cmd_vi_run(&cli, vi, sets, gets, *get_all, *timeout, watch.as_deref(), *poll_ms, done)
         }
         Cmd::Venv(sub) => cmd_venv(&cli, sub),
+        Cmd::Cache(CacheCmd::Add { path }) => {
+            let config = config::load()?;
+            let imports = index::cache_add(&config.cache, path, cli.refresh)?;
+            for import in &imports {
+                println!("{} {} sha256:{}", if import.reused { "cached" } else { "imported" }, import.path.display(), import.sha256);
+            }
+            println!("{} package(s) processed", imports.len());
+            Ok(())
+        }
         Cmd::Config(ConfigCmd::Set { key, values }) => {
             config::set(key, values)?;
             println!("set {key}");
@@ -948,7 +966,11 @@ fn cmd_install(
         print!("{} {} {} ... ", if dry_run { "?" } else { "+" }, e.name, e.version);
         std::io::stdout().flush().ok();
 
-        let bytes = if index::is_local_url(&e.url) {
+        let bytes = if let Some(sha256) = e.url.strip_prefix("cache:") {
+            let config = config::load()?;
+            cache::Cache::open(&config.cache)?.load(sha256)?
+                .with_context(|| format!("cached archive for {} is missing or corrupt; run cache add again with the original package", e.name))?
+        } else if index::is_local_url(&e.url) {
             std::fs::read(&e.url).with_context(|| format!("reading {}", e.url))?
         } else {
             client

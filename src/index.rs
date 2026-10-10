@@ -47,6 +47,34 @@ pub struct Entry {
     pub lv_min: Option<f64>,
 }
 
+impl From<&Entry> for LocalEntry {
+    fn from(entry: &Entry) -> Self {
+        Self {
+            name: entry.name.clone(),
+            version: entry.version.to_string(),
+            display_name: entry.display_name.clone(),
+            requires: entry.requires.iter().map(|requirement| (
+                requirement.name.clone(), requirement.min.as_ref().map(ToString::to_string),
+            )).collect(),
+            lv_min: entry.lv_min,
+        }
+    }
+}
+
+fn local_entry(entry: LocalEntry, url: String, md5: Option<String>) -> Entry {
+    Entry {
+        name: entry.name,
+        version: Version::parse(&entry.version),
+        url,
+        md5,
+        display_name: entry.display_name,
+        requires: entry.requires.into_iter().map(|(name, min)| Requirement {
+            name, min: min.map(|version| Version::parse(&version)),
+        }).collect(),
+        lv_min: entry.lv_min,
+    }
+}
+
 pub struct Index {
     pub entries: Vec<Entry>,
 }
@@ -121,32 +149,14 @@ fn scan_local_repo(cache: &Cache, dir: &Path, refresh: bool, out: &mut Vec<Entry
         let path = std::path::absolute(path)?;
         let metadata = std::fs::metadata(&path)?;
         if !refresh && let Some(entry) = cache.local_entry(&path, &metadata)? {
-            out.push(Entry {
-                name: entry.name,
-                version: Version::parse(&entry.version),
-                url: path.to_string_lossy().into_owned(),
-                md5: None,
-                display_name: entry.display_name,
-                requires: entry.requires.into_iter().map(|(name, min)| Requirement {
-                    name, min: min.map(|version| Version::parse(&version)),
-                }).collect(),
-                lv_min: entry.lv_min,
-            });
+            out.push(local_entry(entry, path.to_string_lossy().into_owned(), None));
             continue;
         }
         match entry_from_vip(&path) {
             Ok(entry) => {
                 let after = std::fs::metadata(&path)?;
                 if metadata.len() == after.len() && metadata.modified().ok() == after.modified().ok() {
-                    cache.record_local(&path, &metadata, &LocalEntry {
-                        name: entry.name.clone(),
-                        version: entry.version.to_string(),
-                        display_name: entry.display_name.clone(),
-                        requires: entry.requires.iter().map(|requirement| (
-                            requirement.name.clone(), requirement.min.as_ref().map(ToString::to_string),
-                        )).collect(),
-                        lv_min: entry.lv_min,
-                    })?;
+                    cache.record_local(&path, &metadata, &LocalEntry::from(&entry))?;
                 } else {
                     cache.forget_local(&path)?;
                 }
@@ -163,6 +173,10 @@ fn scan_local_repo(cache: &Cache, dir: &Path, refresh: bool, out: &mut Vec<Entry
 
 fn entry_from_vip(path: &Path) -> Result<Entry> {
     let bytes = std::fs::read(path)?;
+    entry_from_bytes(path, &bytes)
+}
+
+fn entry_from_bytes(path: &Path, bytes: &[u8]) -> Result<Entry> {
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;
     let idx = (0..zip.len())
         .find(|i| zip.by_index(*i).map(|f| f.name().eq_ignore_ascii_case("spec")).unwrap_or(false))
@@ -182,6 +196,47 @@ fn entry_from_vip(path: &Path) -> Result<Entry> {
     })
 }
 
+pub struct Import {
+    pub path: PathBuf,
+    pub sha256: String,
+    pub reused: bool,
+}
+
+pub fn cache_add(cache_dir: &Path, source: &Path, refresh: bool) -> Result<Vec<Import>> {
+    let source = std::path::absolute(source)?;
+    let is_package = |path: &Path| path.extension().is_some_and(|extension| {
+        extension.eq_ignore_ascii_case("vip") || extension.eq_ignore_ascii_case("ogp")
+    });
+    let mut files = if source.is_dir() {
+        std::fs::read_dir(&source)?
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<std::io::Result<Vec<_>>>()?
+            .into_iter().filter(|path| path.is_file() && is_package(path)).collect::<Vec<_>>()
+    } else {
+        anyhow::ensure!(source.is_file() && is_package(&source), "cache add expects a .vip/.ogp file or package directory: {}", source.display());
+        vec![source]
+    };
+    files.sort();
+    let cache = Cache::open(cache_dir)?;
+    let mut imports = Vec::new();
+    for path in files {
+        let metadata = std::fs::metadata(&path)?;
+        if !refresh && let Some(sha256) = cache.imported_local(&path, &metadata)? {
+            imports.push(Import { path, sha256, reused: true });
+            continue;
+        }
+        let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+        let entry = entry_from_bytes(&path, &bytes).with_context(|| format!("importing {}", path.display()))?;
+        let after = std::fs::metadata(&path)?;
+        anyhow::ensure!(metadata.len() == after.len() && metadata.modified().ok() == after.modified().ok(),
+            "package changed during import; retry cache add: {}", path.display());
+        let sha256 = cache.store(&bytes)?;
+        cache.record_import(&path, &metadata, &LocalEntry::from(&entry), &sha256, &md5_hex(&bytes))?;
+        imports.push(Import { path, sha256, reused: false });
+    }
+    Ok(imports)
+}
+
 /// Load public indexes, global local package folders, and hosted manifest sources.
 pub fn load(
     cache_dir: &Path,
@@ -191,13 +246,16 @@ pub fn load(
     defaults: bool,
 ) -> Result<Index> {
     let mut entries = Vec::new();
-    let local_cache = if local_sources.is_empty() { None } else { Some(Cache::open(cache_dir)?) };
+    let cache = Cache::open(cache_dir)?;
+    for package in cache.imported_packages()? {
+        entries.push(local_entry(package.entry, format!("cache:{}", package.sha256), Some(package.md5)));
+    }
 
     for dir in local_sources {
         if !dir.is_dir() {
             anyhow::bail!("local source {} is not a directory", dir.display());
         }
-        scan_local_repo(local_cache.as_ref().expect("local sources have a cache"), dir, refresh, &mut entries)?;
+        scan_local_repo(&cache, dir, refresh, &mut entries)?;
     }
 
     let mut sources: Vec<(String, String)> = match defaults {
@@ -212,8 +270,6 @@ pub fn load(
     if sources.is_empty() {
         return Ok(Index { entries });
     }
-    let cache = Cache::open(cache_dir)?;
-
     let client = Client::builder()
         .user_agent(concat!("lvpm/", env!("CARGO_PKG_VERSION")))
         .build()?;
@@ -481,6 +537,80 @@ mod tests {
         assert_eq!(load(&root.join("cache"), false, &[], &[packages], false).unwrap().entries.len(), 1);
 
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    fn write_import_fixture(path: &Path, version: &str) -> Vec<u8> {
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        writer.start_file("spec", zip::write::SimpleFileOptions::default()).unwrap();
+        writer.write_all(format!("[Package]\nName=imported_library\nVersion={version}\nDisplay Name=Imported Library\n[Dependencies]\nRequires=foo>=1.2\n").as_bytes()).unwrap();
+        let bytes = writer.finish().unwrap().into_inner();
+        std::fs::write(path, &bytes).unwrap();
+        bytes
+    }
+
+    #[test]
+    fn imported_packages_survive_original_deletion_and_deduplicate_bytes() {
+        let (root, cache) = test_cache("import-directory");
+        let packages = root.join("packages");
+        std::fs::create_dir(&packages).unwrap();
+        let source = packages.join("first.vip");
+        let bytes = write_import_fixture(&source, "1.0.0");
+        std::fs::write(packages.join("second.ogp"), &bytes).unwrap();
+        std::fs::write(packages.join("ignored.txt"), b"not a package").unwrap();
+        let imports = cache_add(&root, &packages, false).unwrap();
+        assert_eq!(imports.len(), 2);
+        assert!(imports.iter().all(|import| !import.reused));
+        assert_eq!(imports[0].sha256, imports[1].sha256);
+        assert!(cache_add(&root, &packages, false).unwrap().iter().all(|import| import.reused));
+        let records = cache.imported_packages().unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].md5, md5_hex(&bytes));
+        assert_eq!(records[0].entry.requires[0].1.as_deref(), Some("1.2"));
+        assert_eq!(std::fs::read_dir(root.join("content/sha256").join(&imports[0].sha256[..2])).unwrap().count(), 1);
+        std::fs::remove_dir_all(&packages).unwrap();
+        let index = load(&root, false, &[], &[], false).unwrap();
+        let entry = index.best("imported_library", None, None).unwrap();
+        assert_eq!(entry.url, format!("cache:{}", imports[0].sha256));
+        assert_eq!(cache.load(entry.url.strip_prefix("cache:").unwrap()).unwrap().unwrap(), bytes);
+        assert_eq!(index.search("Imported Library").len(), 1);
+        drop(cache);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn import_refresh_missing_blobs_and_changed_files_are_handled() {
+        let (root, cache) = test_cache("import-refresh");
+        let source = root.join("package.vip");
+        let original = write_import_fixture(&source, "1.0.0");
+        let first = cache_add(&root, &source, false).unwrap();
+        let sha = &first[0].sha256;
+        let blob = root.join("content/sha256").join(&sha[..2]).join(sha);
+        std::fs::remove_file(&blob).unwrap();
+        assert!(!cache_add(&root, &source, false).unwrap()[0].reused);
+        std::fs::write(&blob, b"corrupt").unwrap();
+        assert!(!cache_add(&root, &source, true).unwrap()[0].reused);
+        assert_eq!(cache.load(sha).unwrap().unwrap(), original);
+        let newer = write_import_fixture(&source, "2.0.0.1");
+        let changed = cache_add(&root, &source, false).unwrap();
+        assert!(!changed[0].reused);
+        assert_ne!(changed[0].sha256, *sha);
+        let index = load(&root, false, &[], &[], false).unwrap();
+        assert_eq!(index.best("imported_library", None, None).unwrap().version.raw, "2.0.0.1");
+        assert_eq!(cache.load(&changed[0].sha256).unwrap().unwrap(), newer);
+        drop(cache);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn invalid_imports_do_not_create_package_records() {
+        let (root, cache) = test_cache("invalid-import");
+        let source = root.join("invalid.vip");
+        std::fs::write(&source, b"not a zip").unwrap();
+        assert!(cache_add(&root, &source, false).is_err());
+        assert!(cache_add(&root, &root.join("missing.vip"), false).is_err());
+        assert!(cache.imported_packages().unwrap().is_empty());
+        drop(cache);
+        std::fs::remove_dir_all(root).ok();
     }
 
     const BODY: &str = "[Self]\nSelf.Name=Test\n";
