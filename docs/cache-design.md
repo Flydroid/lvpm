@@ -5,9 +5,48 @@ Status: partly implemented. `cache.rs` holds the SQLite DB
 `sources` table, and `index.rs` fetches remote feed bodies through them — the
 per-URL `.idx` file this replaces is gone. The implemented `sources` rows are
 for remote feeds only. Local package directories are set in the user-level
-`config.toml` (or `LVPM_CONFIG_SOURCES_LOCAL`) and scanned directly; their
-packages are not yet stored in the cache. `packages`, `feed_entries` and
-`lvpm cache add` remain design only.
+`config.toml` (or `LVPM_CONFIG_SOURCES_LOCAL`) and scanned on each index load;
+their parsed metadata is cached in `local_files`, but their package bytes
+are not stored in the content store automatically. `lvpm cache add` imports
+local `.vip`/`.ogp` files or directories into the content store and `packages`.
+`fetch.rs` checks remote package requests against `packages` before downloading
+and stores verified downloads. `feed_entries`, FTS search, local feed
+registration, and cache list/remove/prune remain design only.
+
+### Local directory metadata cache (implemented)
+
+Each index load lists the configured directories' immediate `.vip` files
+and checks their file stats. `local_files` stores the absolute path, size,
+modification time (nanoseconds since the Unix epoch), and a JSON entry with
+the package name, version, display name, dependency constraints, and LabVIEW
+minimum. Matching stats reuse this entry without reading or opening the ZIP.
+New or changed files are parsed and their entries replaced; removed files
+are no longer listed in resolution, although their cached records may remain.
+Only currently configured directories contribute entries.
+
+`--refresh` bypasses this shortcut and reparses every local package. File
+stats are a performance hint, not an integrity check: a replacement preserving
+both size and modification time requires refresh to detect. If modification
+time is unavailable, the file is parsed without caching its metadata. Invalid
+archives invalidate any old metadata and are skipped as before. Installation
+still reads the original archive for unimported packages.
+
+`local_files` also has a nullable `sha256` column. A successful `cache add`
+links the original file's stats to its imported content address; a metadata
+reparse clears that link, without deleting any imported package. Existing
+metadata-only databases gain this column on open. Unchanged repeat imports
+check that the blob exists without reading it; consumption verifies its hash,
+and `--refresh cache add` re-reads and repairs corrupt blobs. The import row
+and local-file link are written in one transaction after the blob is stored.
+
+The implemented `packages` table stores the proposed name/version, SHA-256,
+MD5, source kind/reference, display name and added timestamp, plus a JSON
+`entry` carrying dependencies and the LabVIEW minimum. MD5 is computed for
+every imported archive. Imported entries are loaded into the existing
+in-memory search/resolver; their `cache:<sha256>` location is read through
+`Cache::load()` during installation, independently of the original path.
+Deleting originals leaves the inventory and blobs intact. Stale local-file
+rows and unreferenced blobs can be handled by a future prune command.
 
 ## Goals
 
@@ -60,18 +99,18 @@ cache add` under the same `cache` subcommand group.
 
 ## Directory layout
 
-`lvpm` already has one per-user data root (today used only for the index
-`.idx` files), and it needs to resolve to the right place on both of lvpm's
-supported OSes:
+`lvpm`'s default cache directory is per-user and resolves to the right place
+on both supported OSes. `config::load()` returns this directory as
+`Config::cache`; callers pass that path directly to `Cache::open()`:
 
-| OS      | Root                                                                                                                                                                                             |
-| ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Windows | `%LOCALAPPDATA%\lvpm\` (falls back to the temp dir if unset, as `cache_dir()` does today)                                                                                                        |
-| Linux   | `$XDG_CACHE_HOME/lvpm/` if set, else `~/.cache/lvpm/` — the same base directory conventions (XDG Base Directory spec) that put LabVIEW itself under `/usr/local/natinst` on Linux in `target.rs` |
+| OS      | Default cache directory                                                                                                          |
+| ------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| Windows | `%LOCALAPPDATA%\lvpm\cache\` (falls back to `%TEMP%\lvpm\cache\` if `LOCALAPPDATA` is unset)                                  |
+| Linux   | `$XDG_CACHE_HOME/lvpm/cache/` if set, else `~/.cache/lvpm/cache/` (falls back to the temp dir if neither variable is set)         |
 
 ```
-<root>\cache\                  # %LOCALAPPDATA%\lvpm\cache  (Windows)
-                                # ~/.cache/lvpm/cache        (Linux)
+<cache-dir>\                     # e.g. %LOCALAPPDATA%\lvpm\cache (Windows)
+                                # or ~/.cache/lvpm/cache (Linux)
 ├── lvpm-cache.db               # SQLite (FTS5) — the index described below
 ├── content\
 │   └── sha256\
@@ -80,13 +119,12 @@ supported OSes:
 └── tmp\                        # download/hash staging area, fsync+rename into content/
 ```
 
-This makes the existing `cache_dir()` in `src/main.rs` name the _parent_ of
-the cache (`<root>`, e.g. `%LOCALAPPDATA%\lvpm` or `~/.cache/lvpm`), with
-`cache\` as one purpose-built folder inside it — leaving room for other
-global lvpm state later (e.g. a future global config) without renaming
-anything. `cache_dir()` should grow the same `#[cfg(windows)]` /
-`#[cfg(not(windows))]` split `target.rs` already uses for LabVIEW detection,
-rather than only ever reading `LOCALAPPDATA`.
+`LVPM_CONFIG_CACHE` overrides the default and names this cache directory
+itself, not its parent; `Cache::open()` does not append another `cache/`
+component. In the current implementation, opening the cache creates the
+directory and `tmp/` and opens `lvpm-cache.db`; `content/` is created when the
+first blob is stored. Keeping the default under `lvpm/cache/` leaves room for
+other global lvpm state under `lvpm/` later.
 
 ### Overriding the location
 
@@ -344,6 +382,9 @@ source_ref IN (...)` — a DB read — instead of from `parse_into()` — a
 
 ## `lvpm cache add`: what replaces `--repo`
 
+Implemented now: single `.vip`/`.ogp` files and non-recursive directories.
+The local index registration and list/remove commands below remain planned.
+
 The `--repo <URL-or-DIR>` flag is gone: it was per-invocation and
 per-command; nothing persisted. `lvpm cache
 add` registers a source once, and every later command sees it — the local
@@ -363,14 +404,14 @@ $ lvpm cache remove C:\my\packages\
   written with `source_kind = 'local-add-cache'` and `source_ref` = the path
   it came from (so re-running `cache add` on an unchanged file is a no-op —
   same hash, same row).
-- A directory: every `.vip` in it goes through `entry_from_vip` (already in
-  `index.rs`) to get name/version/deps, then through the single-file path
-  above. `cache add` on a directory is always a fresh re-scan, not a
-  one-shot snapshot: every run walks the directory again, hashes every
-  `.vip` it finds, and upserts a row for each — a file whose hash is
-  already in `packages` is a no-op (the `UNIQUE (name, version, source_ref)`
-  constraint plus a matching `sha256` short-circuits it), a changed or new
-  file gets hashed and stored. Nothing is watched between runs; re-running
+- A directory: every immediate `.vip`/`.ogp` file is considered. `cache add`
+  always lists the directory again, but uses `local_files` stats and its
+  SHA-256 link to skip an unchanged, previously imported file whose blob
+  still exists. New or changed files are read once, parsed for metadata,
+  hashed, stored, and upserted into `packages`. `--refresh` bypasses the
+  stat shortcut. Invalid archives fail the command with their path; files
+  imported earlier in the same run remain imported. Nothing is watched
+  between runs; re-running
   `lvpm cache add <dir>` by hand (or from a CI step) after the folder
   changes is how the cache learns about it.
 - A local `index.vipr`/`.ogpd` file: registered as a feed the same shape as
@@ -382,13 +423,20 @@ $ lvpm cache remove C:\my\packages\
   project's `[sources]` table is unaffected — that stays the per-project way
   to add a feed. `lvpm cache add` is the per-_machine_ way, taking over from
   the removed `--repo` flag.
-- This also fully replaces `index.rs`'s `is_local_repo`/`scan_local_repo`
-  path (a `[sources]` entry naming a folder on disk instead of a URL, scanned
-  fresh via `entry_from_vip` on every single command): that scan is now a
-  one-time `lvpm cache add <dir>`, persisted, instead of being repeated on
-  every invocation that resolves against a local folder.
+- `sources.local` remains a live view of configured directories with cached
+  metadata. `cache add` is an explicit import, not a source registration:
+  imported packages participate in resolution without configuring their
+  original directory, and remain available if that directory disappears.
 
 ## MD5 vs SHA-256: the transition
+
+Implemented acquisition is owned by `fetch.rs`, called by `main.rs` with an
+already-resolved `Entry`. `cache.rs` only handles storage and SQL; it does not
+call the index or network. Downloads record `source_kind='remote'` and use
+the requested package URL as `source_ref` (not the feed URL). This provides
+request provenance without changing the index entry shape. Download rows
+do not become independent resolver entries; feed resolution remains as today.
+Unimported local files remain live reads and are not automatically stored.
 
 Today's public feeds only ever advertise MD5 (`Package.MD5`). SHA-256 is
 what the cache is keyed on and what the future `lvpm.lock` will pin. Two
@@ -399,15 +447,24 @@ digests, one cache, no rewriting the feeds:
   to get a `sha256` back —
 
     ```sql
-    SELECT sha256 FROM packages WHERE md5 = ?
+    SELECT DISTINCT sha256 FROM packages
+    WHERE name = ? COLLATE NOCASE AND version = ? AND md5 = ?
     ```
 
-    A hit means the bytes are already in `content/` under that `sha256` — use
-    them, skip the network. A miss means download, verify against the
+    One distinct SHA-256 is a candidate hit, regardless of source. Verify
+    the blob's SHA-256 and recheck the advertised MD5 before using it. Zero
+    matches, multiple distinct SHA-256 values, a missing/corrupt blob, or an
+    MD5 mismatch are cache misses; never choose an ambiguous match arbitrarily.
+    A miss means download from the selected entry URL, verify against the
     advertised MD5 (as today), then hash the verified bytes to get the
     `sha256`, store the blob, and write the `packages` row with **both**
     digests recorded. From that moment on, this exact package/version is
     content-addressable by SHA-256 regardless of what the feed says.
+
+    Without an advertised MD5, downloads are still stored with both computed
+    hashes, but no automatic reuse is attempted. A name/version or URL alone
+    is not an integrity pin. `--refresh` revalidates feeds and local metadata;
+    it does not bypass verified package hits. Dry runs also populate the cache.
 
 - **Downloading with `lvpm.lock` present**: the lock records `sha256`
   directly (computed the same way, the first time the package was ever
@@ -426,10 +483,16 @@ digests, one cache, no rewriting the feeds:
 - MD5 is never trusted as a global content address on its own — it identifies
   "what the feed claims this download is", not "what's in the cache". Only
   SHA-256, computed by lvpm itself over bytes it has seen, is used as the
-  cache key. This sidesteps having to reason about MD5 collisions across two
-  independently-run feeds.
+  cache key. Matching metadata reduces accidental misidentification, but
+  neither it nor an MD5 recheck authenticates colliding archives. Ambiguous
+  mappings force a download; only a trusted SHA-256 pin can settle which bytes
+  are intended independently of the download source.
 
 ## End-to-end flow (install)
+
+The feed_entries/lockfile flow below remains the target design; current
+resolution still parses feed bodies. Package acquisition already uses
+`fetch.rs` for cache-first remote requests and explicit imported SHA-256s.
 
 1. Resolve the manifest/CLI request against `feed_entries` (feeds +
    registered local indexes), read back from SQLite rather than re-parsed
@@ -438,8 +501,8 @@ digests, one cache, no rewriting the feeds:
    `feed_entries` for that source (see "`feed_entries`" above).
 2. For each resolved `Entry`: is there an `lvpm.lock` entry for it?
     - Yes → look up `packages` **by `sha256`** (the lock's digest).
-    - No → look up `packages` **by `md5`** (the feed's digest) to _get_ a
-      `sha256`, per the query above.
+    - No → look up `packages` **by name/version/MD5** to obtain one unambiguous
+      `sha256`, per the query above; no MD5 means download instead.
 3. Cache hit → read the `.vip` bytes straight from `content/sha256/...`.
 4. Cache miss → download from `Entry.url` (or read the local file, for a
    `local-add-cache`/`local-index` entry), verify MD5 if the feed gave one,

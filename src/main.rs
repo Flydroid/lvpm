@@ -2,6 +2,7 @@
 
 mod cache;
 mod config;
+mod fetch;
 mod index;
 mod install;
 mod launch;
@@ -47,7 +48,7 @@ struct Cli {
     #[arg(long, global = true, value_name = "DIR", conflicts_with = "prefix")]
     project: Option<PathBuf>,
 
-    /// Ask each index whether it changed, instead of trusting the cache.
+    /// Revalidate remote feeds and re-read local packages instead of trusting cached stats.
     #[arg(long, global = true)]
     refresh: bool,
 
@@ -85,7 +86,7 @@ enum Cmd {
     Install {
         /// Package to install. Omit when using --manifest.
         package: Option<String>,
-        /// Install every package listed in an `lvpm.toml`'s [dependencies].
+        /// Install every package listed in an `lvpm.toml`'s `[dependencies]`.
         ///
         /// All of them resolve into one plan and relink as one pass, so no
         /// package is relinked before a later one's files are on disk.
@@ -220,6 +221,9 @@ enum Cmd {
     /// Read or change user-level lvpm settings.
     #[command(subcommand)]
     Config(ConfigCmd),
+    /// Import package archives into the shared cache.
+    #[command(subcommand)]
+    Cache(CacheCmd),
     /// Start LabVIEW on the project's venv, optionally opening a project file.
     ///
     /// LabVIEW reads the venv's contents when it starts, so a LabVIEW that
@@ -248,6 +252,12 @@ enum VenvCmd {
         #[arg(long, short = 'y')]
         yes: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum CacheCmd {
+    /// Import a .vip/.ogp file or the packages directly inside a directory.
+    Add { path: PathBuf },
 }
 
 #[derive(Subcommand)]
@@ -298,6 +308,15 @@ fn main() -> Result<()> {
             cmd_vi_run(&cli, vi, sets, gets, *get_all, *timeout, watch.as_deref(), *poll_ms, done)
         }
         Cmd::Venv(sub) => cmd_venv(&cli, sub),
+        Cmd::Cache(CacheCmd::Add { path }) => {
+            let config = config::load()?;
+            let imports = index::cache_add(&config.cache, path, cli.refresh)?;
+            for import in &imports {
+                println!("{} {} sha256:{}", if import.reused { "cached" } else { "imported" }, import.path.display(), import.sha256);
+            }
+            println!("{} package(s) processed", imports.len());
+            Ok(())
+        }
         Cmd::Config(ConfigCmd::Set { key, values }) => {
             config::set(key, values)?;
             println!("set {key}");
@@ -883,6 +902,8 @@ fn cmd_install(
     let client = reqwest::blocking::Client::builder()
         .user_agent(concat!("lvpm/", env!("CARGO_PKG_VERSION")))
         .build()?;
+    let config = config::load()?;
+    let package_cache = cache::Cache::open(&config.cache)?;
 
     let mut total_writes = 0usize;
     // Any package declared a hook this install did not run — decides whether
@@ -948,24 +969,7 @@ fn cmd_install(
         print!("{} {} {} ... ", if dry_run { "?" } else { "+" }, e.name, e.version);
         std::io::stdout().flush().ok();
 
-        let bytes = if index::is_local_url(&e.url) {
-            std::fs::read(&e.url).with_context(|| format!("reading {}", e.url))?
-        } else {
-            client
-                .get(&e.url)
-                .send()
-                .with_context(|| format!("downloading {}", e.url))?
-                .error_for_status()?
-                .bytes()?
-                .to_vec()
-        };
-
-        if let Some(want) = &e.md5 {
-            let got = index::md5_hex(&bytes);
-            if &got != want {
-                bail!("MD5 mismatch for {}: expected {want}, got {got}", e.name);
-            }
-        }
+        let bytes = fetch::package(&package_cache, &client, e)?;
 
         let mut zip = install::open_archive(bytes)?;
         let spec = spec::parse(&read_spec(&mut zip)?)?;
