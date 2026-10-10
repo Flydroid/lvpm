@@ -78,6 +78,33 @@ cargo test
 
 Toolchain setup is in [CONTRIBUTING.md](CONTRIBUTING.md).
 
+### Test a local release installation
+
+From a Windows checkout with the build tools installed:
+
+```powershell
+.\scripts\install.ps1 -BuildLocal
+```
+
+This runs `cargo build --release --locked`, packages the executable,
+README and licenses into a temporary zip, verifies its SHA-256, and uses
+the normal release installation path. It replaces any existing per-user
+lvpm in `%LOCALAPPDATA%\lvpm\bin` and adds that directory to your user
+`PATH`. No GitHub release or cargo-dist setup is required. The version
+remains the one declared in Cargo.toml; temporary packaging files are removed.
+The local checksum checks the packaged bytes, not publisher authenticity.
+
+For an isolated test without changing your installed lvpm or user PATH:
+
+```powershell
+.\scripts\install.ps1 -BuildLocal -InstallDir "$PWD\sandbox\local-installer\bin" -NoPath
+.\sandbox\local-installer\bin\lvpm.exe --version
+```
+
+An existing release zip can also be installed with `-Archive <FILE>` and
+`-Sha256 <EXPECTED-HASH>` instead of building it. Local modes cannot be
+combined with GitHub release selection options.
+
 ## Quick start
 
 ```console
