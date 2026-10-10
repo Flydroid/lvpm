@@ -403,10 +403,19 @@ installation even after the originals are deleted. Cache reads verify the
 SHA-256 and installation also checks MD5. Local index files and cache
 list/remove/prune commands are not implemented yet.
 
-Remote feeds and imported packages are recorded in `%LOCALAPPDATA%\lvpm\cache`, in a
+Remote package installs check the cache by name, version, and the feed's MD5
+before downloading. A single distinct SHA-256 match is verified and reused,
+including archives imported from disk. Missing, corrupt, or ambiguous matches
+are downloaded and verified, then stored with SHA-256 and MD5 for future runs.
+Packages without a feed MD5 are stored but downloaded again on later installs:
+name/version alone does not identify their bytes. `--refresh` refreshes feeds,
+not already verified package blobs. Dry runs may populate the cache without
+writing package files into the target.
+
+Remote feeds, downloads, and imported packages are recorded in `%LOCALAPPDATA%\lvpm\cache`, in a
 SQLite index (`lvpm-cache.db`) over a content-addressed store of the bodies
-themselves. Without `--refresh` the stored body is used and nothing goes out
-to the network. With it, the `ETag` and `Last-Modified` the server last gave
+themselves. For feed bodies, without `--refresh` the stored body is used and
+no feed request goes out. With it, the `ETag` and `Last-Modified` the server last gave
 are sent back as a conditional request: only a feed that actually changed is
 downloaded again, and an unchanged one answers `304` and costs no bytes. See
 [Configuration](#configuration) to move the cache.
@@ -472,6 +481,7 @@ runs.
 | ------------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
 | `main.rs`                      | The CLI: commands, target and venv selection, the install plan                                                          |
 | `index.rs`                     | Fetch and parse package directories (`.ogpd` / `index.vipr`), resolve names to versions                                |
+| `fetch.rs`                     | Acquire package bytes: cache lookup, downloads, integrity verification, and cache population                            |
 | `cache.rs`                     | The cache: the SQLite index of known sources and the content-addressed store of what they served                        |
 | `spec.rs`                      | The `spec` manifest inside a package (the OGPT `.ogp` format and VIPM's `.vip` dialect)                                 |
 | `project.rs`                   | The project manifest `lvpm.toml`: dependencies and their constraints, sources, minimum LabVIEW, lookup from a directory |

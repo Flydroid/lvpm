@@ -196,12 +196,18 @@ fn entry_from_bytes(path: &Path, bytes: &[u8]) -> Result<Entry> {
     })
 }
 
+/// One file processed by cache add, including its content address and reuse status.
 pub struct Import {
     pub path: PathBuf,
     pub sha256: String,
     pub reused: bool,
 }
 
+/// Import one .vip/.ogp archive or all immediate package files in a directory.
+/// Matching file stats and an existing import blob skip archive reads unless
+/// `refresh` is set. New imports store bytes before recording metadata and hashes.
+/// Files changed during reading and invalid archives fail the command; imports
+/// completed earlier in the same call remain committed. Originals are never moved.
 pub fn cache_add(cache_dir: &Path, source: &Path, refresh: bool) -> Result<Vec<Import>> {
     let source = std::path::absolute(source)?;
     let is_package = |path: &Path| path.extension().is_some_and(|extension| {

@@ -9,8 +9,9 @@ for remote feeds only. Local package directories are set in the user-level
 their parsed metadata is cached in `local_files`, but their package bytes
 are not stored in the content store automatically. `lvpm cache add` imports
 local `.vip`/`.ogp` files or directories into the content store and `packages`.
-`feed_entries`, FTS search, local feed registration, cache list/remove/prune,
-and caching remote package downloads remain design only.
+`fetch.rs` checks remote package requests against `packages` before downloading
+and stores verified downloads. `feed_entries`, FTS search, local feed
+registration, and cache list/remove/prune remain design only.
 
 ### Local directory metadata cache (implemented)
 
@@ -429,6 +430,14 @@ $ lvpm cache remove C:\my\packages\
 
 ## MD5 vs SHA-256: the transition
 
+Implemented acquisition is owned by `fetch.rs`, called by `main.rs` with an
+already-resolved `Entry`. `cache.rs` only handles storage and SQL; it does not
+call the index or network. Downloads record `source_kind='remote'` and use
+the requested package URL as `source_ref` (not the feed URL). This provides
+request provenance without changing the index entry shape. Download rows
+do not become independent resolver entries; feed resolution remains as today.
+Unimported local files remain live reads and are not automatically stored.
+
 Today's public feeds only ever advertise MD5 (`Package.MD5`). SHA-256 is
 what the cache is keyed on and what the future `lvpm.lock` will pin. Two
 digests, one cache, no rewriting the feeds:
@@ -438,15 +447,24 @@ digests, one cache, no rewriting the feeds:
   to get a `sha256` back —
 
     ```sql
-    SELECT sha256 FROM packages WHERE md5 = ?
+    SELECT DISTINCT sha256 FROM packages
+    WHERE name = ? COLLATE NOCASE AND version = ? AND md5 = ?
     ```
 
-    A hit means the bytes are already in `content/` under that `sha256` — use
-    them, skip the network. A miss means download, verify against the
+    One distinct SHA-256 is a candidate hit, regardless of source. Verify
+    the blob's SHA-256 and recheck the advertised MD5 before using it. Zero
+    matches, multiple distinct SHA-256 values, a missing/corrupt blob, or an
+    MD5 mismatch are cache misses; never choose an ambiguous match arbitrarily.
+    A miss means download from the selected entry URL, verify against the
     advertised MD5 (as today), then hash the verified bytes to get the
     `sha256`, store the blob, and write the `packages` row with **both**
     digests recorded. From that moment on, this exact package/version is
     content-addressable by SHA-256 regardless of what the feed says.
+
+    Without an advertised MD5, downloads are still stored with both computed
+    hashes, but no automatic reuse is attempted. A name/version or URL alone
+    is not an integrity pin. `--refresh` revalidates feeds and local metadata;
+    it does not bypass verified package hits. Dry runs also populate the cache.
 
 - **Downloading with `lvpm.lock` present**: the lock records `sha256`
   directly (computed the same way, the first time the package was ever
@@ -465,10 +483,16 @@ digests, one cache, no rewriting the feeds:
 - MD5 is never trusted as a global content address on its own — it identifies
   "what the feed claims this download is", not "what's in the cache". Only
   SHA-256, computed by lvpm itself over bytes it has seen, is used as the
-  cache key. This sidesteps having to reason about MD5 collisions across two
-  independently-run feeds.
+  cache key. Matching metadata reduces accidental misidentification, but
+  neither it nor an MD5 recheck authenticates colliding archives. Ambiguous
+  mappings force a download; only a trusted SHA-256 pin can settle which bytes
+  are intended independently of the download source.
 
 ## End-to-end flow (install)
+
+The feed_entries/lockfile flow below remains the target design; current
+resolution still parses feed bodies. Package acquisition already uses
+`fetch.rs` for cache-first remote requests and explicit imported SHA-256s.
 
 1. Resolve the manifest/CLI request against `feed_entries` (feeds +
    registered local indexes), read back from SQLite rather than re-parsed
@@ -477,8 +501,8 @@ digests, one cache, no rewriting the feeds:
    `feed_entries` for that source (see "`feed_entries`" above).
 2. For each resolved `Entry`: is there an `lvpm.lock` entry for it?
     - Yes → look up `packages` **by `sha256`** (the lock's digest).
-    - No → look up `packages` **by `md5`** (the feed's digest) to _get_ a
-      `sha256`, per the query above.
+    - No → look up `packages` **by name/version/MD5** to obtain one unambiguous
+      `sha256`, per the query above; no MD5 means download instead.
 3. Cache hit → read the `.vip` bytes straight from `content/sha256/...`.
 4. Cache miss → download from `Entry.url` (or read the local file, for a
    `local-add-cache`/`local-index` entry), verify MD5 if the feed gave one,

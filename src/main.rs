@@ -2,6 +2,7 @@
 
 mod cache;
 mod config;
+mod fetch;
 mod index;
 mod install;
 mod launch;
@@ -85,7 +86,7 @@ enum Cmd {
     Install {
         /// Package to install. Omit when using --manifest.
         package: Option<String>,
-        /// Install every package listed in an `lvpm.toml`'s [dependencies].
+        /// Install every package listed in an `lvpm.toml`'s `[dependencies]`.
         ///
         /// All of them resolve into one plan and relink as one pass, so no
         /// package is relinked before a later one's files are on disk.
@@ -901,6 +902,8 @@ fn cmd_install(
     let client = reqwest::blocking::Client::builder()
         .user_agent(concat!("lvpm/", env!("CARGO_PKG_VERSION")))
         .build()?;
+    let config = config::load()?;
+    let package_cache = cache::Cache::open(&config.cache)?;
 
     let mut total_writes = 0usize;
     // Any package declared a hook this install did not run — decides whether
@@ -966,28 +969,7 @@ fn cmd_install(
         print!("{} {} {} ... ", if dry_run { "?" } else { "+" }, e.name, e.version);
         std::io::stdout().flush().ok();
 
-        let bytes = if let Some(sha256) = e.url.strip_prefix("cache:") {
-            let config = config::load()?;
-            cache::Cache::open(&config.cache)?.load(sha256)?
-                .with_context(|| format!("cached archive for {} is missing or corrupt; run cache add again with the original package", e.name))?
-        } else if index::is_local_url(&e.url) {
-            std::fs::read(&e.url).with_context(|| format!("reading {}", e.url))?
-        } else {
-            client
-                .get(&e.url)
-                .send()
-                .with_context(|| format!("downloading {}", e.url))?
-                .error_for_status()?
-                .bytes()?
-                .to_vec()
-        };
-
-        if let Some(want) = &e.md5 {
-            let got = index::md5_hex(&bytes);
-            if &got != want {
-                bail!("MD5 mismatch for {}: expected {want}, got {got}", e.name);
-            }
-        }
+        let bytes = fetch::package(&package_cache, &client, e)?;
 
         let mut zip = install::open_archive(bytes)?;
         let spec = spec::parse(&read_spec(&mut zip)?)?;

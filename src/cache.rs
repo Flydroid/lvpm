@@ -6,6 +6,10 @@
 //! gave, so a later run asks "still this one?" and a `304` costs no body. The
 //! bytes themselves live under their own SHA-256, so two sources serving
 //! identical content are stored once. See docs/cache-design.md.
+//!
+//! `local_files` is a disposable file-stat/metadata shortcut; `packages` is the
+//! independent inventory of imported and downloaded archives. This module owns
+//! persistence only: callers acquire and verify bytes before recording them.
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -51,15 +55,19 @@ CREATE TABLE IF NOT EXISTS packages (
 CREATE INDEX IF NOT EXISTS packages_by_sha256 ON packages(sha256);
 CREATE INDEX IF NOT EXISTS packages_by_md5 ON packages(md5);";
 
+/// Persisted resolver metadata shared by local-file shortcuts and package rows.
+/// Versions and dependency floors retain their original textual representation.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct LocalEntry {
     pub name: String,
     pub version: String,
     pub display_name: Option<String>,
+    /// Dependency name and optional minimum version, interpreted by the resolver.
     pub requires: Vec<(String, Option<String>)>,
     pub lv_min: Option<f64>,
 }
 
+/// Metadata and digests for an archive independent of its original source file.
 pub struct CachedPackage {
     pub entry: LocalEntry,
     pub sha256: String,
@@ -79,6 +87,7 @@ pub struct SourceState {
     pub sha256: Option<String>,
 }
 
+/// SQLite metadata and the SHA-256 content store under one configured directory.
 pub struct Cache {
     db: Connection,
     root: PathBuf,
@@ -87,6 +96,8 @@ pub struct Cache {
 impl Cache {
     /// Open (creating as needed) the cache under `root`. Idempotent: first run
     /// builds it, every run after is a handful of no-op statements.
+    /// Existing metadata-only databases gain the optional local import link;
+    /// newer unsupported major schemas are rejected before use.
     pub fn open(root: &Path) -> Result<Cache> {
         std::fs::create_dir_all(root.join("tmp"))?;
         let db = Connection::open(root.join(DB_FILE))
@@ -113,6 +124,9 @@ impl Cache {
         Ok(Cache { db, root: root.to_path_buf() })
     }
 
+    /// Reuse metadata only when the absolute path, size, and modification time match.
+    /// Unavailable timestamps or invalid JSON are misses; stats are not integrity
+    /// checks and cannot detect replacements preserving both size and timestamp.
     pub fn local_entry(&self, path: &Path, metadata: &std::fs::Metadata) -> Result<Option<LocalEntry>> {
         let Some(modified) = file_modified(metadata) else { return Ok(None) };
         let entry: Option<String> = self.db.query_row(
@@ -123,6 +137,8 @@ impl Cache {
         Ok(entry.and_then(|entry| serde_json::from_str(&entry).ok()))
     }
 
+    /// Replace parsed metadata and clear its import shortcut without deleting packages.
+    /// No record is written when a usable modification time is unavailable.
     pub fn record_local(&self, path: &Path, metadata: &std::fs::Metadata, entry: &LocalEntry) -> Result<()> {
         let Some(modified) = file_modified(metadata) else { return Ok(()) };
         self.db.execute(
@@ -133,11 +149,14 @@ impl Cache {
         Ok(())
     }
 
+    /// Invalidate the original file's shortcut, leaving imported archives intact.
     pub fn forget_local(&self, path: &Path) -> Result<()> {
         self.db.execute("DELETE FROM local_files WHERE path = ?1", params![path.to_string_lossy()])?;
         Ok(())
     }
 
+    /// Find an unchanged import with a package row and an existing blob.
+    /// This fast path checks existence only; consumers must verify the blob on read.
     pub fn imported_local(&self, path: &Path, metadata: &std::fs::Metadata) -> Result<Option<String>> {
         let Some(modified) = file_modified(metadata) else { return Ok(None) };
         let sha: Option<String> = self.db.query_row(
@@ -150,6 +169,9 @@ impl Cache {
         Ok(sha.filter(|sha| valid_sha256(sha) && self.blob_path(sha).is_file()))
     }
 
+    /// Atomically record package ownership by absolute source path and its stat link.
+    /// The caller must store the blob and compute both digests first. Package rows
+    /// survive original-file deletion; missing timestamps disable the stat shortcut.
     pub fn record_import(&self, path: &Path, metadata: &std::fs::Metadata, entry: &LocalEntry, sha256: &str, md5: &str) -> Result<()> {
         let transaction = self.db.unchecked_transaction()?;
         transaction.execute(
@@ -169,6 +191,8 @@ impl Cache {
         Ok(())
     }
 
+    /// Load explicitly imported metadata for resolution, without reading blob bytes.
+    /// Remote downloads are excluded: their availability is still decided by feeds.
     pub fn imported_packages(&self) -> Result<Vec<CachedPackage>> {
         let mut statement = self.db.prepare(
             "SELECT entry, sha256, md5 FROM packages WHERE source_kind='local-add-cache' ORDER BY name, version, source_ref",
@@ -182,6 +206,35 @@ impl Cache {
         Ok(packages)
     }
 
+    /// Return a candidate digest only if all matching rows identify one SHA-256.
+    /// Names are case-insensitive; version text and lowercase MD5 match exactly.
+    /// Sources may share identical content. Zero or ambiguous matches return None;
+    /// the caller must still load and verify the returned blob and advertised MD5.
+    pub fn package_sha256(&self, name: &str, version: &str, md5: &str) -> Result<Option<String>> {
+        let mut statement = self.db.prepare(
+            "SELECT DISTINCT sha256 FROM packages WHERE name=?1 COLLATE NOCASE AND version=?2 AND md5=?3 LIMIT 2",
+        )?;
+        let hashes = statement.query_map(params![name, version, md5], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(if hashes.len() == 1 { hashes.into_iter().next() } else { None })
+    }
+
+    /// Record verified, already-stored bytes using the requested package URL as provenance.
+    /// Upserts replace the current mapping for a name/version/URL; rows from other
+    /// sources remain independent and can expose ambiguous legacy MD5 mappings.
+    pub fn record_download(&self, entry: &LocalEntry, url: &str, sha256: &str, md5: &str) -> Result<()> {
+        self.db.execute(
+            "INSERT INTO packages (name, version, sha256, md5, source_kind, source_ref, display_name, entry, added_at)
+             VALUES (?1, ?2, ?3, ?4, 'remote', ?5, ?6, ?7, ?8)
+             ON CONFLICT(name, version, source_ref) DO UPDATE SET
+             sha256=excluded.sha256, md5=excluded.md5, entry=excluded.entry,
+             display_name=excluded.display_name, added_at=excluded.added_at",
+            params![entry.name, entry.version, sha256, md5, url, entry.display_name, serde_json::to_string(entry)?, now()],
+        )?;
+        Ok(())
+    }
+
+    /// Read HTTP validators and the feed body's digest by original source URL.
     pub fn state(&self, source: &str) -> Result<Option<SourceState>> {
         let row = self
             .db
@@ -201,6 +254,7 @@ impl Cache {
         Ok(row)
     }
 
+    /// Replace feed metadata after its body is stored, retaining the original lookup URL.
     pub fn record(&self, source: &str, kind: &str, base_url: &str, st: &SourceState) -> Result<()> {
         self.db.execute(
             "INSERT INTO sources (ref, kind, base_url, resolved_url, etag, last_modified, sha256, fetched_at)
@@ -217,6 +271,9 @@ impl Cache {
 
     /// Store bytes under their own digest and return it. Hashing first and
     /// renaming after is what makes two processes storing the same body safe.
+    /// Existing blobs are verified and corruption repaired. New staging files are
+    /// synced before rename; write failures propagate and staging is cleaned up.
+    /// Callers must record database references only after this succeeds.
     pub fn store(&self, bytes: &[u8]) -> Result<String> {
         let sha = sha256_hex(bytes);
         let dest = self.blob_path(&sha);
