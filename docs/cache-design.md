@@ -5,9 +5,28 @@ Status: partly implemented. `cache.rs` holds the SQLite DB
 `sources` table, and `index.rs` fetches remote feed bodies through them — the
 per-URL `.idx` file this replaces is gone. The implemented `sources` rows are
 for remote feeds only. Local package directories are set in the user-level
-`config.toml` (or `LVPM_CONFIG_SOURCES_LOCAL`) and scanned directly; their
-packages are not yet stored in the cache. `packages`, `feed_entries` and
+`config.toml` (or `LVPM_CONFIG_SOURCES_LOCAL`) and scanned on each index load;
+their parsed metadata is cached in `local_files`, but their package bytes
+are not yet stored in the content store. `packages`, `feed_entries` and
 `lvpm cache add` remain design only.
+
+### Local directory metadata cache (implemented)
+
+Each index load lists the configured directories' immediate `.vip` files
+and checks their file stats. `local_files` stores the absolute path, size,
+modification time (nanoseconds since the Unix epoch), and a JSON entry with
+the package name, version, display name, dependency constraints, and LabVIEW
+minimum. Matching stats reuse this entry without reading or opening the ZIP.
+New or changed files are parsed and their entries replaced; removed files
+are no longer listed in resolution, although their cached records may remain.
+Only currently configured directories contribute entries.
+
+`--refresh` bypasses this shortcut and reparses every local package. File
+stats are a performance hint, not an integrity check: a replacement preserving
+both size and modification time requires refresh to detect. If modification
+time is unavailable, the file is parsed without caching its metadata. Invalid
+archives invalidate any old metadata and are skipped as before. Installation
+still reads the original archive, not cached package bytes.
 
 ## Goals
 
@@ -60,18 +79,18 @@ cache add` under the same `cache` subcommand group.
 
 ## Directory layout
 
-`lvpm` already has one per-user data root (today used only for the index
-`.idx` files), and it needs to resolve to the right place on both of lvpm's
-supported OSes:
+`lvpm`'s default cache directory is per-user and resolves to the right place
+on both supported OSes. `config::load()` returns this directory as
+`Config::cache`; callers pass that path directly to `Cache::open()`:
 
-| OS      | Root                                                                                                                                                                                             |
-| ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Windows | `%LOCALAPPDATA%\lvpm\` (falls back to the temp dir if unset, as `cache_dir()` does today)                                                                                                        |
-| Linux   | `$XDG_CACHE_HOME/lvpm/` if set, else `~/.cache/lvpm/` — the same base directory conventions (XDG Base Directory spec) that put LabVIEW itself under `/usr/local/natinst` on Linux in `target.rs` |
+| OS      | Default cache directory                                                                                                          |
+| ------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| Windows | `%LOCALAPPDATA%\lvpm\cache\` (falls back to `%TEMP%\lvpm\cache\` if `LOCALAPPDATA` is unset)                                  |
+| Linux   | `$XDG_CACHE_HOME/lvpm/cache/` if set, else `~/.cache/lvpm/cache/` (falls back to the temp dir if neither variable is set)         |
 
 ```
-<root>\cache\                  # %LOCALAPPDATA%\lvpm\cache  (Windows)
-                                # ~/.cache/lvpm/cache        (Linux)
+<cache-dir>\                     # e.g. %LOCALAPPDATA%\lvpm\cache (Windows)
+                                # or ~/.cache/lvpm/cache (Linux)
 ├── lvpm-cache.db               # SQLite (FTS5) — the index described below
 ├── content\
 │   └── sha256\
@@ -80,13 +99,12 @@ supported OSes:
 └── tmp\                        # download/hash staging area, fsync+rename into content/
 ```
 
-This makes the existing `cache_dir()` in `src/main.rs` name the _parent_ of
-the cache (`<root>`, e.g. `%LOCALAPPDATA%\lvpm` or `~/.cache/lvpm`), with
-`cache\` as one purpose-built folder inside it — leaving room for other
-global lvpm state later (e.g. a future global config) without renaming
-anything. `cache_dir()` should grow the same `#[cfg(windows)]` /
-`#[cfg(not(windows))]` split `target.rs` already uses for LabVIEW detection,
-rather than only ever reading `LOCALAPPDATA`.
+`LVPM_CONFIG_CACHE` overrides the default and names this cache directory
+itself, not its parent; `Cache::open()` does not append another `cache/`
+component. In the current implementation, opening the cache creates the
+directory and `tmp/` and opens `lvpm-cache.db`; `content/` is created when the
+first blob is stored. Keeping the default under `lvpm/cache/` leaves room for
+other global lvpm state under `lvpm/` later.
 
 ### Overriding the location
 

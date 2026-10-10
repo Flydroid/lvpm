@@ -7,7 +7,7 @@
 //! resolver needs. A local directory of named packages is a "local repository"
 //! and indexes itself from each package's own spec.
 
-use crate::cache::{Cache, SourceState};
+use crate::cache::{Cache, LocalEntry, SourceState};
 use crate::version::{split_id, Version};
 use anyhow::{Context, Result};
 use md5::{Digest, Md5};
@@ -108,7 +108,7 @@ pub fn is_local_url(url: &str) -> bool {
 }
 
 /// Index every `.vip` in a local package directory from each package's spec.
-fn scan_local_repo(dir: &Path, out: &mut Vec<Entry>) -> Result<()> {
+fn scan_local_repo(cache: &Cache, dir: &Path, refresh: bool, out: &mut Vec<Entry>) -> Result<()> {
     let mut vips: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
         .with_context(|| format!("reading repo directory {}", dir.display()))?
         .flatten()
@@ -118,9 +118,44 @@ fn scan_local_repo(dir: &Path, out: &mut Vec<Entry>) -> Result<()> {
     vips.sort();
 
     for path in vips {
+        let path = std::path::absolute(path)?;
+        let metadata = std::fs::metadata(&path)?;
+        if !refresh && let Some(entry) = cache.local_entry(&path, &metadata)? {
+            out.push(Entry {
+                name: entry.name,
+                version: Version::parse(&entry.version),
+                url: path.to_string_lossy().into_owned(),
+                md5: None,
+                display_name: entry.display_name,
+                requires: entry.requires.into_iter().map(|(name, min)| Requirement {
+                    name, min: min.map(|version| Version::parse(&version)),
+                }).collect(),
+                lv_min: entry.lv_min,
+            });
+            continue;
+        }
         match entry_from_vip(&path) {
-            Ok(e) => out.push(e),
-            Err(e) => eprintln!("  ! ignoring {}: {e:#}", path.display()),
+            Ok(entry) => {
+                let after = std::fs::metadata(&path)?;
+                if metadata.len() == after.len() && metadata.modified().ok() == after.modified().ok() {
+                    cache.record_local(&path, &metadata, &LocalEntry {
+                        name: entry.name.clone(),
+                        version: entry.version.to_string(),
+                        display_name: entry.display_name.clone(),
+                        requires: entry.requires.iter().map(|requirement| (
+                            requirement.name.clone(), requirement.min.as_ref().map(ToString::to_string),
+                        )).collect(),
+                        lv_min: entry.lv_min,
+                    })?;
+                } else {
+                    cache.forget_local(&path)?;
+                }
+                out.push(entry);
+            }
+            Err(error) => {
+                cache.forget_local(&path)?;
+                eprintln!("  ! ignoring {}: {error:#}", path.display());
+            }
         }
     }
     Ok(())
@@ -156,12 +191,13 @@ pub fn load(
     defaults: bool,
 ) -> Result<Index> {
     let mut entries = Vec::new();
+    let local_cache = if local_sources.is_empty() { None } else { Some(Cache::open(cache_dir)?) };
 
     for dir in local_sources {
         if !dir.is_dir() {
             anyhow::bail!("local source {} is not a directory", dir.display());
         }
-        scan_local_repo(dir, &mut entries)?;
+        scan_local_repo(local_cache.as_ref().expect("local sources have a cache"), dir, refresh, &mut entries)?;
     }
 
     let mut sources: Vec<(String, String)> = match defaults {
@@ -391,7 +427,7 @@ mod tests {
     }
 
     #[test]
-    fn local_package_directories_resolve_from_specs_without_cache_blobs() {
+    fn local_package_directories_cache_metadata_without_cache_blobs() {
         let root = std::env::temp_dir()
             .join(format!("lvpm-local-source-test-{}", std::process::id()));
         std::fs::remove_dir_all(&root).ok();
@@ -419,7 +455,30 @@ mod tests {
         assert!(is_local_url(&entry.url));
         assert_eq!(std::fs::read(&entry.url).unwrap(), std::fs::read(&archive).unwrap());
         assert_eq!(std::fs::read_dir(root.join("cache/content/sha256")).err().unwrap().kind(), std::io::ErrorKind::NotFound);
-        assert!(!root.join("cache/lvpm-cache.db").exists());
+        assert!(root.join("cache/lvpm-cache.db").exists());
+
+        let valid_bytes = std::fs::read(&archive).unwrap();
+        std::fs::write(&archive, b"not a zip").unwrap();
+        assert!(load(&root.join("cache"), false, &[], std::slice::from_ref(&packages), false).unwrap().entries.is_empty());
+        std::fs::write(&archive, &valid_bytes).unwrap();
+        let restored = load(&root.join("cache"), false, &[], std::slice::from_ref(&packages), false).unwrap();
+        assert_eq!(restored.entries[0].requires[0].min.as_ref().unwrap().raw, "1.2");
+
+        let original = std::fs::metadata(&archive).unwrap();
+        std::fs::write(&archive, vec![0; original.len() as usize]).unwrap();
+        std::fs::File::options().write(true).open(&archive).unwrap()
+            .set_modified(original.modified().unwrap()).unwrap();
+        let cached = load(&root.join("cache"), false, &[], std::slice::from_ref(&packages), false).unwrap();
+        assert_eq!(cached.entries[0].name, "local_thing");
+        let refreshed = load(&root.join("cache"), true, &[], std::slice::from_ref(&packages), false).unwrap();
+        assert!(refreshed.entries.is_empty());
+        let invalidated = load(&root.join("cache"), false, &[], std::slice::from_ref(&packages), false).unwrap();
+        assert!(invalidated.entries.is_empty());
+
+        std::fs::remove_file(&archive).unwrap();
+        assert!(load(&root.join("cache"), false, &[], std::slice::from_ref(&packages), false).unwrap().entries.is_empty());
+        std::fs::write(packages.join("new.vip"), &valid_bytes).unwrap();
+        assert_eq!(load(&root.join("cache"), false, &[], &[packages], false).unwrap().entries.len(), 1);
 
         std::fs::remove_dir_all(&root).ok();
     }

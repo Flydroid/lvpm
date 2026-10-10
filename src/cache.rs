@@ -25,7 +25,22 @@ CREATE TABLE IF NOT EXISTS sources (
     last_modified TEXT,
     sha256        TEXT,
     fetched_at    INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS local_files (
+    path TEXT PRIMARY KEY,
+    size TEXT NOT NULL,
+    modified TEXT NOT NULL,
+    entry TEXT NOT NULL
 );";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct LocalEntry {
+    pub name: String,
+    pub version: String,
+    pub display_name: Option<String>,
+    pub requires: Vec<(String, Option<String>)>,
+    pub lv_min: Option<f64>,
+}
 
 /// Where a source's body came from and how to ask whether it changed.
 ///
@@ -65,6 +80,31 @@ impl Cache {
             db.pragma_update(None, "user_version", CACHE_SCHEMA_VERSION)?;
         }
         Ok(Cache { db, root: root.to_path_buf() })
+    }
+
+    pub fn local_entry(&self, path: &Path, metadata: &std::fs::Metadata) -> Result<Option<LocalEntry>> {
+        let Some(modified) = file_modified(metadata) else { return Ok(None) };
+        let entry: Option<String> = self.db.query_row(
+            "SELECT entry FROM local_files WHERE path = ?1 AND size = ?2 AND modified = ?3",
+            params![path.to_string_lossy(), metadata.len().to_string(), modified],
+            |row| row.get(0),
+        ).optional()?;
+        Ok(entry.and_then(|entry| serde_json::from_str(&entry).ok()))
+    }
+
+    pub fn record_local(&self, path: &Path, metadata: &std::fs::Metadata, entry: &LocalEntry) -> Result<()> {
+        let Some(modified) = file_modified(metadata) else { return Ok(()) };
+        self.db.execute(
+            "INSERT INTO local_files (path, size, modified, entry) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(path) DO UPDATE SET size=excluded.size, modified=excluded.modified, entry=excluded.entry",
+            params![path.to_string_lossy(), metadata.len().to_string(), modified, serde_json::to_string(entry)?],
+        )?;
+        Ok(())
+    }
+
+    pub fn forget_local(&self, path: &Path) -> Result<()> {
+        self.db.execute("DELETE FROM local_files WHERE path = ?1", params![path.to_string_lossy()])?;
+        Ok(())
     }
 
     pub fn state(&self, source: &str) -> Result<Option<SourceState>> {
@@ -135,6 +175,11 @@ impl Cache {
     fn blob_path(&self, sha: &str) -> PathBuf {
         self.root.join("content").join("sha256").join(&sha[..2]).join(sha)
     }
+}
+
+fn file_modified(metadata: &std::fs::Metadata) -> Option<String> {
+    metadata.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()
+        .map(|duration| duration.as_nanos().to_string())
 }
 
 pub fn sha256_hex(bytes: &[u8]) -> String {
