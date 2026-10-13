@@ -2,7 +2,8 @@
 //!
 //! LabVIEW reads its LVAddons locations once, at launch, from the ini file it
 //! was started with. So a venv is "activated" by starting a LabVIEW of its
-//! own: a copy of the target's `LabVIEW.ini` with the venv added as an
+//! own: a copy of the target's `LabVIEW.ini` (`labview.conf` on Linux, where
+//! `-pref` works the same way) with the venv added as an
 //! `LVAddons.AdditionalLocations` entry and VI Server moved to the venv's
 //! port, handed over with `-pref`. Nothing in the installation changes, and
 //! the user's primary IDE — if one is open — keeps its own port and its own
@@ -22,6 +23,18 @@ use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
+
+/// Where a headless LabVIEW writes what would have been a dialog.
+#[cfg(windows)]
+const HEADLESS_LOG: &str = "%TEMP%\\LabVIEW_*_headless_*_cur.txt";
+#[cfg(target_os = "linux")]
+const HEADLESS_LOG: &str = "/tmp/labview_*_headless_*_cur.txt";
+
+/// Line ending for the ini lvpm writes: LabVIEW's own on each platform.
+#[cfg(windows)]
+const EOL: &str = "\r\n";
+#[cfg(not(windows))]
+const EOL: &str = "\n";
 
 /// Set `key=value` lines in an ini text: replace in place where the key exists
 /// (however it was spaced), append where it does not, and never write a key
@@ -49,14 +62,14 @@ pub fn override_keys(text: &str, keys: &[(&str, &str)]) -> String {
             Some(_) => continue,
             None => out.push_str(line),
         }
-        out.push_str("\r\n");
+        out.push_str(EOL);
     }
     for (i, (k, v)) in keys.iter().enumerate() {
         if !seen[i] {
             out.push_str(k);
             out.push('=');
             out.push_str(v);
-            out.push_str("\r\n");
+            out.push_str(EOL);
         }
     }
     out
@@ -66,12 +79,22 @@ pub fn override_keys(text: &str, keys: &[(&str, &str)]) -> String {
 /// the venv mounted and VI Server moved to the venv's port. Regenerated every
 /// time, so the target's current settings are always what is inherited.
 pub fn write_ini(v: &Venv) -> Result<PathBuf> {
-    let src = v.target.path.join("LabVIEW.ini");
-    let text = std::fs::read_to_string(&src).with_context(|| format!("reading {}", src.display()))?;
+    let src = v.target.ini();
+    let text = match std::fs::read_to_string(&src) {
+        Ok(text) => text,
+        // On Linux the file is per user and only exists once this user has
+        // started LabVIEW; until then the defaults are all there is to inherit.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && cfg!(target_os = "linux") => {
+            format!("[LabVIEW]{EOL}")
+        }
+        Err(e) => return Err(e).with_context(|| format!("reading {}", src.display())),
+    };
 
     // Verified unquoted; LabVIEW itself quotes path values that carry spaces,
     // so follow it exactly there and nowhere else.
-    let raw = v.dir.to_string_lossy().replace('/', "\\");
+    let raw = v.dir.to_string_lossy().into_owned();
+    #[cfg(windows)]
+    let raw = raw.replace('/', "\\");
     let location = if raw.contains(' ') { format!("\"{raw}\"") } else { raw };
     let port = v.port.to_string();
     let out = override_keys(
@@ -96,8 +119,9 @@ pub fn write_ini(v: &Venv) -> Result<PathBuf> {
 /// Start the venv's LabVIEW with `ini`, optionally opening a project file.
 /// Detached: LabVIEW outlives lvpm by design.
 pub fn spawn(v: &Venv, ini: &Path, lvproj: Option<&Path>) -> Result<Child> {
-    let exe = v.target.path.join("LabVIEW.exe");
-    ensure!(exe.is_file(), "no LabVIEW.exe in {}", v.target.path.display());
+    let exe = v.target.exe();
+    ensure!(exe.is_file(), "no {} in {}", exe.display(), v.target.path.display());
+    wait_port_released(v.port);
     let mut cmd = Command::new(&exe);
     cmd.arg("-pref").arg(ini);
     if let Some(p) = lvproj {
@@ -114,12 +138,55 @@ pub fn spawn(v: &Venv, ini: &Path, lvproj: Option<&Path>) -> Result<Child> {
 /// our stdout. An IDE that inherits that pipe holds it open for as long as it
 /// runs, and `lvpm launch | tail` never returns. So our std handles are made
 /// non-inheritable for the duration of the spawn, and restored afterwards.
+///
+/// On Linux `Stdio::null()` is enough — the child's 0–2 are replaced, and Rust
+/// opens its own descriptors close-on-exec — but the terminal's process group
+/// is not: a child left in ours gets the SIGINT of a Ctrl+C meant for lvpm. So
+/// there LabVIEW gets a group of its own.
 pub fn spawn_detached(cmd: &mut Command) -> std::io::Result<Child> {
     cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     #[cfg(windows)]
     let _keep_our_pipes = win::NoInherit::new();
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(cmd, 0);
     cmd.spawn()
 }
+
+/// Hold off starting a LabVIEW on `port` while a closed connection still
+/// holds that port in TIME_WAIT, up to the kernel's fixed 60 s.
+///
+/// LabVIEW on Linux binds its VI Server listener once, at startup, and
+/// without `SO_REUSEADDR`: started while the previous instance's connections
+/// are in TIME_WAIT, it runs without VI Server for the rest of its life and
+/// never says so. Measured on 2026 Q3 — `lvpm launch` straight after an
+/// install in a venv had closed its relink instance got a LabVIEW that never
+/// listened. Linux-only, which is where it was measured.
+#[cfg(target_os = "linux")]
+pub fn wait_port_released(port: u16) {
+    const TIME_WAIT: &str = "06";
+    let held = || {
+        ["/proc/net/tcp", "/proc/net/tcp6"].iter().any(|f| {
+            std::fs::read_to_string(f).unwrap_or_default().lines().skip(1).any(|l| {
+                let cols: Vec<&str> = l.split_whitespace().collect();
+                cols.len() > 3
+                    && cols[3] == TIME_WAIT
+                    && cols[1].rsplit(':').next().and_then(|p| u16::from_str_radix(p, 16).ok())
+                        == Some(port)
+            })
+        })
+    };
+    if !held() {
+        return;
+    }
+    eprintln!("waiting for port {port} to leave TIME_WAIT, or LabVIEW would start without VI Server...");
+    let started = Instant::now();
+    while held() && started.elapsed() < Duration::from_secs(65) {
+        std::thread::sleep(Duration::from_secs(1));
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn wait_port_released(_port: u16) {}
 
 #[cfg(windows)]
 mod win {
@@ -195,9 +262,9 @@ pub fn wait_ready(port: u16, budget: Duration) -> Result<()> {
     // A headless LabVIEW shows no dialogs; what would have been one is in
     // its log instead.
     let hint = if std::env::var_os("LV_RTE_HEADLESS").is_some() {
-        "(headless LabVIEW: see %TEMP%\\LabVIEW_*_headless_*_cur.txt for what went wrong)"
+        format!("(headless LabVIEW: see {HEADLESS_LOG} for what went wrong)")
     } else {
-        "(a dialog may be holding the IDE up — check its window)"
+        "(a dialog may be holding the IDE up — check its window)".to_string()
     };
     bail!(
         "LabVIEW never answered VI Server on port {port} within {}s (last: {last})\n{hint}",
@@ -263,19 +330,21 @@ mod tests {
         );
         assert_eq!(
             out,
-            "[LabVIEW]\r\nserver.tcp.port=3400\r\nserver.tcp.acl=\"+*\"\r\n\
-             LVAddons.AdditionalLocations=C:\\r\\.lv-venv\r\n"
+            format!(
+                "[LabVIEW]{EOL}server.tcp.port=3400{EOL}server.tcp.acl=\"+*\"{EOL}\
+                 LVAddons.AdditionalLocations=C:\\r\\.lv-venv{EOL}"
+            )
         );
     }
 
     #[test]
     fn override_does_not_mistake_a_longer_key_for_a_shorter_one() {
         let out = override_keys("server.tcp.portfoo=1\n", &[("server.tcp.port", "2")]);
-        assert_eq!(out, "server.tcp.portfoo=1\r\nserver.tcp.port=2\r\n");
+        assert_eq!(out, format!("server.tcp.portfoo=1{EOL}server.tcp.port=2{EOL}"));
     }
 
     #[test]
     fn override_of_an_empty_ini_is_just_the_keys() {
-        assert_eq!(override_keys("", &[("a", "1")]), "a=1\r\n");
+        assert_eq!(override_keys("", &[("a", "1")]), format!("a=1{EOL}"));
     }
 }
