@@ -244,6 +244,59 @@ and Linux alike:
 Saved in LabVIEW 2020, like the relink VI, and zipped into a `.vip` by the
 test scripts as today.
 
+## Terminal UI
+
+`lvpm tui` (or `lvpm` with no arguments): a full-screen front end over the
+commands that exist, with no logic of its own. The main reason is SSH: a test
+stand, a lab PC, a headless Linux build machine or a container
+(`docker exec -it <name> lvpm tui`) gets a package manager with no display,
+RDP or VNC. Windows has an OpenSSH server, so the same applies there.
+
+Views:
+
+- **Browse** — every package in the configured sources, filtered by name,
+  vendor or category, and by installed, updates or the selected LabVIEW.
+  Details: description, all versions, dependencies, license, file count.
+  `v` picks an exact version (`name@version`).
+- **Installed** — version, relinked or not, hook results, newer versions.
+  Install, update, uninstall, relink and rerun hooks, one key each.
+- **Plan** — before anything changes: packages added, upgraded or
+  downgraded, file count, relink folders, hooks; the `--dry-run` output with
+  structure. Downgrades need a confirmation, as `--allow-downgrade` does.
+- **Progress** — one row per phase (resolve, download, unpack, relink per
+  folder, hooks) and the live log. `Esc` cancels between folders.
+- **Project** — edit `lvpm.toml` dependencies (pin, `>=` floor, `*`), create
+  and launch the venv.
+- **Targets** — LabVIEW versions, VI Server port and state, start.
+- **Sources** — add or remove sources, refresh the indexes.
+
+For SSH:
+
+- Works with no display: shows that LabVIEW runs headless and which steps
+  that turns off (relink and hooks by default).
+- A dropped connection must not kill a relink: the job runs detached and the
+  TUI attaches to its log again, or the TUI runs inside `tmux`.
+- Redraw only what changed; no animation.
+- No Nerd Font glyphs, no dependence on true colour, an ASCII fallback for
+  box lines.
+
+How:
+
+1. **Events first.** `cmd_install` and the other commands print as they go.
+   Make them send events (plan, progress, result) instead; the CLI prints
+   the events as today, so its tests keep guarding the output. This is most
+   of the work, and a GUI later uses the same layer.
+2. **Read-only views:** Browse and Installed, on `ratatui` and `crossterm`
+   (pure Rust: the static musl and Windows builds stay as they are), behind a
+   cargo feature.
+3. **Install and uninstall** with Plan and Progress; relink and hooks on a
+   worker thread.
+4. **Project, Targets and Sources.**
+
+What a terminal cannot do: package icons and screenshots, rich release
+notes, drag and drop. A GUI (`egui`, or `tauri`) can follow on the event
+layer if Windows users ask for one; the TUI does not block it.
+
 ## macOS
 
 Not supported, and a macOS build stops with a `compile_error!` in `main.rs`.
