@@ -144,7 +144,7 @@ VI Server, headless where wanted, against the project's own dependencies.
 - **A standard or custom `Build.vi`.** The standard one is embedded in the
   binary, like the relink VI: it opens the `.lvproj`, runs the named build
   specs and reports each step. A project can name its own `Build.vi`
-  instead. LabVIEWCLI `ExecuteBuildSpec` stays a fallback.
+  instead. No LabVIEWCLI: lvpm drives LabVIEW over its own VI Server client.
 - **Arguments to the Pre-Build and Post-Build VIs:** version, target LabVIEW
   and bitness, output folder, commit.
 - **`[build]` in `lvpm.toml`:** which build specs, where the version comes
