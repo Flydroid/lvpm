@@ -280,22 +280,118 @@ For SSH:
 - No Nerd Font glyphs, no dependence on true colour, an ASCII fallback for
   box lines.
 
-How:
+How: the refactor and the event layer below first, then the TUI on them.
 
-1. **Events first.** `cmd_install` and the other commands print as they go.
-   Make them send events (plan, progress, result) instead; the CLI prints
-   the events as today, so its tests keep guarding the output. This is most
-   of the work, and a GUI later uses the same layer.
-2. **Read-only views:** Browse and Installed, on `ratatui` and `crossterm`
+1. **Read-only views:** Browse and Installed, on `ratatui` and `crossterm`
    (pure Rust: the static musl and Windows builds stay as they are), behind a
    cargo feature.
-3. **Install and uninstall** with Plan and Progress; relink and hooks on a
+2. **Install and uninstall** with Plan and Progress; relink and hooks on a
    worker thread.
-4. **Project, Targets and Sources.**
+3. **Project, Targets and Sources.**
 
 What a terminal cannot do: package icons and screenshots, rich release
 notes, drag and drop. A GUI (`egui`, or `tauri`) can follow on the event
 layer if Windows users ask for one; the TUI does not block it.
+
+### Before the TUI: split `main.rs`
+
+`main.rs` holds 1,900 lines and about 130 `print!` calls; `cmd_install`
+alone is 430 lines of resolution, download, unpack, hooks, relink and
+output. Split it, with behaviour and CLI output unchanged and `cargo test`
+green on both platforms after each commit:
+
+| Module | From `main.rs` |
+|---|---|
+| `cli.rs` | `Cli`, `Cmd`, `VenvCmd`, `ConfigCmd`, `RelinkArgs` (clap only) |
+| `context.rs` | `roots_for`, `destination`, `headless`, `headless_roots`, `work_dir`, `manifest_for`, `load_index`: the target and environment every command needs |
+| `resolve.rs` | `Req`, the dependency walk, version and downgrade checks; returns a `Plan` |
+| `ops/install.rs` | executes a `Plan`: download, verify, unpack, records |
+| `ops/uninstall.rs` | `cmd_uninstall`, `uninstall_one` |
+| `hooks.rs` | `run_hook_vi`, `run_post_install_hooks`, `hook_action_info`, `cmd_run_hooks` |
+| `relink.rs` | gains `run_relink`, `cmd_relink` |
+| `refresh.rs` | gains `refresh_palettes_and_menus` |
+| `diag.rs` | `vi-probe`, `vi-save`, `vi-run`, `app-probe` and their argument parsing |
+| `main.rs` | parse, dispatch, exit code |
+
+1. Moves only (`cli`, `context`, `diag`, `hooks`, uninstall): no logic
+   changes, easy to review.
+2. `cmd_install` as resolve → `Plan` → execute. `--dry-run` prints the
+   `Plan`.
+3. The event layer (next section).
+4. Unit tests for `resolve` and `Plan` that need no LabVIEW: exact pins,
+   `>=` floors, `*`, downgrades.
+
+Many branches touch `main.rs`; do the moves when few pull requests are open.
+
+### Event layer and JSON interface
+
+Operations stop printing. They take a sink and send events; a front end is
+whatever implements the sink. One sender and one listener per operation, so
+a channel or a callback is enough; no broker.
+
+```rust
+enum Event {
+    Plan(Plan),                                   // what will change
+    Phase { name: Phase, state: State },          // resolve, download, unpack, relink, hooks
+    Progress { item: String, done: u64, total: u64 },
+    Log { level: Level, text: String },
+    Done(Result<Summary, ErrorReport>),
+}
+trait Sink { fn emit(&self, e: Event); }
+
+fn install(ctx: &Context, plan: &Plan, sink: &dyn Sink, cancel: &Cancel) -> Result<Summary>;
+```
+
+| Front end | Sink |
+|---|---|
+| CLI | prints each event as text, as today |
+| TUI, in-process GUI (`egui`, `tauri`) | a channel to the UI thread |
+| `--json` | one JSON object per line on stdout; CI scripts read this, not the text |
+| `lvpm serve` (later) | the same JSON over a local socket |
+
+Commands go the other way: install, uninstall, relink, cancel. Cancel is a
+shared flag the operations check between steps (between relink folders,
+between hooks).
+
+`--json` and `serve` make any language a front end, LabVIEW included: a GUI
+in LabVIEW reads the events with its own JSON tools, so lvpm can sit in the
+IDE's Tools menu while the package logic stays in Rust. That makes the
+events an interface: each message carries `"schema": 1`, fields are only
+added within a schema version, and a removal or change of meaning raises it.
+
+### Concurrent callers
+
+With a TUI, a GUI and the CLI, two callers can act on one target at once.
+Today nothing stops them: install records are written in place
+(`fs::write`), and two installs into one `vi.lib` interleave. The index
+cache is already safe (SQLite in WAL mode, downloads renamed into place).
+
+- **One writer per target.** Every operation that changes a target
+  (install, uninstall, relink, run-hooks, refresh, venv create or remove)
+  takes an exclusive lock on the target's record directory
+  (`%ProgramData%\lvpm\<target>`, `/var/lib/lvpm/<target>`, or the venv's
+  `.lvpm`). A file lock (`LockFileEx`, `flock`), so the OS releases it when
+  the process dies and no stale lock is left. Different targets, and
+  different venvs, run in parallel.
+- **Readers take no lock.** `list`, `search` and the Browse view read
+  records that are written to a temporary file and renamed into place, so a
+  reader sees the old record or the new one, never half of one.
+- **The second writer waits or stops.** The lock file holds who holds it
+  (process id, command, start time). The CLI waits with a message ("waiting
+  for `lvpm install` (pid 4711, started 10:02) on LabVIEW 2026"), and
+  `--no-wait` makes it fail at once with that message. The TUI or GUI shows
+  the target as busy and disables the actions that write.
+- **Plans are checked again.** A plan made before the lock is taken can be
+  stale. After taking the lock, the operation compares the records with what
+  the plan assumed; when they differ it stops and the front end resolves
+  again.
+- **One LabVIEW per port.** Relink and hooks drive the LabVIEW on the
+  target's VI Server port. The target lock already serialises lvpm's own
+  use of it; a user working in that LabVIEW at the same time is not
+  something a lock can prevent, and is reported, not handled.
+- **With `lvpm serve`** the daemon holds the lock and queues requests, so
+  GUIs see a queue instead of a refusal; a CLI run beside it still takes
+  the same file lock, so the two never collide.
 
 ## macOS
 
