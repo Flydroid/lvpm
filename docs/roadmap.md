@@ -135,6 +135,41 @@ records) and make it first-class:
     - Own `User-Agent` stays `lvpm/<version>`: honest, and the first thing to
       check if a public index starts closing connections on us.
 
+## Building: `lvpm build`
+
+Run a project's LabVIEW build specifications (EXE, packed library, LLB,
+source distribution, zip, installer) the way `install` runs a relink: through
+VI Server, headless where wanted, against the project's own dependencies.
+
+- **A standard or custom `Build.vi`.** The standard one is embedded in the
+  binary, like the relink VI: it opens the `.lvproj`, runs the named build
+  specs and reports each step. A project can name its own `Build.vi`
+  instead. LabVIEWCLI `ExecuteBuildSpec` stays a fallback.
+- **Arguments to the Pre-Build and Post-Build VIs:** version, target LabVIEW
+  and bitness, output folder, commit.
+- **`[build]` in `lvpm.toml`:** which build specs, where the version comes
+  from (`project.version` or a git tag), the output folder.
+- **Reproducible inputs.** The build runs in a LabVIEW started on the
+  project's venv, with the versions from `lvpm.lock`, so another machine
+  builds from the same packages.
+- **Headless and in containers,** as install does today, so CI builds with
+  no display.
+- **A build matrix:** several LabVIEW versions and both bitnesses in one
+  call.
+- **Events** (see Terminal UI): build progress and errors reach the CLI, the
+  TUI, a GUI and `--json` in one form.
+- **Build, pack, publish.** A built packed library or source distribution
+  becomes an lvpm package (the package format and PPL support above), its
+  dependencies taken from the lockfile, and a publish step puts it on a
+  feed. That closes the loop: build, package, publish, install.
+- **Checks first:** the build spec exists, the LabVIEW version and its
+  Application Builder are installed, the output folder can be written.
+
+To measure before building on it: whether NI's container images include
+Application Builder; how the build spec API behaves headless, on Windows and
+Linux; whether a packed library built in a venv links to `<vilib>` the same
+way as one built against a global install.
+
 ## From the OGPM design, not yet started
 
 - **`lvpm verify <pkg>`** — OGPM Package Verification: compare installed files
