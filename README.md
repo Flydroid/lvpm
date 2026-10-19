@@ -217,8 +217,14 @@ $ lvpm launch MyProject.lvproj    # a LabVIEW that sees the venv
   on a headless machine (see [CI in a container](#ci-in-a-container-docker)).
   Every venv-mode command prints which venv it resolved to.
 - `lvpm launch [<lvproj>]` starts a LabVIEW on the venv: a copy of the
-  target's `LabVIEW.ini` with the venv mounted and VI Server on a port of its
-  own, handed over with `-pref`. Your primary LabVIEW, if open, is untouched.
+  target's `LabVIEW.ini` with the venv mounted, VI Server on a port of its
+  own, and its own compiled-object cache, `LabVIEW Data` folder and temp
+  directory under `.lvpm/`, handed over with `-pref`. Your primary LabVIEW,
+  if open, is untouched, and its autosave files, cache and log
+  (`LabVIEW_*_cur.txt`) are never shared with the venv's — look for the
+  venv's log in `.lvpm/temp`. The venv starts with an empty `LabVIEW Data`, so personal
+  customisations kept there (icon templates, right-click plugins) are not
+  available in it.
 
 How it works: the venv directory is an [LVAddons](https://labviewwiki.org/wiki/LVAddons)
 location, one addon per package, each mirroring the LabVIEW install dir

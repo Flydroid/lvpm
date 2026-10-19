@@ -3,10 +3,12 @@
 //! LabVIEW reads its LVAddons locations once, at launch, from the ini file it
 //! was started with. So a venv is "activated" by starting a LabVIEW of its
 //! own: a copy of the target's `LabVIEW.ini` with the venv added as an
-//! `LVAddons.AdditionalLocations` entry and VI Server moved to the venv's
-//! port, handed over with `-pref`. Nothing in the installation changes, and
-//! the user's primary IDE — if one is open — keeps its own port and its own
-//! view of the world.
+//! `LVAddons.AdditionalLocations` entry, VI Server moved to the venv's port,
+//! and the compiled-object cache and `LabVIEW Data` moved into the venv,
+//! handed over with `-pref`, and `TEMP`/`TMP` pointed into the venv as well.
+//! Nothing in the installation changes, and the
+//! user's primary IDE — if one is open — keeps its own port, its own cache
+//! and its own view of the world.
 //!
 //! Two things measured on LabVIEW 2026 shape this module. The port binds well
 //! before the server can serve, and every handshake until initialisation is
@@ -62,17 +64,28 @@ pub fn override_keys(text: &str, keys: &[(&str, &str)]) -> String {
     out
 }
 
+/// A path as an ini value. Verified unquoted; LabVIEW itself quotes path
+/// values that carry spaces, so follow it exactly there and nowhere else.
+fn ini_path(p: &Path) -> String {
+    let raw = p.to_string_lossy().replace('/', "\\");
+    if raw.contains(' ') { format!("\"{raw}\"") } else { raw }
+}
+
 /// Write the ini a LabVIEW on this venv starts with: the target's own, with
-/// the venv mounted and VI Server moved to the venv's port. Regenerated every
+/// the venv mounted, VI Server moved to the venv's port, and the compiled-
+/// object cache and `LabVIEW Data` moved into the venv. Regenerated every
 /// time, so the target's current settings are always what is inherited.
 pub fn write_ini(v: &Venv) -> Result<PathBuf> {
     let src = v.target.path.join("LabVIEW.ini");
     let text = std::fs::read_to_string(&src).with_context(|| format!("reading {}", src.display()))?;
 
-    // Verified unquoted; LabVIEW itself quotes path values that carry spaces,
-    // so follow it exactly there and nowhere else.
-    let raw = v.dir.to_string_lossy().replace('/', "\\");
-    let location = if raw.contains(' ') { format!("\"{raw}\"") } else { raw };
+    let (objcache, data) = (v.objcache_dir(), v.data_dir());
+    for d in [&objcache, &data] {
+        std::fs::create_dir_all(d).with_context(|| format!("creating {}", d.display()))?;
+    }
+    let location = ini_path(&v.dir);
+    let objcache = ini_path(&objcache);
+    let data = ini_path(&data);
     let port = v.port.to_string();
     let out = override_keys(
         &text,
@@ -84,6 +97,11 @@ pub fn write_ini(v: &Venv) -> Result<PathBuf> {
             // keeps a second launch from being forwarded to the primary IDE,
             // which would open the project with no venv at all.
             ("AllowMultipleInstances", "True"),
+            // Both measured on LabVIEW 2025: LabVIEW creates its versioned
+            // subfolders (`25.0.0r0\objFileDB.vidb`, `2025(64-bit)\…`) under
+            // these and writes nothing to the user's `LabVIEW Data`.
+            ("CompiledObjCacheRoot", &objcache),
+            ("DefaultDataFileLocation", &data),
         ],
     );
 
@@ -93,13 +111,17 @@ pub fn write_ini(v: &Venv) -> Result<PathBuf> {
     Ok(dest)
 }
 
-/// Start the venv's LabVIEW with `ini`, optionally opening a project file.
-/// Detached: LabVIEW outlives lvpm by design.
+/// Start the venv's LabVIEW with `ini`, optionally opening a project file,
+/// with a temp directory of the venv's own — measured on LabVIEW 2025: its
+/// log, `LVStatus.txt` and temp files follow `TEMP`/`TMP`, and nothing lands
+/// in the user's `%TEMP%`. Detached: LabVIEW outlives lvpm by design.
 pub fn spawn(v: &Venv, ini: &Path, lvproj: Option<&Path>) -> Result<Child> {
     let exe = v.target.path.join("LabVIEW.exe");
     ensure!(exe.is_file(), "no LabVIEW.exe in {}", v.target.path.display());
+    let temp = v.temp_dir();
+    std::fs::create_dir_all(&temp).with_context(|| format!("creating {}", temp.display()))?;
     let mut cmd = Command::new(&exe);
-    cmd.arg("-pref").arg(ini);
+    cmd.arg("-pref").arg(ini).env("TEMP", &temp).env("TMP", &temp);
     if let Some(p) = lvproj {
         cmd.arg(p);
     }

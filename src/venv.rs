@@ -75,6 +75,29 @@ impl Venv {
         self.dir.join(".lvpm").join("labview.ini")
     }
 
+    /// The compiled-object cache of a LabVIEW on this venv. Its own, because
+    /// the shared one is a single SQLite file: a second instance on it gets
+    /// SQLITE_BUSY on every insert, and the venv's compiled code would mix
+    /// with the primary IDE's.
+    pub fn objcache_dir(&self) -> PathBuf {
+        self.dir.join(".lvpm").join("objcache")
+    }
+
+    /// The `LabVIEW Data` folder of a LabVIEW on this venv — autosave,
+    /// `ExtraVILib`, probes, crash reports — so one instance never offers to
+    /// recover another's files. Fresh: the user's own customisations there
+    /// (icon templates, right-click plugins) are not carried over.
+    pub fn data_dir(&self) -> PathBuf {
+        self.dir.join(".lvpm").join("data")
+    }
+
+    /// `TEMP`/`TMP` of a LabVIEW on this venv. LabVIEW names its log after
+    /// version and user only (`LabVIEW_64_<ver>_<user>_cur.txt`), so two
+    /// instances on the shared `%TEMP%` would write into the same file.
+    pub fn temp_dir(&self) -> PathBuf {
+        self.dir.join(".lvpm").join("temp")
+    }
+
     /// The one line every venv-mode command prints first, so an implicit
     /// lookup is never silent about what it found.
     pub fn banner(&self) -> String {
