@@ -2,13 +2,14 @@
 //!
 //! LabVIEW reads its LVAddons locations once, at launch, from the ini file it
 //! was started with. So a venv is "activated" by starting a LabVIEW of its
-//! own: a copy of the target's `LabVIEW.ini` with the venv added as an
+//! own on an ini of its own — copied from the target's `LabVIEW.ini` by
+//! `venv create` and kept from then on — with the venv added as an
 //! `LVAddons.AdditionalLocations` entry, VI Server moved to the venv's port,
 //! and the compiled-object cache and `LabVIEW Data` moved into the venv,
 //! handed over with `-pref`, and `TEMP`/`TMP` pointed into the venv as well.
-//! Nothing in the installation changes, and the
-//! user's primary IDE — if one is open — keeps its own port, its own cache
-//! and its own view of the world.
+//! Nothing in the installation changes, and the user's primary IDE — if one
+//! is open — keeps its own port, its own cache, its own options and its own
+//! view of the world.
 //!
 //! Two things measured on LabVIEW 2026 shape this module. The port binds well
 //! before the server can serve, and every handshake until initialisation is
@@ -71,12 +72,23 @@ fn ini_path(p: &Path) -> String {
     if raw.contains(' ') { format!("\"{raw}\"") } else { raw }
 }
 
-/// Write the ini a LabVIEW on this venv starts with: the target's own, with
-/// the venv mounted, VI Server moved to the venv's port, and the compiled-
-/// object cache and `LabVIEW Data` moved into the venv. Regenerated every
-/// time, so the target's current settings are always what is inherited.
+/// Write the ini a LabVIEW on this venv starts with, with the venv mounted,
+/// VI Server moved to the venv's port, and the compiled-object cache and
+/// `LabVIEW Data` moved into the venv.
+///
+/// The base is the venv's own ini, which `venv create` copies from the
+/// target's; the target's is read again only when that file is missing — a
+/// venv from before it was written at create, or one whose ini the user
+/// deleted to inherit their settings afresh. A venv LabVIEW writes its
+/// options back to the file it was started with when it closes (measured on
+/// 2026), so rebuilding from the target's ini every time would throw away
+/// everything set in the venv IDE. Only lvpm's own keys are reapplied.
 pub fn write_ini(v: &Venv) -> Result<PathBuf> {
-    let src = v.target.path.join("LabVIEW.ini");
+    let dest = v.ini_path();
+    let src = match dest.is_file() {
+        true => dest.clone(),
+        false => v.target.path.join("LabVIEW.ini"),
+    };
     let text = std::fs::read_to_string(&src).with_context(|| format!("reading {}", src.display()))?;
 
     let (objcache, data) = (v.objcache_dir(), v.data_dir());
@@ -105,7 +117,6 @@ pub fn write_ini(v: &Venv) -> Result<PathBuf> {
         ],
     );
 
-    let dest = v.ini_path();
     std::fs::create_dir_all(dest.parent().expect("ini path has a parent"))?;
     std::fs::write(&dest, out).with_context(|| format!("writing {}", dest.display()))?;
     Ok(dest)
@@ -125,7 +136,35 @@ pub fn spawn(v: &Venv, ini: &Path, lvproj: Option<&Path>) -> Result<Child> {
     if let Some(p) = lvproj {
         cmd.arg(p);
     }
-    spawn_detached(&mut cmd).with_context(|| format!("launching {}", exe.display()))
+    let child = spawn_detached(&mut cmd).with_context(|| format!("launching {}", exe.display()))?;
+    // Recorded so that the next command can tell a LabVIEW that is still
+    // starting — no VI Server port yet — from no LabVIEW at all. Best-effort:
+    // without it, a second command merely risks the duplicate it prevents.
+    let _ = std::fs::write(v.pid_path(), child.id().to_string());
+    Ok(child)
+}
+
+/// Is a LabVIEW on this venv — answering VI Server, or still starting? The
+/// port alone misses the second case, and a command that took it for "none"
+/// would start another LabVIEW on the same cache, data folder and log: every
+/// cache insert then fails with SQLITE_BUSY and the start crawls.
+pub fn is_running(v: &Venv) -> bool {
+    is_listening(v.port) || recorded_labview(&v.pid_path()).is_some()
+}
+
+/// The pid in `pid_file`, if it names a LabVIEW that is still alive. The
+/// image name is checked so that a reused pid is not mistaken for ours.
+fn recorded_labview(pid_file: &Path) -> Option<u32> {
+    let pid: u32 = std::fs::read_to_string(pid_file).ok()?.trim().parse().ok()?;
+    is_live_labview(pid).then_some(pid)
+}
+
+#[cfg(windows)]
+use win::is_live_labview;
+
+#[cfg(not(windows))]
+fn is_live_labview(_pid: u32) -> bool {
+    false
 }
 
 /// Spawn a process that outlives lvpm without handing it our stdio.
@@ -150,8 +189,37 @@ mod win {
     unsafe extern "system" {
         fn GetHandleInformation(handle: RawHandle, flags: *mut u32) -> i32;
         fn SetHandleInformation(handle: RawHandle, mask: u32, flags: u32) -> i32;
+        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> RawHandle;
+        fn GetExitCodeProcess(process: RawHandle, code: *mut u32) -> i32;
+        fn QueryFullProcessImageNameW(process: RawHandle, flags: u32, name: *mut u16, size: *mut u32) -> i32;
+        fn CloseHandle(handle: RawHandle) -> i32;
     }
     const HANDLE_FLAG_INHERIT: u32 = 0x1;
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    const STILL_ACTIVE: u32 = 259;
+
+    /// Is `pid` a running `LabVIEW.exe`?
+    pub fn is_live_labview(pid: u32) -> bool {
+        // SAFETY: plain Win32 calls; the handle is closed on every path that
+        // opened one, and the name buffer's size travels with it.
+        unsafe {
+            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if h.is_null() {
+                return false;
+            }
+            let mut code = 0u32;
+            let alive = GetExitCodeProcess(h, &mut code) != 0 && code == STILL_ACTIVE;
+            let mut buf = [0u16; 1024];
+            let mut len = buf.len() as u32;
+            let named = QueryFullProcessImageNameW(h, 0, buf.as_mut_ptr(), &mut len) != 0;
+            CloseHandle(h);
+            alive
+                && named
+                && String::from_utf16_lossy(&buf[..len as usize])
+                    .to_ascii_lowercase()
+                    .ends_with("\\labview.exe")
+        }
+    }
 
     /// Our std handles, non-inheritable while this lives. Failures are
     /// ignored on purpose: a console handle that refuses is one no child
@@ -236,18 +304,23 @@ pub struct Instance {
 /// A LabVIEW on this venv, answering VI Server. `fresh` is what an install
 /// needs: LabVIEW enumerates an addon's contents at launch, so one that was
 /// running before the files landed cannot see them, and reusing it would
-/// relink against a venv it does not know. A launch, by contrast, is happy to
-/// find one already there.
+/// relink against a venv it does not know. Anything else is happy to find one
+/// already there — and waits for it to finish starting rather than start a
+/// second LabVIEW beside it.
 pub fn ensure_instance(v: &Venv, fresh: bool, wait: Duration) -> Result<Instance> {
-    if is_listening(v.port) {
+    if is_running(v) {
         if fresh {
             bail!(
-                "a LabVIEW is already running on this venv (VI Server port {}) — close it first.\n\
+                "a LabVIEW is already running or starting on this venv (VI Server port {}) — close it first.\n\
                  LabVIEW reads an addon's contents when it starts, so what was just installed \
                  is invisible to a LabVIEW that was running before.",
                 v.port
             );
         }
+        if !is_listening(v.port) {
+            eprintln!("waiting for the LabVIEW still starting on this venv (VI Server port {})...", v.port);
+        }
+        wait_ready(v.port, wait)?;
         return Ok(Instance { port: v.port, child: None });
     }
     let ini = write_ini(v)?;
@@ -297,7 +370,36 @@ mod tests {
     }
 
     #[test]
+    fn reapplying_to_a_persisted_ini_changes_only_our_keys() {
+        // The venv's own ini is the base from the second launch on: what the
+        // venv IDE wrote stays, lvpm's keys are refreshed in place.
+        let keys = [("server.tcp.port", "3412"), ("CompiledObjCacheRoot", "C:\\v\\.lvpm\\objcache")];
+        let first = override_keys("[LabVIEW]\r\nserver.tcp.port=3364\r\n", &keys);
+        let edited = format!("{first}useLocaleDecimalPt=False\r\n");
+        let moved = [("server.tcp.port", "3500"), keys[1]];
+        assert_eq!(
+            override_keys(&edited, &moved),
+            "[LabVIEW]\r\nserver.tcp.port=3500\r\nCompiledObjCacheRoot=C:\\v\\.lvpm\\objcache\r\n\
+             useLocaleDecimalPt=False\r\n"
+        );
+    }
+
+    #[test]
     fn override_of_an_empty_ini_is_just_the_keys() {
         assert_eq!(override_keys("", &[("a", "1")]), "a=1\r\n");
+    }
+
+    #[test]
+    fn a_recorded_pid_counts_only_while_it_is_a_live_labview() {
+        let f = std::env::temp_dir().join(format!("lvpm-pid-test-{}", std::process::id()));
+        // No file, or garbage in it: nothing is starting.
+        let _ = std::fs::remove_file(&f);
+        assert_eq!(recorded_labview(&f), None);
+        std::fs::write(&f, "not a pid").unwrap();
+        assert_eq!(recorded_labview(&f), None);
+        // A live process that is not LabVIEW — this test — is a reused pid.
+        std::fs::write(&f, std::process::id().to_string()).unwrap();
+        assert_eq!(recorded_labview(&f), None);
+        let _ = std::fs::remove_file(&f);
     }
 }

@@ -216,8 +216,11 @@ $ lvpm launch MyProject.lvproj    # a LabVIEW that sees the venv
   with no venv beside it is an error, never a silent global install, except
   on a headless machine (see [CI in a container](#ci-in-a-container-docker)).
   Every venv-mode command prints which venv it resolved to.
-- `lvpm launch [<lvproj>]` starts a LabVIEW on the venv: a copy of the
-  target's `LabVIEW.ini` with the venv mounted, VI Server on a port of its
+- `lvpm launch [<lvproj>]` starts a LabVIEW on the venv: an ini of the
+  venv's own (`.lvpm/labview.ini`, copied from the target's `LabVIEW.ini` by
+  `lvpm venv create`, so options you set in the venv IDE persist; delete it
+  to inherit your global settings again at the next launch) with the venv
+  mounted, VI Server on a port of its
   own, and its own compiled-object cache, `LabVIEW Data` folder and temp
   directory under `.lvpm/`, handed over with `-pref`. Your primary LabVIEW,
   if open, is untouched, and its autosave files, cache and log

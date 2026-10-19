@@ -98,6 +98,11 @@ impl Venv {
         self.dir.join(".lvpm").join("temp")
     }
 
+    /// The process id of the LabVIEW lvpm last started on this venv.
+    pub fn pid_path(&self) -> PathBuf {
+        self.dir.join(".lvpm").join("labview.pid")
+    }
+
     /// The one line every venv-mode command prints first, so an implicit
     /// lookup is never silent about what it found.
     pub fn banner(&self) -> String {
@@ -271,7 +276,12 @@ pub fn create(start: &Path, labview_version: Option<&str>) -> Result<Venv> {
             .unwrap_or(0),
     };
     std::fs::write(binding_path(&dir), serde_json::to_string_pretty(&b)?)?;
-    Ok(Venv { repo, dir, target, port })
+    let v = Venv { repo, dir, target, port };
+    // The venv's own ini starts here, as a snapshot of the user's settings
+    // for this LabVIEW; from now on it is the venv's, and what is set in the
+    // venv IDE stays in it.
+    crate::launch::write_ini(&v)?;
+    Ok(v)
 }
 
 /// Delete the venv — payload, store, binding, all of it.
