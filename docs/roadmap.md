@@ -70,19 +70,34 @@ wins over the overlay; `LVAddons.AdditionalLocations` needs LabVIEW 2024 Q1.
 `lvpm.toml` (done: exact pins, `>=` floors, `*`, hosted `[sources]` and
 `defaults = false`, `labview` minimum, `[nipm.dependencies]`). Local package
 directories are user-level `sources.local` settings, not manifest sources.
+Reference and `vipm.toml` comparison: [manifest.md](manifest.md).
 
 - **`lvpm.lock`** — the resolved closure (name, version, source URL, MD5) so
   `lvpm install` restores the identical venv on another machine and only
   `lvpm update` re-resolves. The thing a venv without a lock only pretends to
   be.
+- **`lvpm sync`** — make the venv match the manifest exactly: install what is
+  missing, uninstall what is installed but neither listed nor required by a
+  listed package. `install` stays additive. `--dry-run` shows both lists.
 - **`lvpm add <pkg>[@constraint]` / `lvpm remove <pkg>`** — edit the manifest
   and install/uninstall in one step (the `toml` crate can write; the lockfile
   wants this too).
-- **`[dev-dependencies]`** — test and CI tooling (Caraya, VI Analyzer tests,
-  DQMH validation) installed by default, skipped with `--no-dev`.
+- **Constraint grammar (Cargo)** — bare and `^` caret, `~` tilde, `=`
+  exact, `>=` floor, `*` newest, in every dependency table; `name@x` stays
+  CLI-only. Breaking: a bare version is exact today. `vipm.toml` bare
+  versions are read as `=x`.
+- **`[dependency-groups.<name>]`** — tables shaped like `[dependencies]`, for
+  test, CI and build tooling, with a reserved `include-groups = [...]` key;
+  selected with `--with`, `--without`, `--only`; `dev` installed by default;
+  `[dev-dependencies]` is another spelling of `[dependency-groups.dev]`.
+  Design in [manifest.md](manifest.md#to-do).
 - Per-dependency tables: `{ version = "...", hooks = "run", source = "local" }`.
 - `[venv]` overrides: `dir`, `vi-server-port`, `bitness`.
-- Constraints beyond `>=`: `~` / `^` if they turn out to be wanted.
+- **`vipm.toml` compatibility layer** — a function converting the known
+  `vipm.toml` fields (`labview-version`, `[dependencies]`,
+  `[dev-dependencies]`, `[nipm.*]`) into a `Project`, reporting what it
+  dropped; then discover `vipm.toml` when there is no `lvpm.toml`. Mapping in
+  [manifest.md](manifest.md#to-do).
 
 ## Configuration
 

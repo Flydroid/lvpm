@@ -20,7 +20,8 @@
 //! ```
 //!
 //! `labview` is a minimum: a venv binds to that version or a newer one, never
-//! an older one.
+//! an older one. Full reference, including `vipm.toml` compatibility:
+//! `docs/manifest.md`.
 
 use crate::version::Version;
 use anyhow::{Context, Result, bail};

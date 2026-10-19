@@ -242,7 +242,7 @@ enum Cmd {
 #[derive(Subcommand)]
 enum VenvCmd {
     /// Create `.lv-venv/` for the project here by default and bind it to a LabVIEW:
-    /// `--labview-version`, else the manifest's `labview-version`.
+    /// `--labview-version`, else the manifest's `labview`.
     Create,
     /// Which venv commands run here would use, and what it is bound to.
     Status,
