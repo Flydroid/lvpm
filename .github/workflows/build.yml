@@ -24,6 +24,7 @@ env:
 
 jobs:
   build:
+    name: build (${{ matrix.name }})
     strategy:
       fail-fast: false
       matrix:
@@ -131,7 +132,7 @@ jobs:
           path: dist/
           if-no-files-found: error
 
-  # The end-to-end runner in e2e/, the same checks windows-e2e.yml runs on
+  # The end-to-end runner in e2e/, the same checks windows-e2e runs on
   # Windows.
   linux-e2e:
     needs: build
@@ -155,6 +156,40 @@ jobs:
         run: |
           chmod +x dist/lvpm-e2e
           dist/lvpm-e2e run --image nationalinstruments/labview:2026q3-linux --lvpm dist/lvpm
+
+  # The same checks on Windows. windows-2022, not windows-latest: the image is
+  # built on Server 2022 (10.0.20348) and runs there with process isolation;
+  # Server 2025 would need Hyper-V. Pulling it is most of the job, 10 to 16
+  # minutes for 19.7 GB on disk, so not on every push to a branch: on pull
+  # requests, on main, and by hand.
+  windows-e2e:
+    needs: build
+    if: github.event_name != 'push' || github.ref == 'refs/heads/main'
+    runs-on: windows-2022
+    timeout-minutes: 60
+    env:
+      IMAGE: nationalinstruments/labview:2026q3-windows
+    steps:
+      - name: Download lvpm
+        uses: actions/download-artifact@v4
+        with:
+          name: lvpm-windows-x64
+          path: dist
+
+      - name: Download the end-to-end runner
+        uses: actions/download-artifact@v4
+        with:
+          name: lvpm-e2e-windows-x64
+          path: dist
+
+      - name: Pull the image
+        run: |
+          $t = Measure-Command { docker pull $env:IMAGE | Out-Host }
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          "pull took {0:N0} s" -f $t.TotalSeconds
+
+      - name: lvpm against LabVIEW 2026 for Windows
+        run: dist\lvpm-e2e.exe run --image $env:IMAGE --lvpm dist\lvpm.exe
 
   linux-packages:
     needs: build
