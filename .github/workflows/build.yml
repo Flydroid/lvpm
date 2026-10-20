@@ -76,10 +76,12 @@ jobs:
 
       # On the runner's own platform: Windows tests on Windows.
       - name: Unit tests
-        run: cargo test
+        run: cargo test --workspace
 
+      # lvpm and the end-to-end runner (e2e/), which runs in NI's container
+      # and so is static on Linux as well.
       - name: Build release
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --workspace --target ${{ matrix.target }}
         env:
           CC_x86_64_unknown_linux_musl: musl-gcc
 
@@ -88,6 +90,13 @@ jobs:
         with:
           name: lvpm-${{ matrix.name }}
           path: target/${{ matrix.target }}/release/${{ matrix.exe }}
+          if-no-files-found: error
+
+      - name: Upload end-to-end runner
+        uses: actions/upload-artifact@v4
+        with:
+          name: lvpm-e2e-${{ matrix.name }}
+          path: target/${{ matrix.target }}/release/lvpm-e2e${{ runner.os == 'Windows' && '.exe' || '' }}
           if-no-files-found: error
 
   # Both executables in one download, named for the version and commit, to
@@ -139,6 +148,30 @@ jobs:
       # Pinned, so a new image is a change someone makes on purpose.
       - name: lvpm against LabVIEW 2026 for Linux
         run: LVPM=dist/lvpm scripts/linux-e2e.sh nationalinstruments/labview:2026q3-linux
+
+  # The checks of linux-e2e.sh, from the runner in e2e/ that windows-e2e.yml
+  # runs as well. Next to the script until it has proven the same.
+  e2e-linux:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Download lvpm
+        uses: actions/download-artifact@v4
+        with:
+          name: lvpm-linux-x64
+          path: dist
+
+      - name: Download the end-to-end runner
+        uses: actions/download-artifact@v4
+        with:
+          name: lvpm-e2e-linux-x64
+          path: dist
+
+      - name: lvpm against LabVIEW 2026 for Linux
+        run: |
+          chmod +x dist/lvpm-e2e
+          dist/lvpm-e2e run --image nationalinstruments/labview:2026q3-linux --lvpm dist/lvpm
 
   linux-packages:
     needs: build

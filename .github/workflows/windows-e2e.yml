@@ -1,16 +1,17 @@
 # lvpm against LabVIEW for Windows in NI's container image, on a GitHub-hosted
-# Windows runner. For now a measurement: how long the image takes to pull, how
-# much disk it needs, and whether the MSVC build runs in it. The checks of
-# scripts/linux-e2e.sh come once this fits.
+# Windows runner: the checks of the end-to-end runner in e2e/, the same ones
+# build.yml runs on Linux. The pull is timed and the disk measured around it,
+# since the 10 GB image is most of the job.
 name: windows-e2e
 
-# By hand, and on a push that changes this workflow. workflow_dispatch alone
-# would not run on a branch until the file is on main.
+# By hand, and on a push that changes this workflow or the runner.
+# workflow_dispatch alone would not run on a branch until the file is on main.
 on:
   workflow_dispatch:
   push:
     paths:
       - .github/workflows/windows-e2e.yml
+      - e2e/**
 
 permissions:
   contents: read
@@ -27,7 +28,7 @@ env:
   IMAGE: nationalinstruments/labview:2026q3-windows
 
 jobs:
-  smoke:
+  e2e:
     runs-on: windows-2022
     timeout-minutes: 90
     steps:
@@ -37,11 +38,8 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Build release
-        run: |
-          cargo build --release
-          New-Item -ItemType Directory dist | Out-Null
-          Copy-Item target\release\lvpm.exe dist\
+      - name: Build lvpm and the end-to-end runner
+        run: cargo build --release --workspace
 
       - name: Runner before the pull
         run: |
@@ -62,9 +60,5 @@ jobs:
         run: |
           Get-PSDrive -PSProvider FileSystem | Format-Table Name, @{n='UsedGB';e={[math]::Round($_.Used/1GB,1)}}, @{n='FreeGB';e={[math]::Round($_.Free/1GB,1)}}
 
-      - name: lvpm in the container
-        run: |
-          docker run --rm --isolation=process -e LV_RTE_HEADLESS=1 `
-            -v "${{ github.workspace }}\dist:C:\lvpm" $env:IMAGE `
-            cmd /c "C:\lvpm\lvpm.exe targets && C:\lvpm\lvpm.exe search caraya"
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: lvpm against LabVIEW 2026 for Windows
+        run: target\release\lvpm-e2e.exe run --image $env:IMAGE --lvpm target\release\lvpm.exe
