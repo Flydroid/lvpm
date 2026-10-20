@@ -218,7 +218,9 @@ $ lvpm launch MyProject.lvproj    # a LabVIEW that sees the venv
   Every venv-mode command prints which venv it resolved to.
 - `lvpm launch [<lvproj>]` starts a LabVIEW on the venv: an ini of the
   venv's own (`.lvpm/labview.ini`, copied from the target's `LabVIEW.ini` by
-  `lvpm venv create`, so options you set in the venv IDE persist; delete it
+  `lvpm venv create` without its recent-files lists, so the venv IDE never
+  offers projects from outside the venv; options you set in the venv IDE
+  persist; delete it
   to inherit your global settings again at the next launch) with the venv
   mounted, VI Server on a port of its
   own, and its own compiled-object cache, `LabVIEW Data` folder and temp

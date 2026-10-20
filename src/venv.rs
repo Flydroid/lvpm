@@ -275,12 +275,13 @@ pub fn create(start: &Path, labview_version: Option<&str>) -> Result<Venv> {
             .map(|d| d.as_secs())
             .unwrap_or(0),
     };
-    std::fs::write(binding_path(&dir), serde_json::to_string_pretty(&b)?)?;
     let v = Venv { repo, dir, target, port };
     // The venv's own ini starts here, as a snapshot of the user's settings
     // for this LabVIEW; from now on it is the venv's, and what is set in the
-    // venv IDE stays in it.
+    // venv IDE stays in it. Written before the binding: the binding is what
+    // makes a venv exist, so a failure here leaves nothing a retry trips on.
     crate::launch::write_ini(&v)?;
+    std::fs::write(binding_path(&v.dir), serde_json::to_string_pretty(&b)?)?;
     Ok(v)
 }
 

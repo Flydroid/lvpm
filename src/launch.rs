@@ -36,10 +36,7 @@ pub fn override_keys(text: &str, keys: &[(&str, &str)]) -> String {
     let mut seen = vec![false; keys.len()];
     let mut out = String::with_capacity(text.len() + 256);
     for line in text.lines() {
-        let trimmed = line.trim_start();
-        let hit = keys.iter().position(|(k, _)| {
-            trimmed.strip_prefix(*k).is_some_and(|rest| rest.trim_start().starts_with('='))
-        });
+        let hit = keys.iter().position(|(k, _)| is_key(line, k));
         match hit {
             Some(i) if !seen[i] => {
                 seen[i] = true;
@@ -65,8 +62,33 @@ pub fn override_keys(text: &str, keys: &[(&str, &str)]) -> String {
     out
 }
 
-/// A path as an ini value. Verified unquoted; LabVIEW itself quotes path
-/// values that carry spaces, so follow it exactly there and nowhere else.
+/// Is `line` an assignment to `key`, however it was spaced?
+fn is_key(line: &str, key: &str) -> bool {
+    line.trim_start()
+        .strip_prefix(key)
+        .is_some_and(|rest| rest.trim_start().starts_with('='))
+}
+
+/// `text` without any line assigning one of `keys`.
+fn drop_keys(text: &str, keys: &[&str]) -> String {
+    let mut out = String::with_capacity(text.len());
+    for line in text.lines().filter(|l| !keys.iter().any(|k| is_key(l, k))) {
+        out.push_str(line);
+        out.push_str("\r\n");
+    }
+    out
+}
+
+/// What the user's ini remembers having opened. Left in a venv's copy, the
+/// venv IDE would offer projects from outside the venv — opened there, they
+/// load against the venv's packages, and a save relinks them to it.
+const RECENT_KEYS: &[&str] = &["RecentFiles.pathList", "RecentFiles.projectPathList", "LLBMgr_RecentPath"];
+
+/// A path as an ini value: quoted when it carries spaces, as LabVIEW itself
+/// writes them, bare otherwise (verified for `LVAddons.AdditionalLocations`).
+/// The quoted form measured on 2025 for `CompiledObjCacheRoot` and
+/// `DefaultDataFileLocation` with spaces in the path: LabVIEW strips the
+/// quotes and uses the path as given.
 fn ini_path(p: &Path) -> String {
     let raw = p.to_string_lossy().replace('/', "\\");
     if raw.contains(' ') { format!("\"{raw}\"") } else { raw }
@@ -82,14 +104,19 @@ fn ini_path(p: &Path) -> String {
 /// deleted to inherit their settings afresh. A venv LabVIEW writes its
 /// options back to the file it was started with when it closes (measured on
 /// 2026), so rebuilding from the target's ini every time would throw away
-/// everything set in the venv IDE. Only lvpm's own keys are reapplied.
+/// everything set in the venv IDE. Only lvpm's own keys are reapplied — and,
+/// on the copy from the target, the user's recent-files lists are left out.
 pub fn write_ini(v: &Venv) -> Result<PathBuf> {
     let dest = v.ini_path();
-    let src = match dest.is_file() {
+    let own = dest.is_file();
+    let src = match own {
         true => dest.clone(),
         false => v.target.path.join("LabVIEW.ini"),
     };
-    let text = std::fs::read_to_string(&src).with_context(|| format!("reading {}", src.display()))?;
+    let mut text = std::fs::read_to_string(&src).with_context(|| format!("reading {}", src.display()))?;
+    if !own {
+        text = drop_keys(&text, RECENT_KEYS);
+    }
 
     let (objcache, data) = (v.objcache_dir(), v.data_dir());
     for d in [&objcache, &data] {
@@ -381,6 +408,16 @@ mod tests {
             override_keys(&edited, &moved),
             "[LabVIEW]\r\nserver.tcp.port=3500\r\nCompiledObjCacheRoot=C:\\v\\.lvpm\\objcache\r\n\
              useLocaleDecimalPt=False\r\n"
+        );
+    }
+
+    #[test]
+    fn dropping_recent_files_keeps_everything_else() {
+        let ini = "[LabVIEW]\r\nRecentFiles.pathList=\"C:\\a.vi\"\r\nRecentFiles.projectPathList = \"C:\\p.lvproj\"\r\n\
+                   RecentFiles.maxNum=10\r\nLLBMgr_RecentPath=\"C:\\x.llb\"\r\nserver.tcp.port=3364\r\n";
+        assert_eq!(
+            drop_keys(ini, RECENT_KEYS),
+            "[LabVIEW]\r\nRecentFiles.maxNum=10\r\nserver.tcp.port=3364\r\n"
         );
     }
 
