@@ -132,85 +132,44 @@ jobs:
           path: dist/
           if-no-files-found: error
 
-  # The end-to-end runner in e2e/, the same checks windows-e2e runs on
-  # Windows.
-  linux-e2e:
+  # Both suites of the end-to-end runner in e2e/ (local packages, then LUnit
+  # and G-Image from the public indexes), each in a fresh container, with the
+  # same steps on each platform: only the runner and the image differ.
+  #
+  # Windows runs on windows-2022, not windows-latest: the image is built on
+  # Server 2022 (10.0.20348) and runs there with process isolation; Server
+  # 2025 would need Hyper-V. Pulling it is most of that job, 10 to 16 minutes
+  # for 19.7 GB on disk, so a push to a branch other than main leaves Windows
+  # out: it runs on pull requests, on main, and by hand. (A job's `if` cannot
+  # see the matrix, hence the list built here.)
+  e2e:
+    name: e2e (${{ matrix.platform }})
     needs: build
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - name: Download lvpm
-        uses: actions/download-artifact@v4
-        with:
-          name: lvpm-linux-x64
-          path: dist
-
-      - name: Download the end-to-end runner
-        uses: actions/download-artifact@v4
-        with:
-          name: lvpm-e2e-linux-x64
-          path: dist
-
-      # Pinned, so a new image is a change someone makes on purpose.
-      - name: lvpm against LabVIEW 2026 for Linux
-        run: |
-          chmod +x dist/lvpm-e2e
-          dist/lvpm-e2e run --image nationalinstruments/labview:2026q3-linux --lvpm dist/lvpm
-
-  # The same checks on Windows. windows-2022, not windows-latest: the image is
-  # built on Server 2022 (10.0.20348) and runs there with process isolation;
-  # Server 2025 would need Hyper-V. Pulling it is most of the job, 10 to 16
-  # minutes for 19.7 GB on disk, so not on every push to a branch: on pull
-  # requests, on main, and by hand.
-  windows-e2e:
-    needs: build
-    if: github.event_name != 'push' || github.ref == 'refs/heads/main'
-    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: ${{ fromJSON((github.event_name != 'push' || github.ref == 'refs/heads/main') && '["linux-x64", "windows-x64"]' || '["linux-x64"]') }}
+    runs-on: ${{ matrix.platform == 'windows-x64' && 'windows-2022' || 'ubuntu-latest' }}
     timeout-minutes: 60
     env:
-      IMAGE: nationalinstruments/labview:2026q3-windows
+      # Pinned, so a new image is a change someone makes on purpose.
+      IMAGE: nationalinstruments/labview:2026q3-${{ matrix.platform == 'windows-x64' && 'windows' || 'linux' }}
+      LVPM: dist/lvpm${{ matrix.platform == 'windows-x64' && '.exe' || '' }}
     steps:
       - name: Download lvpm
         uses: actions/download-artifact@v4
         with:
-          name: lvpm-windows-x64
+          name: lvpm-${{ matrix.platform }}
           path: dist
 
       - name: Download the end-to-end runner
         uses: actions/download-artifact@v4
         with:
-          name: lvpm-e2e-windows-x64
+          name: lvpm-e2e-${{ matrix.platform }}
           path: dist
 
-      - name: Pull the image
+      - name: lvpm against LabVIEW 2026
+        shell: bash
         run: |
-          $t = Measure-Command { docker pull $env:IMAGE | Out-Host }
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          "pull took {0:N0} s" -f $t.TotalSeconds
-
-      - name: lvpm against LabVIEW 2026 for Windows
-        run: dist\lvpm-e2e.exe run --image $env:IMAGE --lvpm dist\lvpm.exe
-
-  linux-packages:
-    needs: build
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Download the Linux executable
-        uses: actions/download-artifact@v4
-        with:
-          name: lvpm-linux-x64
-          path: dist
-
-      - name: Public packages on LabVIEW 2026 for Linux
-        run: LVPM=dist/lvpm OUT=out scripts/linux-packages.sh nationalinstruments/labview:2026q3-linux
-
-      - name: Upload logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: linux-packages-logs
-          path: out
+          chmod +x dist/*
+          dist/lvpm-e2e run --image "$IMAGE" --lvpm "$LVPM"

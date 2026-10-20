@@ -127,20 +127,23 @@ in progress.
   and uploads its executable and the end-to-end runner, `lvpm-e2e`.
 - **collect** — puts both executables in one artifact,
   `lvpm-<version>-<commit>`, for handing to testers.
-- **linux-e2e** — `lvpm-e2e` with the Linux executable, in
-  `nationalinstruments/labview:2026q3-linux` (pinned).
-- **windows-e2e** — the same checks with the Windows executable, in
-  `nationalinstruments/labview:2026q3-windows` on `windows-2022`, whose
-  Server 2022 matches the image and runs it with process isolation. The pull
-  is most of the job: 10 to 16 minutes for 19.7 GB on disk, so it runs on
-  pull requests, on `main` and by hand, and is skipped on other pushes.
-- **linux-packages** — `scripts/linux-packages.sh` in the same image, with
-  LUnit and G-Image from the public indexes: a headless `install --hooks`
-  (G-Image needs its PostInstall) in which every hook must run and every
-  recorded file must be on disk, `relink --all`, an uninstall after which no
-  file in the LabVIEW tree is added, gone or changed, and the same set
-  relinked in a venv, which must leave the LabVIEW tree alone. Its logs are
-  uploaded.
+- **e2e (linux-x64)**, **e2e (windows-x64)** — one job, the same steps on
+  each platform: `lvpm-e2e` with that platform's executable, in
+  `nationalinstruments/labview:2026q3-linux` or `2026q3-windows` (pinned),
+  each of its two suites in a fresh container:
+  - **local** — the checks under [Verified](#verified), with two packages
+    made from the VIs in `tools/`.
+  - **public** — LUnit and G-Image from the public indexes: a headless
+    `install --hooks` (G-Image needs its PostInstall) in which every hook
+    must run and every recorded file must be on disk, `relink --all`, an
+    uninstall after which no file in the LabVIEW tree is added, gone or
+    changed, and the same set relinked in a venv, which must leave the
+    LabVIEW tree alone.
+
+  Windows runs on `windows-2022`, whose Server 2022 matches the image and
+  runs it with process isolation. The pull is most of that job: 10 to 16
+  minutes for 19.7 GB on disk, so it runs on pull requests, on `main` and by
+  hand, and a push to another branch tests Linux only.
 
   There is no mass compile. A bad VI in a third-party package (LUnit ships
   one on purpose) or in LabVIEW's own templates says nothing about lvpm, and

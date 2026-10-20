@@ -477,8 +477,7 @@ runs.
 | `version.rs`                   | Package version ordering: OGPT `version-release`, VIPM's four-part form; not semver                                     |
 | `src/lv-src/relink-package.vi` | The relink VI embedded into the executable at build time (LabVIEW 2020)                                                 |
 | `scripts/install.ps1`          | Download, verify and install the latest release                                                                         |
-| `e2e/`                         | `lvpm-e2e`: the same end-to-end checks against LabVIEW for Linux and for Windows, in NI's container images |
-| `scripts/linux-packages.sh` | Public packages on LabVIEW for Linux: install with hooks, relink, uninstall, venv; the LabVIEW tree must come out unchanged |
+| `e2e/`                         | `lvpm-e2e`: end-to-end checks against LabVIEW for Linux and for Windows in NI's container images, with local test packages and with public ones (the LabVIEW tree must come out of install and uninstall unchanged) |
 
 ## License
 

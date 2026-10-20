@@ -216,10 +216,11 @@ Toolkits\Caraya\Caraya CLI.vi" -- -s <tests folder> -x <junit.xml>` —
 
 ## Integration test VIs
 
-The container jobs test lvpm with packages it does not control:
-`linux-e2e` with the VIs in `tools/`, `linux-packages` with LUnit and
-G-Image as a reference. Neither was made to test an installer: LUnit ships a
-VI broken on purpose, so `linux-packages` cannot ask whether a package's VIs
+The container jobs test lvpm with packages it does not control: the
+`local` suite of `lvpm-e2e` with the VIs in `tools/`, the `public` suite
+with LUnit and G-Image as a reference. Neither was made to test an
+installer: LUnit ships a VI broken on purpose, so `public` cannot ask whether
+a package's VIs
 work, only whether lvpm put them in place and took them out again. A package
 of VIs made for the job would test exactly what lvpm answers for, on Windows
 and Linux alike:
@@ -277,7 +278,7 @@ new branch.
   `LUnit Project Provider.lvlib` lies in `resource/Framework/Providers`; a
   single test VI there made relink save 44 of LabVIEW's files (Actor
   Framework and AppBuilder providers), still changed after the uninstall.
-  `linux-packages` fails on this. Same code on Windows. Fix: a relink VI
+  The `public` suite failed on this. Same code on Windows. Fix: a relink VI
   that takes the package's files, or no walk of a folder that holds files
   of others.
 - Uninstall leaves the `.aliases` and `.UserState` files that LabVIEW writes
