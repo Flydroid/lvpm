@@ -4,8 +4,9 @@ lvpm builds and runs on Linux, and drives LabVIEW for Linux the way it drives
 the Windows IDE: files copied, then relinked and hooks run over VI Server.
 Everything below was measured on 2026-09-26 against NI's container image
 `nationalinstruments/labview:2026q3-linux` (LabVIEW 2026 Q3, Ubuntu 22.04).
-[scripts/linux-e2e.sh](../scripts/linux-e2e.sh) repeats every check in a
-throwaway container in about a minute and a half, and [CI](#ci) runs it.
+The end-to-end runner in [e2e/](../e2e/src/main.rs) repeats every check in a
+throwaway container in about two and a half minutes, and [CI](#ci) runs it,
+on Windows as well.
 
 ## Building
 
@@ -92,7 +93,9 @@ project in the folder, the compile writes `<name>.aliases` and
 
 ## Verified
 
-With `scripts/linux-e2e.sh`, all in one container:
+With `lvpm-e2e run --image nationalinstruments/labview:2026q3-linux --lvpm
+<static lvpm>`, all in one container (both executables built for
+`x86_64-unknown-linux-musl`):
 
 - `lvpm targets` reports `LabVIEW 2026 (64-bit) v26.3`.
 - A headless `lvpm install --relink --hooks` in a project with no venv starts
@@ -121,11 +124,17 @@ in progress.
 - **build** — one job per platform on its own runner: `windows-latest`
   (`x86_64-pc-windows-msvc`) and `ubuntu-latest` (static
   `x86_64-unknown-linux-musl`). Each runs `cargo test` and a release build,
-  and uploads its executable.
+  and uploads its executable and the end-to-end runner, `lvpm-e2e`.
 - **collect** — puts both executables in one artifact,
   `lvpm-<version>-<commit>`, for handing to testers.
-- **linux-e2e** — `scripts/linux-e2e.sh` with the Linux executable, in
+- **linux-e2e** — `lvpm-e2e` with the Linux executable, in
   `nationalinstruments/labview:2026q3-linux` (pinned).
+- **windows-e2e** — a workflow of its own
+  ([windows-e2e.yml](../.github/workflows/windows-e2e.yml)): the same checks
+  in `nationalinstruments/labview:2026q3-windows` on `windows-2022`, whose
+  Server 2022 matches the image and runs it with process isolation. The pull
+  is most of the job: 10 to 16 minutes for 19.7 GB on disk. It runs by hand
+  and when the runner or the workflow changes.
 - **linux-packages** — `scripts/linux-packages.sh` in the same image, with
   LUnit and G-Image from the public indexes: a headless `install --hooks`
   (G-Image needs its PostInstall) in which every hook must run and every

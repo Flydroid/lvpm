@@ -263,7 +263,7 @@ new branch.
   volume name), where install records go, and whether a TIME_WAIT port blocks
   VI Server as it does on Linux.
 - **The obstacle is testing:** NI publishes no macOS container, so there is
-  no equivalent of `scripts/linux-e2e.sh` in CI without a macOS runner that
+  no equivalent of the container end-to-end checks in CI without a macOS runner that
   has a licensed LabVIEW.
 
 ## Housekeeping

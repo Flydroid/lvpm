@@ -20,7 +20,7 @@
 #   scripts/linux-packages.sh [image]     default: nationalinstruments/labview:latest-linux
 #
 # Environment:
-#   LVPM         a static lvpm to use instead of building one (see linux-e2e.sh)
+#   LVPM         a static lvpm (x86_64-unknown-linux-musl) to use instead of building one
 #   PACKAGES     space-separated package names, instead of the list below
 #   SOURCE       a repository (index URL or folder) to use instead of the public indexes
 #   OUT          where the logs go (default: a temporary directory, removed afterwards)
