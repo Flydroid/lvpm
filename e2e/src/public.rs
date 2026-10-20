@@ -55,6 +55,14 @@ pub fn trials() -> Vec<Trial> {
 }
 
 fn global_install() -> Check {
+    // The baseline is the tree as a first start leaves it: a fresh image's
+    // LabVIEW makes user.lib/_probes/default on Windows the first time it
+    // runs, which says nothing about lvpm.
+    ok(
+        &global(),
+        &["start", "--global", "--labview-version", "2026"],
+    )?;
+    close_labview();
     *GLOBAL_TREE.lock().unwrap() = Some(tree()?);
     ok(&global(), &["install", "--hooks"]).map(drop)
 }
