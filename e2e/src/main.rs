@@ -549,10 +549,17 @@ fn run_hooks() -> Check {
 }
 
 fn relink_vi_walks() -> Check {
-    let a = ok(&global(), &["config", "get", "cache"])?;
-    let cache = PathBuf::from(String::from_utf8_lossy(&a.get_output().stdout).trim());
+    // Where the relinks so far have written it: %TEMP% on Windows, lvpm's
+    // cache elsewhere (work_dir in lvpm's main.rs).
+    #[cfg(windows)]
+    let cache = std::env::temp_dir();
+    #[cfg(not(windows))]
+    let cache = {
+        let a = ok(&global(), &["config", "get", "cache"])?;
+        PathBuf::from(String::from_utf8_lossy(&a.get_output().stdout).trim())
+    };
     let vi = std::fs::read_dir(&cache)
-        .map_err(fail)?
+        .map_err(|e| format!("{}: {e}", cache.display()))?
         .filter_map(|e| e.ok().map(|e| e.path()))
         .find(|p| {
             let name = p.file_name().unwrap_or_default().to_string_lossy();
