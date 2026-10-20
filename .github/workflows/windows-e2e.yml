@@ -1,0 +1,70 @@
+# lvpm against LabVIEW for Windows in NI's container image, on a GitHub-hosted
+# Windows runner. For now a measurement: how long the image takes to pull, how
+# much disk it needs, and whether the MSVC build runs in it. The checks of
+# scripts/linux-e2e.sh come once this fits.
+name: windows-e2e
+
+# By hand, and on a push that changes this workflow. workflow_dispatch alone
+# would not run on a branch until the file is on main.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/windows-e2e.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Pinned, so a new image is a change someone makes on purpose. Built on
+  # Server 2022 (10.0.20348), so it runs on windows-2022 with process
+  # isolation; windows-latest is Server 2025, which would need Hyper-V.
+  IMAGE: nationalinstruments/labview:2026q3-windows
+
+jobs:
+  smoke:
+    runs-on: windows-2022
+    timeout-minutes: 90
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release
+        run: |
+          cargo build --release
+          New-Item -ItemType Directory dist | Out-Null
+          Copy-Item target\release\lvpm.exe dist\
+
+      - name: Runner before the pull
+        run: |
+          Get-PSDrive -PSProvider FileSystem | Format-Table Name, @{n='UsedGB';e={[math]::Round($_.Used/1GB,1)}}, @{n='FreeGB';e={[math]::Round($_.Free/1GB,1)}}
+          docker version
+          docker info --format 'os={{.OSType}} isolation={{.Isolation}} root={{.DockerRootDir}} kernel={{.KernelVersion}}'
+          [Environment]::OSVersion.Version
+
+      - name: Pull the image
+        run: |
+          $t = Measure-Command { docker pull $env:IMAGE | Out-Host }
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          "pull took {0:N0} s" -f $t.TotalSeconds
+          docker images $env:IMAGE
+
+      - name: Runner after the pull
+        if: always()
+        run: |
+          Get-PSDrive -PSProvider FileSystem | Format-Table Name, @{n='UsedGB';e={[math]::Round($_.Used/1GB,1)}}, @{n='FreeGB';e={[math]::Round($_.Free/1GB,1)}}
+
+      - name: lvpm in the container
+        run: |
+          docker run --rm --isolation=process -e LV_RTE_HEADLESS=1 `
+            -v "${{ github.workspace }}\dist:C:\lvpm" $env:IMAGE `
+            cmd /c "C:\lvpm\lvpm.exe targets && C:\lvpm\lvpm.exe search caraya"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
