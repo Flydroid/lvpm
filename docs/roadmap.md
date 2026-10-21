@@ -300,33 +300,12 @@ layer if Windows users ask for one; the TUI does not block it.
 
 ### Before the TUI: split `main.rs`
 
-`main.rs` holds 1,900 lines and about 130 `print!` calls; `cmd_install`
-alone is 430 lines of resolution, download, unpack, hooks, relink and
-output. Split it, with behaviour and CLI output unchanged and `cargo test`
-green on both platforms after each commit:
-
-| Module | From `main.rs` |
-|---|---|
-| `cli.rs` | `Cli`, `Cmd`, `VenvCmd`, `ConfigCmd`, `RelinkArgs` (clap only) |
-| `context.rs` | `roots_for`, `destination`, `headless`, `headless_roots`, `work_dir`, `manifest_for`, `load_index`: the target and environment every command needs |
-| `resolve.rs` | `Req`, the dependency walk, version and downgrade checks; returns a `Plan` |
-| `ops/install.rs` | executes a `Plan`: download, verify, unpack, records |
-| `ops/uninstall.rs` | `cmd_uninstall`, `uninstall_one` |
-| `hooks.rs` | `run_hook_vi`, `run_post_install_hooks`, `hook_action_info`, `cmd_run_hooks` |
-| `relink.rs` | gains `run_relink`, `cmd_relink` |
-| `refresh.rs` | gains `refresh_palettes_and_menus` |
-| `diag.rs` | `vi-probe`, `vi-save`, `vi-run`, `app-probe` and their argument parsing |
-| `main.rs` | parse, dispatch, exit code |
-
-1. Moves only (`cli`, `context`, `diag`, `hooks`, uninstall): no logic
-   changes, easy to review.
-2. `cmd_install` as resolve → `Plan` → execute. `--dry-run` prints the
-   `Plan`.
-3. The event layer (next section).
-4. Unit tests for `resolve` and `Plan` that need no LabVIEW: exact pins,
-   `>=` floors, `*`, downgrades.
-
-Many branches touch `main.rs`; do the moves when few pull requests are open.
+`main.rs` holds 1,856 lines and 130 `print!` calls; `cmd_install` alone is
+412 lines of resolution, download, unpack, hooks, relink and output.
+[refactor-main.md](refactor-main.md) is the plan: the target layout (`cmd/`
+for the CLI side, library modules that never print), the order of work from
+pure moves to the event layer, and which open branches land before the
+moves. The CLI changes that ride on it are in [cli.md](cli.md).
 
 ### Event layer and JSON interface
 
