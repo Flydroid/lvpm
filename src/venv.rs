@@ -75,6 +75,34 @@ impl Venv {
         self.dir.join(".lvpm").join("labview.ini")
     }
 
+    /// The compiled-object cache of a LabVIEW on this venv. Its own, because
+    /// the shared one is a single SQLite file: a second instance on it gets
+    /// SQLITE_BUSY on every insert, and the venv's compiled code would mix
+    /// with the primary IDE's.
+    pub fn objcache_dir(&self) -> PathBuf {
+        self.dir.join(".lvpm").join("objcache")
+    }
+
+    /// The `LabVIEW Data` folder of a LabVIEW on this venv — autosave,
+    /// `ExtraVILib`, probes, crash reports — so one instance never offers to
+    /// recover another's files. Fresh: the user's own customisations there
+    /// (icon templates, right-click plugins) are not carried over.
+    pub fn data_dir(&self) -> PathBuf {
+        self.dir.join(".lvpm").join("data")
+    }
+
+    /// `TEMP`/`TMP` of a LabVIEW on this venv. LabVIEW names its log after
+    /// version and user only (`LabVIEW_64_<ver>_<user>_cur.txt`), so two
+    /// instances on the shared `%TEMP%` would write into the same file.
+    pub fn temp_dir(&self) -> PathBuf {
+        self.dir.join(".lvpm").join("temp")
+    }
+
+    /// The process id of the LabVIEW lvpm last started on this venv.
+    pub fn pid_path(&self) -> PathBuf {
+        self.dir.join(".lvpm").join("labview.pid")
+    }
+
     /// The one line every venv-mode command prints first, so an implicit
     /// lookup is never silent about what it found.
     pub fn banner(&self) -> String {
@@ -247,8 +275,14 @@ pub fn create(start: &Path, labview_version: Option<&str>) -> Result<Venv> {
             .map(|d| d.as_secs())
             .unwrap_or(0),
     };
-    std::fs::write(binding_path(&dir), serde_json::to_string_pretty(&b)?)?;
-    Ok(Venv { repo, dir, target, port })
+    let v = Venv { repo, dir, target, port };
+    // The venv's own ini starts here, as a snapshot of the user's settings
+    // for this LabVIEW; from now on it is the venv's, and what is set in the
+    // venv IDE stays in it. Written before the binding: the binding is what
+    // makes a venv exist, so a failure here leaves nothing a retry trips on.
+    crate::launch::write_ini(&v, &[])?;
+    std::fs::write(binding_path(&v.dir), serde_json::to_string_pretty(&b)?)?;
+    Ok(v)
 }
 
 /// Delete the venv — payload, store, binding, all of it.

@@ -69,6 +69,30 @@ wins over the overlay; `LVAddons.AdditionalLocations` needs LabVIEW 2024 Q1.
   own IDE lets a venv dependency be upgraded and saved with no dialog —
   observed on `Delacor_lib_QMH_Create Message Queue.vi`, 16.0 to 26.3. Force
   it False in the venv ini.
+- **Instance isolation — done.** A venv's LabVIEW gets its own
+  compiled-object cache (`CompiledObjCacheRoot`), `LabVIEW Data`
+  (`DefaultDataFileLocation`: autosave, `ExtraVILib`, crash reports) and
+  `TEMP`/`TMP`, all under `.lvpm/`. Measured on 2025 and 2026: nothing lands
+  in the user's folders, and a venv instance next to the primary IDE no
+  longer shares its cache database, offers to recover its autosave files or
+  writes into its log.
+- **Seeding the venv's `LabVIEW Data`.** Today nothing is seeded: a venv
+  starts empty, so personal customisations kept there (icon templates,
+  glyphs, right-click plugins, custom probes, DQMH module templates, Quick
+  Drop plugins) are missing in the venv IDE. Needs discussion before
+  building:
+  - Who decides what is seeded: the user (`config.toml`, personal tooling)
+    or the project (`lvpm.toml`, shared team tooling), or both?
+  - Copy at `venv create`, or refresh at every `lvpm launch`? A copy keeps
+    the venv isolated but goes stale; a refresh overwrites what was changed
+    inside the venv.
+  - Is a folder the right unit? Some of these are better delivered as
+    packages (dev-dependencies) than copied from one developer's machine.
+- **The venv keeps its own ini — done.** A venv LabVIEW writes its options
+  back to `.lvpm/labview.ini` when it closes (measured on 2026), so that file
+  — copied from the target's ini by `venv create` — is now the base of every
+  launch; only lvpm's keys are reapplied. Deleting it inherits the target's
+  settings afresh at the next launch.
 - **Relink what a partial run left behind.** A rerun after a failed install
   only relinks the packages _it_ copied; packages the first run copied stay
   `NOT relinked` until `lvpm relink --all`. The venv install should relink

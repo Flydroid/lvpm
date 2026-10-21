@@ -1582,6 +1582,7 @@ fn cmd_venv(cli: &Cli, sub: &VenvCmd) -> Result<()> {
             println!("created {}", v.dir.display());
             println!("  bound to       {}  ({})", v.target.label(), v.target.path.display());
             println!("  VI Server port {}", v.port);
+            println!("  ini            {} (a copy of yours, the venv's own from now on)", v.ini_path().display());
             println!(
                 "\nnext: `lvpm install` puts {}'s [dependencies] into it, `lvpm launch` starts LabVIEW on it",
                 project::FILE_NAME
@@ -1602,7 +1603,13 @@ fn cmd_venv(cli: &Cli, sub: &VenvCmd) -> Result<()> {
                 );
                 println!(
                     "  LabVIEW        {}",
-                    if launch::is_listening(v.port) { "running on this venv" } else { "not running on this venv" }
+                    if launch::is_listening(v.port) {
+                        "running on this venv"
+                    } else if launch::is_running(&v) {
+                        "starting on this venv"
+                    } else {
+                        "not running on this venv"
+                    }
                 );
                 Ok(())
             }
@@ -1634,10 +1641,10 @@ fn cmd_launch(cli: &Cli, lvproj: Option<&Path>, ini_keys: &[String]) -> Result<(
             Ok((k.trim().to_string(), val.trim().to_string()))
         })
         .collect::<Result<Vec<_>>>()?;
-    if launch::is_listening(v.port) {
+    if launch::is_running(&v) {
         bail!(
-            "a LabVIEW is already running on this venv (VI Server port {}) — open the project from \
-             that window, or close it and launch again",
+            "a LabVIEW is already running or starting on this venv (VI Server port {}) — open the \
+             project from that window, or close it and launch again",
             v.port
         );
     }
