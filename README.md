@@ -3,8 +3,9 @@
 An open-source package manager for LabVIEW.
 
 lvpm resolves `.vip` / `.ogp` packages by name from the public package
-directories or a local folder, downloads them, verifies the MD5 and unpacks
-them into a LabVIEW installation or a project's own venv.
+directories, hosted indexes, or local package folders configured globally.
+It downloads hosted packages, verifies the MD5 and unpacks them into a
+LabVIEW installation or a project's own venv.
 It then relinks the installed VIs and runs the packages' install hooks
 through LabVIEW's VI Server.
 
@@ -66,8 +67,7 @@ refuses to run scripts:
 
 Download `lvpm-<version>-windows-x64.zip` from the
 [Releases](https://github.com/Flydroid/lvpm/releases) page, right-click it,
-tick **Unblock**, extract, and put the folder on your `PATH`. 
-
+tick **Unblock**, extract, and put the folder on your `PATH`.
 
 ### From source
 
@@ -77,6 +77,33 @@ cargo test
 ```
 
 Toolchain setup is in [CONTRIBUTING.md](CONTRIBUTING.md).
+
+### Test a local release installation
+
+From a Windows checkout with the build tools installed:
+
+```powershell
+.\scripts\install.ps1 -BuildLocal
+```
+
+This runs `cargo build --release --locked`, packages the executable,
+README and licenses into a temporary zip, verifies its SHA-256, and uses
+the normal release installation path. It replaces any existing per-user
+lvpm in `%LOCALAPPDATA%\lvpm\bin` and adds that directory to your user
+`PATH`. No GitHub release or cargo-dist setup is required. The version
+remains the one declared in Cargo.toml; temporary packaging files are removed.
+The local checksum checks the packaged bytes, not publisher authenticity.
+
+For an isolated test without changing your installed lvpm or user PATH:
+
+```powershell
+.\scripts\install.ps1 -BuildLocal -InstallDir "$PWD\sandbox\local-installer\bin" -NoPath
+.\sandbox\local-installer\bin\lvpm.exe --version
+```
+
+An existing release zip can also be installed with `-Archive <FILE>` and
+`-Sha256 <EXPECTED-HASH>` instead of building it. Local modes cannot be
+combined with GitHub release selection options.
 
 ## Quick start
 
@@ -97,8 +124,8 @@ For a project, write an `lvpm.toml` (next section), then:
 
 ```console
 $ cd C:\Git\MyProject
-$ lvpm venv create --labview-version 2026   # .project/ beside lvpm.toml
-$ lvpm install                              # everything lvpm.toml lists, into .project
+$ lvpm venv create --labview-version 2026   # .lv-venv/ beside lvpm.toml by default
+$ lvpm install                              # everything lvpm.toml lists, into .lv-venv
 $ lvpm launch MyProject.lvproj              # a LabVIEW that sees the venv
 ```
 
@@ -121,32 +148,31 @@ is the reference and the term-by-term map from OGPT to lvpm.
 
 ## Commands
 
-| Command | What it does |
-|---|---|
-| `lvpm install <name>[@<version>]` | Resolve the package and its dependencies, download, verify MD5, unpack, relink, run hooks |
-| `lvpm install` | Inside a project: install everything `lvpm.toml` lists, as one plan with one relink pass (`--manifest <FILE>` names the manifest explicitly) |
-| `lvpm uninstall <name>` / `--all` | Remove exactly the files that were installed and prune empty folders |
-| `lvpm list` | What lvpm has installed into the selected target, and which hooks it did not run |
-| `lvpm search <query>` | Search the package indexes |
-| `lvpm targets` | Detected LabVIEW installations |
-| `lvpm relink <name>` / `--all` | Rerun the relink pass from the install manifests, without reinstalling |
-| `lvpm run-hooks <name>` / `--all` | Rerun a package's PostInstall hook, for one that failed during install |
-| `lvpm refresh` | Rebuild palettes and the File/Tools/Help menus from disk (`install` does this itself) |
-| `lvpm start` | Start the selected LabVIEW and wait until its VI Server answers |
-| `lvpm venv create` / `status` / `remove` | Manage the project's venv (see [Per-project dependencies](#per-project-dependencies-venvs)) |
-| `lvpm launch [<lvproj>]` | Start a LabVIEW on the project's venv |
-| `lvpm vi-probe` / `vi-run` / `vi-save` / `app-probe` | VI Server primitives, for diagnosis (see [VI Server](#vi-server)) |
+| Command                                              | What it does                                                                                                                                 |
+| ---------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `lvpm install <name>[@<version>]`                    | Resolve the package and its dependencies, download, verify MD5, unpack, relink, run hooks                                                    |
+| `lvpm install`                                       | Inside a project: install everything `lvpm.toml` lists, as one plan with one relink pass (`--manifest <FILE>` names the manifest explicitly) |
+| `lvpm uninstall <name>` / `--all`                    | Remove exactly the files that were installed and prune empty folders                                                                         |
+| `lvpm list`                                          | What lvpm has installed into the selected target, and which hooks it did not run                                                             |
+| `lvpm search <query>`                                | Search the package indexes                                                                                                                   |
+| `lvpm targets`                                       | Detected LabVIEW installations                                                                                                               |
+| `lvpm relink <name>` / `--all`                       | Rerun the relink pass from the install manifests, without reinstalling                                                                       |
+| `lvpm run-hooks <name>` / `--all`                    | Rerun a package's PostInstall hook, for one that failed during install                                                                       |
+| `lvpm refresh`                                       | Rebuild palettes and the File/Tools/Help menus from disk (`install` does this itself)                                                        |
+| `lvpm start`                                         | Start the selected LabVIEW and wait until its VI Server answers                                                                              |
+| `lvpm venv create` / `status` / `remove`             | Manage the project's venv (see [Per-project dependencies](#per-project-dependencies-venvs))                                                  |
+| `lvpm launch [<lvproj>]`                             | Start a LabVIEW on the project's venv                                                                                                        |
+| `lvpm vi-probe` / `vi-run` / `vi-save` / `app-probe` | VI Server primitives, for diagnosis (see [VI Server](#vi-server))                                                                            |
 
 Flags that apply to every command:
 
-| Flag | Meaning |
-|---|---|
-| `--labview-version <YYYY>` | Install into this LabVIEW version (see `lvpm targets`) |
-| `--project <DIR>` | Use that project's venv instead of looking upwards from the current directory |
-| `--global` | Use the LabVIEW installation itself, even from inside a project that has a venv |
-| `--prefix <DIR>` | Install into a scratch directory instead of LabVIEW (file copy only; nothing to relink or run hooks with) |
-| `--repo <URL-or-DIR>` | Add a repository: a hosted `index.vipr` folder, or a plain local directory of `.vip` files. Repeatable |
-| `--refresh` | Re-download the indexes instead of using the cache in `%LOCALAPPDATA%\lvpm\cache` |
+| Flag                       | Meaning                                                                                                   |
+| -------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `--labview-version <YYYY>` | Install into this LabVIEW version (see `lvpm targets`)                                                    |
+| `--project <DIR>`          | Use that project's venv instead of looking upwards from the current directory                             |
+| `--global`                 | Use the LabVIEW installation itself, even from inside a project that has a venv                           |
+| `--prefix <DIR>`           | Install into a scratch directory instead of LabVIEW (file copy only; nothing to relink or run hooks with) |
+| `--refresh`                | Ask each index whether it changed (a conditional request) instead of trusting the cache in `%LOCALAPPDATA%\lvpm\cache` |
 
 `install` flags: `--dry-run` shows every file, relink folder and hook and
 changes nothing; `--no-deps` skips dependencies; `--allow-downgrade` permits
@@ -159,8 +185,9 @@ started for a venv relink running.
 
 ## The project manifest
 
-`lvpm.toml` at the repo root says what a project depends on, and where from.
-Any `lvpm` command run at or below it picks it up; its `[sources]` apply to
+`lvpm.toml` at the repo root says what a project depends on and which hosted
+indexes to use. Local package folders are configured globally instead. Any
+`lvpm` command run at or below it picks it up; hosted `[sources]` apply to
 `search` and to a single-package `install` as much as to a full one.
 
 ```toml
@@ -170,8 +197,7 @@ version = "0.1.0"
 labview = "2025"                  # the oldest LabVIEW the project is meant for
 
 [sources]                         # repositories beyond the public indexes
-local = "./Dependencies"          # a folder of .vip files, relative to this file
-mirror = "http://host:8090/files" # or a hosted index.vipr folder
+mirror = "http://host:8090/files" # a hosted index.vipr folder
 defaults = true                   # false: only the sources listed here
 
 [dependencies]
@@ -196,19 +222,19 @@ on the machine.
 ```console
 $ cd C:\Git\MyProject
 $ lvpm venv create --labview-version 2026
-created C:\Git\MyProject\.project
+created C:\Git\MyProject\.lv-venv
   bound to       LabVIEW 2026 (64-bit)  v26.3
   VI Server port 3735
 
-$ lvpm install                    # everything lvpm.toml lists, into .project
-$ lvpm install oglib_error        # one more package, into .project
+$ lvpm install                    # everything lvpm.toml lists, into .lv-venv
+$ lvpm install oglib_error        # one more package, into .lv-venv
 $ lvpm launch MyProject.lvproj    # a LabVIEW that sees the venv
 ```
 
-- `lvpm venv create` makes `.project/` beside `lvpm.toml` and binds it to a
+- `lvpm venv create` makes `.lv-venv/` beside `lvpm.toml` by default and binds it to a
   LabVIEW version: `--labview-version`, else the manifest's `labview`.
   Binding to a newer IDE than the manifest's minimum is fine; an older one is
-  refused. `.project/` ignores itself in git; the manifest is what you
+  refused. The venv directory ignores itself in git; the manifest is what you
   commit. `lvpm venv status` shows the binding, `lvpm venv remove` deletes
   the venv and everything in it.
 - No activation step. Like cargo or npm, any `lvpm` command run at or below a
@@ -221,7 +247,7 @@ $ lvpm launch MyProject.lvproj    # a LabVIEW that sees the venv
   target's `LabVIEW.ini` with the venv mounted and VI Server on a port of its
   own, handed over with `-pref`. Your primary LabVIEW, if open, is untouched.
 
-How it works: `.project/` is an [LVAddons](https://labviewwiki.org/wiki/LVAddons)
+How it works: the venv directory is an [LVAddons](https://labviewwiki.org/wiki/LVAddons)
 location, one addon per package, each mirroring the LabVIEW install dir
 under `<pkg>/1/`. A LabVIEW started with `LVAddons.AdditionalLocations`
 pointing there overlays them onto its own tree, so a package in the venv
@@ -308,11 +334,11 @@ read their parameters from (`Package Name`, `LabVIEW Target Version`,
 `Quiet Mode = TRUE`, `Files Installed`, ...), so they run without parking
 dialogs over the install.
 
-| Hook | Moment |
-|---|---|
-| `PreInstall.vi` | before the package's files are copied (not in a venv — its LabVIEW only starts once the files are down) |
-| `PostInstall.vi` | after the relink pass, in a venv's own LabVIEW when a venv is in effect |
-| `PreUninstall.vi` | before the package's files are removed |
+| Hook               | Moment                                                                                                            |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------- |
+| `PreInstall.vi`    | before the package's files are copied (not in a venv — its LabVIEW only starts once the files are down)           |
+| `PostInstall.vi`   | after the relink pass, in a venv's own LabVIEW when a venv is in effect                                           |
+| `PreUninstall.vi`  | before the package's files are removed                                                                            |
 | `PostUninstall.vi` | after removal (uninstall hooks are extracted at install time; the archive is long gone when uninstall needs them) |
 
 Hook failures are reported, never fatal: the files are installed either way,
@@ -335,8 +361,7 @@ The transport underneath relink and hooks is a typed VI Server TCP client
 formats (scalars, strings, paths, n-dimensional arrays, and variants with
 named attributes) and is documented in
 [docs/vi-server-protocol.md](docs/vi-server-protocol.md). lvpm reads the
-target's port from its `LabVIEW.ini` (LabVIEW 2025 defaults to 3363, 2026 to
-3364) and starts the IDE when nothing answers there. Only relinking and hooks
+target's port from its `LabVIEW.ini` (LabVIEW 2025 defaults to 3363, 2026 to 3364) and starts the IDE when nothing answers there. Only relinking and hooks
 need LabVIEW; everything else runs without any LabVIEW process.
 
 For diagnosis the primitives are exposed directly:
@@ -388,11 +413,11 @@ that. On a headless machine three decisions go the other way, each announced
 on one line and each overridable (the relink pass is off on both, behind
 `--relink`):
 
-| | developer's machine | headless (`LV_RTE_HEADLESS`) | override |
-|---|---|---|---|
+|                                    | developer's machine                                                                 | headless (`LV_RTE_HEADLESS`)                                                                                                         | override                         |
+| ---------------------------------- | ----------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------- |
 | `lvpm.toml` with no venv beside it | refused: a developer inside a project must not install into the machine by accident | the machine is the sandbox: install into the LabVIEW the manifest's `labview` names (a newer one may stand in, an older one may not) | `--labview-version`, `--project` |
-| install hooks | run, before and after the files | skipped, and `lvpm list` says so: the hooks measured write a marker file and add a palette entry, IDE furniture | `--hooks` |
-| palettes and menus | rebuilt after the install | not rebuilt: no one sees a palette | `lvpm refresh` |
+| install hooks                      | run, before and after the files                                                     | skipped, and `lvpm list` says so: the hooks measured write a marker file and add a palette entry, IDE furniture                      | `--hooks`                        |
+| palettes and menus                 | rebuilt after the install                                                           | not rebuilt: no one sees a palette                                                                                                   | `lvpm refresh`                   |
 
 Together those mean a headless `lvpm install` never starts LabVIEW: it is
 downloads, MD5 checks and file copies, and takes seconds. Measured on a DQMH
@@ -404,7 +429,7 @@ and a few packages do real setup in theirs: NI's HTTP client, for one, does
 not open a session until its PostInstall has run. If a package behaves
 differently in the container than on your machine, `--hooks` is the first
 thing to try; it starts a headless LabVIEW for them. `--relink` likewise
-when the job's output *is* relinked packages.
+when the job's output _is_ relinked packages.
 
 Two container facts worth knowing. LabVIEW allows one mode at a time per
 machine, headless or IDE, so a headless job cannot share a host with an open
@@ -421,18 +446,87 @@ guarantees.
 Two public, anonymous, plain-HTTP package directories, which between them
 cover roughly 98% of the packages listed on vipm.io:
 
-| Source | Packages |
-|---|---|
-| `download.ni.com/evaluation/labview/lvtn/vipm/index.vipr` | ~2,530 |
-| `www.jkisoft.com/packages/jkisoft.ogpd` | ~2,290 |
+| Source                                                    | Packages |
+| --------------------------------------------------------- | -------- |
+| `download.ni.com/evaluation/labview/lvtn/vipm/index.vipr` | ~2,530   |
+| `www.jkisoft.com/packages/jkisoft.ogpd`                   | ~2,290   |
 
 Both are OGPM's Package Directory format, `[Package <name>-<version>]`
 sections with a `Package.URL`, unchanged since `openg.ogpd` in 2004; `.vipr`
-adds an MD5 per entry. Anything they lack can come from a folder of `.vip` /
-`.ogp` files via `--repo` or the manifest's `[sources]`: a directory of named
-packages is its own index, so a project's `Dependencies` folder works as-is.
-Downloaded indexes are cached in `%LOCALAPPDATA%\lvpm\cache`; `--refresh`
-fetches them again.
+adds an MD5 per entry. Anything they lack can come from an index folder of
+your own, named in the manifest's `[sources]`. A `[sources]` entry is an
+`http://` or `https://` folder holding an `index.vipr`. Local directories of
+`.vip` files are configured globally with `lvpm config set sources.local`
+instead; lvpm reads their specs and package files directly. These local
+directories reuse cached spec metadata when file size and modification time
+match; installation still reads their original archives unless imported.
+
+Use `lvpm cache add` to import a `.vip` or `.ogp`, or all such files directly
+inside a directory, into the shared content-addressed cache:
+
+```powershell
+lvpm cache add D:\LabVIEW\Packages\some_lib-1.2.3.vip
+lvpm cache add D:\LabVIEW\Packages
+lvpm --refresh cache add D:\LabVIEW\Packages
+```
+
+Imports record SHA-256, MD5, package metadata, and the original path. Repeated
+imports skip unchanged files when their cached blob still exists; `--refresh`
+reads and hashes them again. Imported packages are available to search and
+installation even after the originals are deleted. Cache reads verify the
+SHA-256 and installation also checks MD5. Local index files and cache
+list/remove/prune commands are not implemented yet.
+
+Remote package installs check the cache by name, version, and the feed's MD5
+before downloading. A single distinct SHA-256 match is verified and reused,
+including archives imported from disk. Missing, corrupt, or ambiguous matches
+are downloaded and verified, then stored with SHA-256 and MD5 for future runs.
+Packages without a feed MD5 are stored but downloaded again on later installs:
+name/version alone does not identify their bytes. `--refresh` refreshes feeds,
+not already verified package blobs. Dry runs may populate the cache without
+writing package files into the target.
+
+Remote feeds, downloads, and imported packages are recorded in `%LOCALAPPDATA%\lvpm\cache`, in a
+SQLite index (`lvpm-cache.db`) over a content-addressed store of the bodies
+themselves. For feed bodies, without `--refresh` the stored body is used and
+no feed request goes out. With it, the `ETag` and `Last-Modified` the server last gave
+are sent back as a conditional request: only a feed that actually changed is
+downloaded again, and an unchanged one answers `304` and costs no bytes. See
+[Configuration](#configuration) to move the cache.
+
+## Configuration
+
+Settings are named the way npm names `npm_config_<key>`: the environment
+variable is `LVPM_CONFIG_<KEY>` (or lowercase `lvpm_config_<key>`), and an
+empty value counts as unset. Precedence, highest first:
+
+1. Environment variable `LVPM_CONFIG_<KEY>`.
+2. User config file at `%LOCALAPPDATA%\lvpm\config.toml` (Linux:
+  `$XDG_CONFIG_HOME/lvpm/config.toml`, else `~/.config/lvpm/config.toml`),
+  written by `lvpm config set`.
+3. Built-in default.
+
+| Variable | Default | What it sets |
+| --- | --- | --- |
+| `LVPM_CONFIG_CACHE` | `%LOCALAPPDATA%\lvpm\cache` (Linux: `$XDG_CACHE_HOME/lvpm/cache`, else `~/.cache/lvpm/cache`) | Where the cache DB, feed bodies, and imported package archives live |
+| `LVPM_CONFIG_SOURCES_LOCAL` | Empty | Local `.vip` directories; separate paths with `;` on Windows or `:` on Linux |
+| `LVPM_CONFIG_VENV_DIR` | `.lv-venv` | Project-relative venv directory (or an absolute path) |
+
+```powershell
+lvpm config set sources.local D:\LabVIEW\Packages
+lvpm config get sources.local
+lvpm config set sources.local                 # clear configured local sources
+lvpm config set venv.dir .venv
+lvpm config get venv.dir
+# Or set LVPM_CONFIG_SOURCES_LOCAL for this shell; it overrides config.toml.
+$env:LVPM_CONFIG_SOURCES_LOCAL = 'D:\LabVIEW\Packages;E:\MorePackages'
+# Relative venv.dir values resolve from each project root; absolute paths are used as-is.
+$env:LVPM_CONFIG_VENV_DIR = '.venv'
+lvpm search caraya
+```
+
+In CI, set it on the job to keep the cache on a persistent volume between
+runs.
 
 ## Known limitations
 
@@ -461,22 +555,24 @@ fetches them again.
 
 ## Layout
 
-| Module | Responsibility |
-|---|---|
-| `main.rs` | The CLI: commands, target and venv selection, the install plan |
-| `index.rs` | Fetch and parse package directories (`.ogpd` / `index.vipr`), resolve names to versions, scan local repositories |
-| `spec.rs` | The `spec` manifest inside a package (the OGPT `.ogp` format and VIPM's `.vip` dialect) |
-| `project.rs` | The project manifest `lvpm.toml`: dependencies and their constraints, sources, minimum LabVIEW, lookup from a directory |
-| `target.rs` | LabVIEW detection, and where each `Target Dir` token points |
-| `install.rs` | Plan, unpack, extract hook VIs, record a manifest, uninstall |
-| `venv.rs` | A project's `.project/` venv: binding, lookup from the working directory, `lvpm venv` |
-| `launch.rs` | Start LabVIEW on a venv: the `-pref` ini, readiness by handshake, detached spawning |
-| `relink.rs` | Drive the embedded relink VI over installed folders; folder collapsing and retries |
-| `refresh.rs` | Rebuild palettes and menus through LabVIEW's own shipping VIs |
-| `viserver.rs` | The VI Server TCP protocol: connection, methods, flattened data |
-| `version.rs` | Package version ordering: OGPT `version-release`, VIPM's four-part form; not semver |
-| `src/lv-src/relink-package.vi` | The relink VI embedded into the executable at build time (LabVIEW 2020) |
-| `scripts/install.ps1` | Download, verify and install the latest release |
+| Module                         | Responsibility                                                                                                          |
+| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
+| `main.rs`                      | The CLI: commands, target and venv selection, the install plan                                                          |
+| `index.rs`                     | Fetch and parse package directories (`.ogpd` / `index.vipr`), resolve names to versions                                |
+| `fetch.rs`                     | Acquire package bytes: cache lookup, downloads, integrity verification, and cache population                            |
+| `cache.rs`                     | The cache: the SQLite index of known sources and the content-addressed store of what they served                        |
+| `spec.rs`                      | The `spec` manifest inside a package (the OGPT `.ogp` format and VIPM's `.vip` dialect)                                 |
+| `project.rs`                   | The project manifest `lvpm.toml`: dependencies and their constraints, sources, minimum LabVIEW, lookup from a directory |
+| `target.rs`                    | LabVIEW detection, and where each `Target Dir` token points                                                             |
+| `install.rs`                   | Plan, unpack, extract hook VIs, record a manifest, uninstall                                                            |
+| `venv.rs`                      | A project's `.lv-venv/` venv by default: binding, lookup from the working directory, `lvpm venv`                       |
+| `launch.rs`                    | Start LabVIEW on a venv: the `-pref` ini, readiness by handshake, detached spawning                                     |
+| `relink.rs`                    | Drive the embedded relink VI over installed folders; folder collapsing and retries                                      |
+| `refresh.rs`                   | Rebuild palettes and menus through LabVIEW's own shipping VIs                                                           |
+| `viserver.rs`                  | The VI Server TCP protocol: connection, methods, flattened data                                                         |
+| `version.rs`                   | Package version ordering: OGPT `version-release`, VIPM's four-part form; not semver                                     |
+| `src/lv-src/relink-package.vi` | The relink VI embedded into the executable at build time (LabVIEW 2020)                                                 |
+| `scripts/install.ps1`          | Download, verify and install the latest release                                                                         |
 
 ## License
 

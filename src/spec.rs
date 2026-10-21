@@ -27,9 +27,8 @@ pub struct Spec {
     /// Non-empty `[Script VIs]` hooks, e.g. ("PostInstall", "install.vi").
     /// About a quarter of published packages have at least one.
     pub script_vis: Vec<(String, String)>,
-    /// `[Dependencies] Requires`, verbatim. Same syntax the indexes use for
-    /// `Dependencies.Requires`, which is what lets a package on disk be
-    /// resolved exactly like one from a feed.
+    /// `[Dependencies] Requires`, verbatim. Local package folders use this
+    /// when resolving dependencies from a package's own spec.
     pub requires: Option<String>,
     /// `[Platform] Exclusive_LabVIEW_Version`, verbatim — e.g. `LabVIEW>=25.3`.
     /// Some packages write it bare, as `>=8.6`.
