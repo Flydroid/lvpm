@@ -6,6 +6,8 @@
 
 use lvpm_core::ops::install::InstallOptions;
 use lvpm_core::ops::relink::RelinkOptions;
+use lvpm_core::ops::route::{self, InstallMode, InstallRequest};
+use lvpm_core::ops::sync::{LockPolicy, SyncOptions};
 use lvpm_core::ops::{self, Destination, DestinationFlags, OpEnv};
 use lvpm_core::{config, install, launch, project, relink, target, venv, viserver};
 
@@ -73,6 +75,73 @@ impl From<&RelinkArgs> for RelinkOptions {
     }
 }
 
+/// What `install` and `sync` share about putting files on disk.
+#[derive(clap::Args, Clone)]
+struct ApplyArgs {
+    /// Show what would be written, then stop.
+    #[arg(long)]
+    dry_run: bool,
+    /// Copy the files but skip the relink pass.
+    #[arg(long)]
+    no_relink: bool,
+    /// Relink even where LabVIEW runs headless (LV_RTE_HEADLESS is set),
+    /// where the pass is otherwise off: nothing there opens the IDE, and
+    /// a compile or build resolves the links itself as it loads.
+    #[arg(long = "relink", conflicts_with = "no_relink")]
+    force_relink: bool,
+    /// Run the packages' install hooks even where LabVIEW runs headless
+    /// (LV_RTE_HEADLESS is set), where they are otherwise skipped: most
+    /// hooks add palettes, menus or markers for an IDE nobody opens there.
+    #[arg(long = "hooks")]
+    run_hooks: bool,
+    #[command(flatten)]
+    relink: RelinkArgs,
+}
+
+impl ApplyArgs {
+    fn options(&self, no_deps: bool, allow_downgrade: bool) -> InstallOptions {
+        InstallOptions {
+            dry_run: self.dry_run,
+            no_deps,
+            no_relink: self.no_relink,
+            force_relink: self.force_relink,
+            run_hooks: self.run_hooks,
+            allow_downgrade,
+            relink: (&self.relink).into(),
+        }
+    }
+}
+
+/// How `sync`, and `install` with no package in a project, treat lvpm.lock.
+#[derive(clap::Args, Clone)]
+struct SyncArgs {
+    /// Fail, and change nothing, if lvpm.lock is missing or out of date.
+    #[arg(long, conflicts_with = "frozen")]
+    locked: bool,
+    /// Sync lvpm.lock as it is, even out of date, without making a new one.
+    /// Fails if there is no lock.
+    #[arg(long)]
+    frozen: bool,
+    /// Leave out the packages that only dev dependencies need, and uninstall
+    /// them if they are installed.
+    #[arg(long)]
+    no_dev: bool,
+}
+
+impl SyncArgs {
+    fn options(&self, apply: &ApplyArgs) -> SyncOptions {
+        SyncOptions {
+            lock: match (self.locked, self.frozen) {
+                (true, _) => LockPolicy::Locked,
+                (_, true) => LockPolicy::Frozen,
+                _ => LockPolicy::Update,
+            },
+            no_dev: self.no_dev,
+            install: apply.options(false, false),
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum Cmd {
     /// List detected LabVIEW installations.
@@ -84,42 +153,37 @@ enum Cmd {
         #[arg(long, default_value_t = 120)]
         wait: u64,
     },
-    /// Install a package by name, or name@version — or every dependency a
-    /// project manifest lists, with `--manifest`.
+    /// Install a package by name, or name@version. In a project, with no
+    /// package, it syncs the project to lvpm.lock, as `lvpm sync` does.
     Install {
-        /// Package to install. Omit when using --manifest.
+        /// Package to install. Omit it in a project to sync the project.
+        #[arg(conflicts_with_all = ["locked", "frozen", "no_dev"])]
         package: Option<String>,
-        /// Install every package listed in an `lvpm.toml`'s `[dependencies]`.
-        ///
-        /// All of them resolve into one plan and relink as one pass, so no
-        /// package is relinked before a later one's files are on disk.
+        /// Not supported with a lock: lvpm.lock always holds the full set.
         #[arg(long, value_name = "FILE", conflicts_with = "package")]
         manifest: Option<PathBuf>,
-        /// Show what would be written, then stop.
-        #[arg(long)]
-        dry_run: bool,
         /// Do not install dependencies.
         #[arg(long)]
         no_deps: bool,
-        /// Copy the files but skip the relink pass.
-        #[arg(long)]
-        no_relink: bool,
-        /// Relink even where LabVIEW runs headless (LV_RTE_HEADLESS is set),
-        /// where the pass is otherwise off: nothing there opens the IDE, and
-        /// a compile or build resolves the links itself as it loads.
-        #[arg(long = "relink", conflicts_with = "no_relink")]
-        force_relink: bool,
-        /// Run the packages' install hooks even where LabVIEW runs headless
-        /// (LV_RTE_HEADLESS is set), where they are otherwise skipped: most
-        /// hooks add palettes, menus or markers for an IDE nobody opens there.
-        #[arg(long = "hooks")]
-        run_hooks: bool,
         /// Replace an installed package with an older version. Without this,
         /// resolving to something older than what is installed is refused.
         #[arg(long)]
         allow_downgrade: bool,
         #[command(flatten)]
-        relink: RelinkArgs,
+        apply: ApplyArgs,
+        #[command(flatten)]
+        sync: SyncArgs,
+    },
+    /// Make the destination hold exactly what lvpm.lock lists: install what is
+    /// missing, replace what is at another version, and uninstall what the
+    /// lock does not list, saying so first.
+    ///
+    /// With no lvpm.lock, or one that is out of date, a new one is made first.
+    Sync {
+        #[command(flatten)]
+        apply: ApplyArgs,
+        #[command(flatten)]
+        sync: SyncArgs,
     },
     /// Relink an already-installed package, without reinstalling it.
     ///
@@ -316,27 +380,28 @@ fn main() -> Result<()> {
         Cmd::Install {
             package,
             manifest,
-            dry_run,
             no_deps,
-            no_relink,
-            force_relink,
-            run_hooks,
             allow_downgrade,
-            relink,
-        } => ops::install::install(
-            &env,
-            package.as_deref(),
-            manifest.as_deref(),
-            &InstallOptions {
-                dry_run: *dry_run,
+            apply,
+            sync,
+        } => {
+            let request = InstallRequest {
+                package: package.as_deref(),
+                manifest: manifest.as_deref(),
                 no_deps: *no_deps,
-                no_relink: *no_relink,
-                force_relink: *force_relink,
-                run_hooks: *run_hooks,
-                allow_downgrade: *allow_downgrade,
-                relink: relink.into(),
-            },
-        ),
+            };
+            match route::install_mode(&env, &request)
+                .map_err(|why| anyhow!(render::sync::route_error(&why)))?
+            {
+                InstallMode::Sync => cmd_sync(&env, &sync.options(apply)),
+                InstallMode::Additive => ops::install::install(
+                    &env,
+                    package.as_deref(),
+                    &apply.options(*no_deps, *allow_downgrade),
+                ),
+            }
+        }
+        Cmd::Sync { apply, sync } => cmd_sync(&env, &sync.options(apply)),
         Cmd::Relink {
             package,
             all,
@@ -411,6 +476,10 @@ fn main() -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn cmd_sync(env: &OpEnv, options: &SyncOptions) -> Result<()> {
+    ops::sync::sync(env, options).map_err(|why| anyhow!(render::sync::error(&why)))
 }
 
 fn cmd_start(env: &OpEnv, wait: u64) -> Result<()> {

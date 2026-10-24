@@ -154,7 +154,15 @@ Feature: lvpm sync makes the destination equal the lock
     When I run "lvpm install --prefix dest"
     Then the command fails with: add labview = "<year>" under [project] in lvpm.toml
 
-  @labview
+  # Three scenarios in this file (the hook one, --global and headless) are
+  # tagged @unsafe and never run. A sync takes out every package its lock does
+  # not list, and they would run one against the user's own LabVIEW
+  # installation: the harness refuses (see `real_installation_risk` in
+  # tests/support/sandbox.rs). The hook scenario needs a PostInstall hook to
+  # fail, and a venv runs none, so it can only happen on the installation too.
+  # What they describe is checked by the scenarios that sync into --prefix
+  # trees, and by "sync into a venv".
+  @labview @unsafe
   Scenario: a hook failing mid-sync tells how to finish
     Given a lock with "hooked" whose PostInstall fails, in a venv
     When I run "lvpm sync"
@@ -167,13 +175,13 @@ Feature: lvpm sync makes the destination equal the lock
     When I run "lvpm sync"
     Then the venv's lvpm-installed packages equal the lock
 
-  @labview
+  @labview @unsafe
   Scenario: sync with --global on a workstation is exact
     Given the LabVIEW installation has an lvpm-installed package the lock does not list
     When I run "lvpm sync --global"
     Then that package is uninstalled and the locked set is installed
 
-  @labview
+  @labview @unsafe
   Scenario: headless sync into the manifest's LabVIEW is exact
     Given LV_RTE_HEADLESS is set, no venv, a current lock
     And that LabVIEW has an lvpm-installed package the lock does not list

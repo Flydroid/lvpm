@@ -249,6 +249,24 @@ pub enum Event {
     LockWritten { path: PathBuf, packages: usize },
     /// The lock on disk still represents the manifest, so it was left alone.
     LockUpToDate { path: PathBuf },
+    /// A dry run: the lock the manifest resolves to now differs from the one
+    /// on disk by `changes`, and nothing was written.
+    LockWouldChange { changes: Vec<LockChange> },
+
+    // ---- ops::sync ----
+    /// There is no lock to sync from. `dry_run`: one would be made from the
+    /// manifest, and none is written.
+    SyncLockMissing { path: PathBuf, dry_run: bool },
+    /// A requirement of a locked package that no source listed when the lock
+    /// was made, so the sync does not install it.
+    SyncUnresolved { name: String, required_by: String },
+    /// This is the first sync of the project, and it takes out the installed
+    /// packages that the new lock does not list.
+    SyncMigration { removing: Vec<PackageRef> },
+    /// What the sync does, before it does it; on a dry run, instead.
+    SyncPlanned { steps: Vec<SyncStep>, dry_run: bool },
+    /// The destination already holds exactly what the lock lists.
+    SyncNothingToDo,
 }
 
 /// A package at a version, as a plan lists it.

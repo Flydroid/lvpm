@@ -6,6 +6,7 @@
 //! scenarios can run concurrently. The child starts from an empty environment
 //! plus an allow-list, so nothing about the machine or its user leaks in.
 
+use super::events::RecordingSink;
 use super::feed::{Feed, PROJECT_FEED_DIR};
 use super::fixtures::{FixturePackage, PACKAGES};
 use super::global;
@@ -15,6 +16,9 @@ use super::process::{self, PORT_CLOSE_DEADLINE};
 use super::project::{MANIFEST_FILE, ProjectManifest};
 use super::tree;
 use super::venv::{self, LabviewInstall, VENV_DIR};
+use lvpm_core::config::Config;
+use lvpm_core::ops::{Destination, DestinationFlags, OpEnv};
+use lvpm_core::target::{self, LvTarget};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -98,6 +102,92 @@ fn create_dir_avoiding(taken: &HashSet<u16>) -> TempDir {
     panic!("no sandbox path in {MAX_DIR_ATTEMPTS} tries has a free venv port");
 }
 
+/// The subcommands that put packages on a destination or take them off it.
+const CHANGES_PACKAGES: &[&str] = &["sync", "install", "uninstall"];
+
+/// The LabVIEW installations on this machine, read once.
+static MACHINE_TARGETS: LazyLock<Vec<LvTarget>> =
+    LazyLock::new(|| target::detect().unwrap_or_default());
+
+/// The value of a flag that takes one: `--prefix dest` or `--prefix=dest`.
+fn flag_value<'a>(
+    arg: &'a str,
+    flag: &str,
+    rest: &mut impl Iterator<Item = &'a str>,
+) -> Option<&'a str> {
+    match arg.strip_prefix(flag) {
+        Some("") => rest.next(),
+        Some(value) => value.strip_prefix('='),
+        None => None,
+    }
+}
+
+/// Why running `lvpm <args>` from `cwd` would install or uninstall on a real
+/// LabVIEW installation, or `None` when its destination is a `--prefix` tree or
+/// a venv, or it would fail before reaching one. A `sync` takes out every
+/// package its lock does not list, so no scenario may point one at the user's
+/// own installation.
+///
+/// The destination is found the way `lvpm` finds it: core's own settling of the
+/// flags, the project's venv and `targets`, which are the machine's. The child
+/// is never headless (it inherits nothing that says so), which is the other way
+/// a project without a venv reaches an installation. The one exception is the
+/// fixture scenario that has proved the installation clean: it may install and
+/// uninstall the fixture package, and nothing else.
+pub fn real_installation_risk(
+    args: &[&str],
+    cwd: &Path,
+    targets: &[LvTarget],
+    fixture_armed: bool,
+) -> Option<String> {
+    let mut positional: Vec<&str> = Vec::new();
+    let mut flags = DestinationFlags::default();
+    let mut rest = args.iter().copied();
+    while let Some(arg) = rest.next() {
+        if arg == "--global" {
+            flags.global = true;
+        } else if let Some(prefix) = flag_value(arg, "--prefix", &mut rest) {
+            flags.prefix = Some(PathBuf::from(prefix));
+        } else if let Some(year) = flag_value(arg, "--labview-version", &mut rest) {
+            flags.labview_version = Some(year.to_string());
+        } else if let Some(project) = flag_value(arg, "--project", &mut rest) {
+            flags.project = Some(PathBuf::from(project));
+        } else if !arg.starts_with('-') {
+            positional.push(arg);
+        }
+    }
+    let command = *positional.first()?;
+    if !CHANGES_PACKAGES.contains(&command) {
+        return None;
+    }
+    let sink = RecordingSink::default();
+    let config = Config {
+        cache: PathBuf::new(),
+        local_sources: Vec::new(),
+        venv_dir: PathBuf::from(VENV_DIR),
+    };
+    let mut env = OpEnv::new(&sink, config, targets.to_vec(), cwd.to_path_buf());
+    env.flags = flags;
+    // Where it does not resolve, the command fails before it changes anything.
+    let Ok(Destination::Global(roots)) = env.destination() else {
+        return None;
+    };
+    let names_only_the_fixture = positional
+        .get(1)
+        .is_some_and(|package| package.split('@').next() == Some(global::FIXTURE_NAME));
+    if fixture_armed && command != "sync" && names_only_the_fixture {
+        return None;
+    }
+    let installation = roots
+        .target
+        .map_or_else(String::new, |target| format!(" ({})", target.label()));
+    Some(format!(
+        "refusing to run `lvpm {}`: its destination is a real LabVIEW installation{installation}, \
+         and `{command}` would change it",
+        args.join(" ")
+    ))
+}
+
 /// What the sandbox has learned from running `lvpm`, kept because it is gone
 /// from disk by the time the output is normalised (`venv remove`).
 #[derive(Debug, Default)]
@@ -118,6 +208,8 @@ pub struct Sandbox {
     dir: TempDir,
     feed: OnceLock<Feed>,
     learned: Mutex<Learned>,
+    /// Folders configured as local sources after the sandbox's own.
+    more_local_sources: Mutex<Vec<PathBuf>>,
 }
 
 impl Sandbox {
@@ -127,6 +219,7 @@ impl Sandbox {
             dir,
             feed: OnceLock::new(),
             learned: Mutex::new(Learned::default()),
+            more_local_sources: Mutex::new(Vec::new()),
         };
         for name in [
             WORK_DIR,
@@ -249,6 +342,44 @@ impl Sandbox {
         }
     }
 
+    /// Take the folder lvpm reads local packages from away altogether. It is
+    /// still configured as a source, as a folder that has since been deleted is.
+    pub fn remove_local_packages_dir(&self) {
+        std::fs::remove_dir_all(self.root().join(LOCAL_PACKAGES_DIR))
+            .expect("remove the local package folder");
+    }
+
+    /// Configure one more folder to read local packages from, after the
+    /// sandbox's own, and make it.
+    pub fn add_local_source_folder(&self, name: &str) -> PathBuf {
+        let folder = self.root().join(name);
+        std::fs::create_dir_all(&folder).expect("create the folder");
+        self.more_local_sources().push(folder.clone());
+        folder
+    }
+
+    fn more_local_sources(&self) -> MutexGuard<'_, Vec<PathBuf>> {
+        self.more_local_sources
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Empty the cache: no feed body, no archive, no import.
+    pub fn empty_cache(&self) {
+        let cache = self.cache_dir();
+        std::fs::remove_dir_all(&cache).expect("empty the cache");
+        std::fs::create_dir_all(&cache).expect("recreate the cache directory");
+    }
+
+    /// Where the cache keeps the archive with this SHA-256.
+    pub fn cache_blob(&self, sha256: &str) -> PathBuf {
+        self.cache_dir()
+            .join("content")
+            .join("sha256")
+            .join(&sha256[..2])
+            .join(sha256)
+    }
+
     /// Make the working directory a project that reads only the folder of
     /// local packages: no hosted source, and not the public feeds. `labview`
     /// is the oldest LabVIEW it is meant for, if it says.
@@ -274,6 +405,7 @@ impl Sandbox {
     /// Run the built `lvpm` with `args` in this sandbox; `input` is what its
     /// stdin carries, for commands that ask a question.
     pub fn run_lvpm(&self, args: &[&str], input: Option<&str>) -> Output {
+        self.refuse_a_real_installation(args, &MACHINE_TARGETS);
         let mut command = Command::new(env!("CARGO_BIN_EXE_lvpm"));
         command.args(args).current_dir(self.work_dir());
         self.apply_environment(&mut command);
@@ -281,6 +413,15 @@ impl Sandbox {
             .unwrap_or_else(|why| panic!("`lvpm {}` did not finish: {why}", args.join(" ")));
         self.learn_venv_port();
         output
+    }
+
+    /// Panics rather than let `lvpm <args>` change a real LabVIEW installation
+    /// (see `real_installation_risk`), whatever scenario asked for it.
+    fn refuse_a_real_installation(&self, args: &[&str], targets: &[LvTarget]) {
+        let fixture_armed = self.learned().global_fixture_armed;
+        if let Some(why) = real_installation_risk(args, &self.work_dir(), targets, fixture_armed) {
+            panic!("{why}");
+        }
     }
 
     /// The environment of a child: empty, then the allow-list, then the
@@ -294,6 +435,9 @@ impl Sandbox {
         }
         let root = self.root();
         let home = root.join(HOME_DIR);
+        let local_sources: Vec<PathBuf> = std::iter::once(root.join(LOCAL_PACKAGES_DIR))
+            .chain(self.more_local_sources().iter().cloned())
+            .collect();
         command
             .env("USERPROFILE", &home)
             .env("HOME", &home)
@@ -302,7 +446,10 @@ impl Sandbox {
             .env("XDG_CONFIG_HOME", root.join(XDG_CONFIG_DIR))
             .env("XDG_CACHE_HOME", root.join(XDG_CACHE_DIR))
             .env("LVPM_CONFIG_CACHE", self.cache_dir())
-            .env("LVPM_CONFIG_SOURCES_LOCAL", root.join(LOCAL_PACKAGES_DIR));
+            .env(
+                "LVPM_CONFIG_SOURCES_LOCAL",
+                std::env::join_paths(&local_sources).expect("local source paths join"),
+            );
         // Without a feed to catch them, requests would leave the machine.
         let proxy = self.feed().proxy_url();
         for name in PROXY_ENV_VARS {
@@ -517,6 +664,136 @@ mod tests {
         let mut sandbox = Sandbox::new();
         sandbox.serve_feed(PACKAGES);
         sandbox
+    }
+
+    // ---- nothing reaches the user's own LabVIEW installation ----
+
+    /// The installation of a machine that has LabVIEW 2026, which is not the
+    /// one these tests run on.
+    fn labview_2026() -> LvTarget {
+        LvTarget {
+            version: 26.3,
+            bitness: 64,
+            path: PathBuf::from("LabVIEW 2026"),
+        }
+    }
+
+    fn risky(command_line: &str, fixture_armed: bool) -> bool {
+        let args: Vec<&str> = command_line.split_whitespace().collect();
+        let cwd = tempfile::tempdir().expect("a working directory");
+        real_installation_risk(&args, cwd.path(), &[labview_2026()], fixture_armed).is_some()
+    }
+
+    #[test]
+    fn a_sync_install_or_uninstall_into_a_prefix_tree_is_allowed_whatever_else_is_said() {
+        for command in [
+            "sync --prefix dest",
+            "sync --dry-run --prefix dest",
+            "install --prefix dest",
+            "install beta --prefix=dest",
+            "uninstall beta --prefix dest",
+            "install beta --prefix dest --labview-version 2026",
+            "--prefix dest sync --global --labview-version 2026",
+        ] {
+            assert!(!risky(command, false), "{command}");
+        }
+    }
+
+    #[test]
+    fn a_sync_install_or_uninstall_that_settles_on_a_real_installation_is_refused() {
+        for command in [
+            "install beta --labview-version 2026",
+            "install --labview-version 2026",
+            "sync --labview-version=2026",
+            "sync --global --labview-version 2026",
+            "sync --dry-run --labview-version 2026",
+            "uninstall --all --labview-version 2026",
+            "uninstall beta --global --labview-version 2026",
+        ] {
+            assert!(risky(command, false), "{command}");
+        }
+    }
+
+    #[test]
+    fn one_that_settles_nowhere_fails_before_it_changes_anything_and_is_allowed() {
+        // No prefix, no venv, no LabVIEW named, and the child is not headless:
+        // `lvpm` says to pick a destination.
+        for command in [
+            "sync",
+            "install",
+            "install beta",
+            "sync --locked --frozen",
+            "sync --global",
+            "uninstall --all",
+        ] {
+            assert!(!risky(command, false), "{command}");
+        }
+    }
+
+    #[test]
+    fn only_the_fixture_may_be_installed_or_uninstalled_and_only_once_the_installation_is_proved_clean()
+     {
+        for command in [
+            "install lvpm_test_fixture --labview-version 2026",
+            "install lvpm_test_fixture@1.0 --labview-version 2026",
+            "uninstall lvpm_test_fixture --labview-version 2026",
+        ] {
+            assert!(!risky(command, true), "{command}");
+            assert!(risky(command, false), "{command} before it is armed");
+        }
+        for command in [
+            "install beta --labview-version 2026",
+            "uninstall --all --labview-version 2026",
+            "uninstall alpha --labview-version 2026",
+            "sync --labview-version 2026",
+            "sync lvpm_test_fixture --labview-version 2026",
+        ] {
+            assert!(risky(command, true), "{command} while armed");
+        }
+    }
+
+    #[test]
+    fn commands_that_neither_sync_install_nor_uninstall_are_not_the_guards_business() {
+        for command in ["list --labview-version 2026", "search a", "lock", "targets"] {
+            assert!(!risky(command, false), "{command}");
+        }
+        // The value of a destination flag is not a command.
+        assert!(!risky(
+            "--prefix install list --labview-version 2026",
+            false
+        ));
+    }
+
+    #[test]
+    fn a_child_never_inherits_the_headless_switch_that_would_make_a_sync_mean_the_installation() {
+        assert!(
+            !INHERITED_ENV_VARS
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case("LV_RTE_HEADLESS"))
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "refusing to run `lvpm sync --labview-version 2026`")]
+    fn the_sandbox_will_not_run_a_sync_at_a_real_installation() {
+        Sandbox::new()
+            .refuse_a_real_installation(&["sync", "--labview-version", "2026"], &[labview_2026()]);
+    }
+
+    #[test]
+    fn the_sandbox_lets_the_fixture_scenario_install_the_fixture_once_it_has_proved_the_installation_clean()
+     {
+        let sandbox = Sandbox::new();
+        let args = ["install", "lvpm_test_fixture", "--labview-version", "2026"];
+        let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            sandbox.refuse_a_real_installation(&args, &[labview_2026()]);
+        }));
+        assert!(refused.is_err(), "refused before it is armed");
+
+        sandbox.learned().global_fixture_armed = true;
+        sandbox.refuse_a_real_installation(&args, &[labview_2026()]);
+        // Nothing was armed on the installation, so there is nothing to restore.
+        sandbox.learned().global_fixture_armed = false;
     }
 
     /// The environment a child would get, as the child prints it.

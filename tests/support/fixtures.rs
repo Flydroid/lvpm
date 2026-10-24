@@ -144,6 +144,42 @@ pub const LOCK_PACKAGES: &[FixturePackage] = &[
     text_package("caraya", "1.0", &[], "20.0"),
 ];
 
+/// What the exact-sync scenarios publish: alpha 1.0 and 2.0, beta 1.0
+/// requiring alpha >= 1.0, gamma 1.0, caraya 1.0 requiring delta >= 1.0, and
+/// delta 1.0.
+pub const SYNC_PACKAGES: &[FixturePackage] = &[
+    text_package("alpha", "1.0", &[], "20.0"),
+    text_package("alpha", "2.0", &[], "20.0"),
+    text_package("beta", "1.0", &[("alpha", "1.0")], "20.0"),
+    text_package("gamma", "1.0", &[], "20.0"),
+    text_package("caraya", "1.0", &[("delta", "1.0")], "20.0"),
+    text_package("delta", "1.0", &[], "20.0"),
+];
+
+/// The same caraya 1.0, also requiring alpha >= 1.0.
+pub const CARAYA_NEEDING_ALPHA: FixturePackage = text_package(
+    "caraya",
+    "1.0",
+    &[("delta", "1.0"), ("alpha", "1.0")],
+    "20.0",
+);
+
+/// The same beta 1.0, now requiring alpha >= 2.0.
+pub const BETA_NEEDING_ALPHA_2: FixturePackage =
+    text_package("beta", "1.0", &[("alpha", "2.0")], "20.0");
+
+/// The same alpha 2.0 as the table's, built with another display name: it has
+/// other bytes, and so another SHA-256.
+pub const ALTERED_ALPHA_2: FixturePackage = FixturePackage {
+    name: "alpha",
+    version: "2.0",
+    display_name: "Alpha, altered",
+    requires: &[],
+    lv_min: "20.0",
+    payload: Payload::Text,
+    post_install_hook: None,
+};
+
 /// Releases a scenario publishes after a project was locked.
 pub const LATER_RELEASES: &[FixturePackage] =
     &[text_package("beta", "3.0", &[("alpha", "1.0")], "20.0")];

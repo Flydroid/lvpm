@@ -9,6 +9,7 @@ pub mod lock;
 pub mod query;
 pub mod refresh;
 pub mod relink;
+pub mod route;
 pub mod session;
 pub mod sync;
 pub mod uninstall;

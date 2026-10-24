@@ -42,6 +42,12 @@ pub(super) fn render(r: &mut Renderer, event: &Event) {
         Event::LockUpToDate { path } => {
             r.line(Stream::Out, &format!("{} is up to date", path.display()))
         }
+        Event::LockWouldChange { changes } => {
+            r.line(Stream::Out, "lvpm.lock would be updated:");
+            for change in changes {
+                r.line(Stream::Out, &format!("  {}", change_line(change)));
+            }
+        }
         _ => unreachable!("routed here by Renderer::render: {event:?}"),
     }
 }
@@ -201,6 +207,19 @@ mod tests {
     use super::super::tests::renderer;
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn a_dry_run_lists_how_the_lock_would_change_on_stdout() {
+        let (mut renderer, out, err) = renderer();
+        renderer.render(&Event::LockWouldChange {
+            changes: vec![LockChange::Added {
+                name: "gamma".into(),
+                version: "1.0".into(),
+            }],
+        });
+        assert_eq!(out.text(), "lvpm.lock would be updated:\n  + gamma 1.0\n");
+        assert_eq!(err.text(), "");
+    }
 
     #[test]
     fn progress_and_warnings_go_to_stderr_and_the_result_to_stdout() {

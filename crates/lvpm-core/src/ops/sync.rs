@@ -1,23 +1,282 @@
 //! `sync`: make a destination hold exactly what `lvpm.lock` lists.
 //!
-//! [`plan_sync`] compares the lock with what the destination has installed and
-//! says what must change, as data: nothing is read from a source and nothing is
-//! written. Every change is a [`SyncStep`], and a removal carries the reason for
-//! it.
+//! [`sync`] is the whole operation: it settles which lock to use, plans what
+//! must change, gets every archive before it changes anything, and then puts
+//! the destination right. [`plan_sync`] compares the lock with what the
+//! destination has installed and says what must change, as data: nothing is
+//! read from a source and nothing is written. Every change is a [`SyncStep`],
+//! and a removal carries the reason for it.
 
 use super::env::OpEnv;
-use super::install::PlannedPackage;
-use super::session::Downloads;
+use super::install::{
+    Applied, InstallOptions, InstallPlan, PlannedPackage, announce_target, apply, finish,
+};
+use super::lock as locking;
+use super::session::{Downloads, InstallSession};
+use super::uninstall::uninstall_one;
 use crate::cache::{Stored, sha256_hex};
-use crate::errors::{ArchiveFault, LockedArchiveProblem, SyncError};
-use crate::events::{RemoveReason, SyncStep};
+use crate::errors::{ArchiveFault, LockError, LockedArchiveProblem, SyncError};
+use crate::events::{Event, PackageRef, Phase, RemoveReason, SyncStep};
 use crate::index::{self, Entry, Index};
-use crate::install::Manifest;
-use crate::lockfile::{LockedPackage, Lockfile};
+use crate::install::{self, Manifest};
+use crate::lockfile::{self, LockedPackage, Lockfile};
 use crate::project::Project;
 use crate::version::Version;
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+/// How a sync treats `lvpm.lock`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LockPolicy {
+    /// Use a lock that represents the manifest; make a new one when there is
+    /// none, or it is out of date.
+    #[default]
+    Update,
+    /// Use the lock only when it is there and represents the manifest; fail,
+    /// and change nothing, when it does not.
+    Locked,
+    /// Use the lock as it is, out of date or not; fail when there is none.
+    Frozen,
+}
+
+/// What a sync is asked, without the flags a front end spells it as.
+#[derive(Debug, Clone, Default)]
+pub struct SyncOptions {
+    pub lock: LockPolicy,
+    /// Leave out the packages that only dev dependencies need, and take them
+    /// out when they are installed.
+    pub no_dev: bool,
+    /// The install flags a sync honors: a dry run, and what the relink and the
+    /// hooks do. A sync takes the lock's versions, and all of them, so
+    /// `allow_downgrade` and `no_deps` mean nothing to it.
+    pub install: InstallOptions,
+}
+
+/// Make the destination `env` settles hold exactly the packages `lvpm.lock`
+/// lists: install what is missing, replace what is at another version or from
+/// another archive, and take out what the lock does not list, saying so first
+/// and asking nothing.
+///
+/// Every archive is in hand before the first change, so a missing or altered
+/// archive fails the sync with the destination as it was. A dry run reports
+/// the plan, and changes nothing.
+pub fn sync(env: &OpEnv, opts: &SyncOptions) -> Result<(), SyncError> {
+    let found = locking::find_manifest(env)?;
+    let (manifest_path, project) = &found;
+    env.sink.emit(Event::PhaseStarted {
+        phase: Phase::Resolve,
+    });
+    if opts.lock == LockPolicy::Update {
+        project.labview.as_deref().ok_or(LockError::NoLabview)?;
+    }
+    let dest = env.destination()?;
+    let store = dest.store();
+    env.sink.emit(Event::ManifestInUse {
+        path: manifest_path.clone(),
+        name: project.name.clone(),
+        dependencies: project.dependencies.len(),
+        labview: project.labview.clone(),
+    });
+    announce_target(env, &store);
+
+    let lock_path = manifest_path.with_file_name(lockfile::FILE_NAME);
+    let (lock, first_sync) = settle_lock(env, &found, &lock_path, opts)?;
+    for unresolved in &lock.unresolved {
+        env.sink.emit(Event::SyncUnresolved {
+            name: unresolved.name.clone(),
+            required_by: unresolved.required_by.clone(),
+        });
+    }
+    if !project.nipm.is_empty() {
+        env.sink.emit(Event::NipmNotInstalled {
+            count: project.nipm.len(),
+        });
+    }
+
+    let plan = plan_sync(&lock, &install::list_installed(&store)?, opts.no_dev);
+    if first_sync {
+        announce_migration(env, &plan);
+    }
+    if plan.is_empty() {
+        env.sink.emit(Event::SyncNothingToDo);
+        return Ok(());
+    }
+    if opts.install.dry_run {
+        env.sink.emit(Event::SyncPlanned {
+            steps: plan.steps,
+            dry_run: true,
+        });
+        return Ok(());
+    }
+
+    let planned = fetch_locked(env, project, &plan.wanted)?;
+    let mut session = InstallSession::new(dest);
+    let applied = apply_sync(env, &mut session, &lock, &plan, planned, opts)?;
+    finish(env, &mut session, &applied, &opts.install)?;
+    Ok(())
+}
+
+/// The lock this sync goes by, and whether it is the project's first: made
+/// here because there was none. A dry run makes it without writing it.
+fn settle_lock(
+    env: &OpEnv,
+    found: &(PathBuf, Project),
+    lock_path: &Path,
+    opts: &SyncOptions,
+) -> Result<(Lockfile, bool), SyncError> {
+    let project = &found.1;
+    match opts.lock {
+        LockPolicy::Frozen => Ok((locking::read_lock(lock_path)?, false)),
+        LockPolicy::Locked => {
+            let lock = locking::read_lock(lock_path)?;
+            match lock.staleness(project) {
+                Some(reason) => Err(LockError::Stale(reason).into()),
+                None => Ok((lock, false)),
+            }
+        }
+        LockPolicy::Update => match locking::read_lock(lock_path) {
+            Ok(lock) if lock.staleness(project).is_none() => Ok((lock, false)),
+            read => {
+                let missing = matches!(read, Err(LockError::NoLock { .. }));
+                if missing {
+                    env.sink.emit(Event::SyncLockMissing {
+                        path: lock_path.to_path_buf(),
+                        dry_run: opts.install.dry_run,
+                    });
+                }
+                let lock = new_lock(env, found, lock_path, opts.install.dry_run)?;
+                Ok((lock, missing))
+            }
+        },
+    }
+}
+
+/// The lock the manifest resolves to now: written beside it, or on a dry run
+/// only said how it would differ from the one there.
+fn new_lock(
+    env: &OpEnv,
+    found: &(PathBuf, Project),
+    lock_path: &Path,
+    dry_run: bool,
+) -> Result<Lockfile, LockError> {
+    if !dry_run {
+        return locking::lock(env);
+    }
+    let previous = Lockfile::read(lock_path).ok();
+    let (lock, changes) = locking::relock(env, found, previous.as_ref())?;
+    if !changes.is_empty() {
+        env.sink.emit(Event::LockWouldChange { changes });
+    }
+    Ok(lock)
+}
+
+/// The first sync of a project removes what the lock it just made does not
+/// list, which nobody asked for in so many words: say so.
+fn announce_migration(env: &OpEnv, plan: &SyncPlan) {
+    let removing: Vec<PackageRef> = plan
+        .steps
+        .iter()
+        .filter_map(|step| match step {
+            SyncStep::Remove {
+                name,
+                version,
+                reason: RemoveReason::NotInLock,
+            } => Some(PackageRef {
+                name: name.clone(),
+                version: version.clone(),
+            }),
+            _ => None,
+        })
+        .collect();
+    if !removing.is_empty() {
+        env.sink.emit(Event::SyncMigration { removing });
+    }
+}
+
+/// Put the destination right: take out what the plan removes, then install and
+/// replace what it lists, the archives of `planned` being already in hand.
+/// What the plan does is said first. The relink, the hooks and the palette
+/// refresh are left to [`finish`], which spends what this leaves in the
+/// session.
+///
+/// A change that fails stops the rest. The error says which packages are done
+/// and which are not, so that running the sync again can finish it.
+pub fn apply_sync(
+    env: &OpEnv,
+    session: &mut InstallSession,
+    lock: &Lockfile,
+    plan: &SyncPlan,
+    planned: Vec<PlannedPackage>,
+    opts: &SyncOptions,
+) -> Result<Applied, SyncError> {
+    env.sink.emit(Event::SyncPlanned {
+        steps: plan.steps.clone(),
+        dry_run: false,
+    });
+    change(env, session, plan, planned, opts)
+        .map_err(|cause| incomplete(session, lock, plan, opts, &cause))
+}
+
+fn change(
+    env: &OpEnv,
+    session: &mut InstallSession,
+    plan: &SyncPlan,
+    planned: Vec<PlannedPackage>,
+    opts: &SyncOptions,
+) -> anyhow::Result<Applied> {
+    let mut removed = 0;
+    for step in &plan.steps {
+        match step {
+            SyncStep::Remove { name, .. } => removed += uninstall_one(env, session, name)?,
+            // An install of the locked version is left alone by `apply`, and
+            // this one has the wrong archive: it goes first.
+            SyncStep::Replace { name, from, to } if Version::parse(from) == Version::parse(to) => {
+                removed += uninstall_one(env, session, name)?;
+            }
+            SyncStep::Install { .. } | SyncStep::Replace { .. } => {}
+        }
+    }
+    let applied = match planned.is_empty() {
+        true => Applied::default(),
+        false => {
+            // The lock's version is the version, newer or older than what is
+            // installed.
+            let install = InstallOptions {
+                allow_downgrade: true,
+                ..opts.install.clone()
+            };
+            apply(env, session, &InstallPlan { entries: planned }, &install)?
+        }
+    };
+    Ok(Applied { removed, ..applied })
+}
+
+/// The error of a sync that stopped part-way: what is done is what the
+/// destination no longer needs a step for.
+fn incomplete(
+    session: &InstallSession,
+    lock: &Lockfile,
+    plan: &SyncPlan,
+    opts: &SyncOptions,
+    cause: &anyhow::Error,
+) -> SyncError {
+    let left = match install::list_installed(session.store()) {
+        Ok(installed) => plan_sync(lock, &installed, opts.no_dev).steps,
+        Err(_) => plan.steps.clone(),
+    };
+    let pending: HashSet<&str> = left.iter().map(SyncStep::name).collect();
+    let done = plan
+        .steps
+        .iter()
+        .filter(|step| !pending.contains(step.name()))
+        .cloned()
+        .collect();
+    SyncError::Incomplete {
+        done,
+        left,
+        cause: format!("{cause:#}"),
+    }
+}
 
 /// What a sync does to a destination.
 #[derive(Debug, Clone, PartialEq)]
@@ -580,7 +839,7 @@ mod tests {
             Cache::open(&self.root.join("cache")).unwrap()
         }
 
-        fn env<'a>(&self, sink: &'a NullSink, folders: Vec<PathBuf>) -> OpEnv<'a> {
+        fn env<'a>(&self, sink: &'a dyn EventSink, folders: Vec<PathBuf>) -> OpEnv<'a> {
             let config = Config {
                 cache: self.root.join("cache"),
                 local_sources: folders,
@@ -599,14 +858,20 @@ mod tests {
     /// A `.vip` with only a spec. `tag` is written into the spec, so that two
     /// archives of one package and version can have different bytes.
     fn vip(name: &str, version: &str, tag: &str) -> Vec<u8> {
+        vip_requiring(name, version, "", tag)
+    }
+
+    /// `requires` is a spec's `Requires` value: `alpha>=1.0`.
+    fn vip_requiring(name: &str, version: &str, requires: &str, tag: &str) -> Vec<u8> {
         let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
         writer
             .start_file("spec", zip::write::SimpleFileOptions::default())
             .unwrap();
-        let spec = format!(
-            "[Package]\nName={name}\nVersion={version}\nDisplay Name={tag}\n\
-             [Platform]\nExclusive_LabVIEW_Version=LabVIEW>=20.0\n"
-        );
+        let mut spec = format!("[Package]\nName={name}\nVersion={version}\nDisplay Name={tag}\n");
+        if !requires.is_empty() {
+            spec.push_str(&format!("[Dependencies]\nRequires={requires}\n"));
+        }
+        spec.push_str("[Platform]\nExclusive_LabVIEW_Version=LabVIEW>=20.0\n");
         writer.write_all(spec.as_bytes()).unwrap();
         writer.finish().unwrap().into_inner()
     }
@@ -813,5 +1078,445 @@ mod tests {
         let env = scratch.env(&NullSink, vec![]);
         assert!(fetch_locked(&env, &manifest(""), &[]).unwrap().is_empty());
         assert!(!scratch.root.join("cache").exists());
+    }
+
+    // ---- the whole operation, on real files ----
+
+    use crate::events::EventSink;
+    use crate::target::Roots;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct Recorder(Mutex<Vec<Event>>);
+
+    impl EventSink for Recorder {
+        fn emit(&self, event: Event) {
+            self.0.lock().unwrap().push(event);
+        }
+    }
+
+    impl Recorder {
+        fn events(&self) -> Vec<Event> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    const MANIFEST_HEAD: &str = "[project]\nlabview = \"2024\"\n\n[sources]\ndefaults = false\n\n";
+
+    /// A project: a manifest depending on `dependencies`, and a folder of the
+    /// packages alpha 1.0 and 2.0, beta 1.0 (needing alpha), gamma 1.0.
+    fn project(tag: &str, dependencies: &[&str]) -> Scratch {
+        let scratch = Scratch::new(tag);
+        for (name, version, requires) in [
+            ("alpha", "1.0", ""),
+            ("alpha", "2.0", ""),
+            ("beta", "1.0", "alpha>=1.0"),
+            ("gamma", "1.0", ""),
+        ] {
+            put(
+                &scratch.folder(),
+                name,
+                version,
+                &vip_requiring(name, version, requires, ""),
+            );
+        }
+        scratch.write_manifest(dependencies);
+        scratch
+    }
+
+    impl Scratch {
+        fn write_manifest(&self, dependencies: &[&str]) {
+            let lines: String = dependencies
+                .iter()
+                .map(|name| format!("{name} = \"*\"\n"))
+                .collect();
+            std::fs::write(
+                self.root.join(crate::project::FILE_NAME),
+                format!("{MANIFEST_HEAD}[dependencies]\n{lines}"),
+            )
+            .unwrap();
+        }
+
+        /// An environment that syncs into `dest`, reading the local folder.
+        fn sync_env<'a>(&self, sink: &'a dyn EventSink) -> OpEnv<'a> {
+            let mut env = self.env(sink, vec![self.folder()]);
+            env.flags.prefix = Some(self.root.join("dest"));
+            env
+        }
+
+        fn sync(&self, opts: &SyncOptions) -> (Result<(), SyncError>, Vec<Event>) {
+            let sink = Recorder::default();
+            let outcome = sync(&self.sync_env(&sink), opts);
+            (outcome, sink.events())
+        }
+
+        fn installed(&self) -> Vec<(String, String)> {
+            let roots = Roots::scratch(&self.root.join("dest"));
+            install::list_installed(&roots)
+                .unwrap()
+                .into_iter()
+                .map(|manifest| (manifest.name, manifest.version))
+                .collect()
+        }
+
+        fn lock_path(&self) -> PathBuf {
+            self.root.join(lockfile::FILE_NAME)
+        }
+
+        fn lock_bytes(&self) -> Option<Vec<u8>> {
+            std::fs::read(self.lock_path()).ok()
+        }
+    }
+
+    fn pairs(packages: &[(&str, &str)]) -> Vec<(String, String)> {
+        packages
+            .iter()
+            .map(|(name, version)| (name.to_string(), version.to_string()))
+            .collect()
+    }
+
+    fn with(lock: LockPolicy) -> SyncOptions {
+        SyncOptions {
+            lock,
+            ..SyncOptions::default()
+        }
+    }
+
+    #[test]
+    fn a_sync_installs_exactly_the_locked_set_from_the_archives_the_lock_names() {
+        let project = project("installs", &["beta"]);
+        let (outcome, _) = project.sync(&SyncOptions::default());
+        outcome.unwrap();
+
+        assert_eq!(
+            project.installed(),
+            pairs(&[("alpha", "2.0"), ("beta", "1.0")])
+        );
+        let lock = Lockfile::read(&project.lock_path()).unwrap();
+        let roots = Roots::scratch(&project.root.join("dest"));
+        for package in &lock.packages {
+            let manifest = install::read_manifest(&roots, &package.name).unwrap();
+            assert_eq!(manifest.archive_sha256.as_deref(), Some(&*package.sha256));
+        }
+    }
+
+    #[test]
+    fn an_extra_package_is_announced_and_then_removed_without_a_question() {
+        let project = project("extra", &["beta", "gamma"]);
+        project.sync(&SyncOptions::default()).0.unwrap();
+        project.write_manifest(&["beta"]);
+
+        let (outcome, events) = project.sync(&SyncOptions::default());
+        outcome.unwrap();
+        assert_eq!(
+            project.installed(),
+            pairs(&[("alpha", "2.0"), ("beta", "1.0")])
+        );
+        let announced = events
+            .iter()
+            .position(|event| {
+                matches!(event, Event::SyncPlanned { steps, dry_run: false }
+                if steps == &[SyncStep::Remove {
+                    name: "gamma".into(),
+                    version: "1.0".into(),
+                    reason: RemoveReason::NotInLock,
+                }])
+            })
+            .unwrap_or_else(|| panic!("no announcement in {events:?}"));
+        let removed = events
+            .iter()
+            .position(
+                |event| matches!(event, Event::PackageRemoved { name, .. } if name == "gamma"),
+            )
+            .unwrap_or_else(|| panic!("no removal in {events:?}"));
+        assert!(announced < removed, "{events:?}");
+    }
+
+    #[test]
+    fn a_second_sync_of_the_same_project_has_nothing_to_do() {
+        let project = project("nothing-to-do", &["beta"]);
+        project.sync(&SyncOptions::default()).0.unwrap();
+
+        let (outcome, events) = project.sync(&SyncOptions::default());
+        outcome.unwrap();
+        assert!(events.contains(&Event::SyncNothingToDo), "{events:?}");
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                Event::PackageStart { .. } | Event::PackageRemoved { .. }
+            )),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn a_missing_archive_fails_the_sync_before_anything_is_changed() {
+        let project = project("missing-archive", &["gamma"]);
+        project.sync(&SyncOptions::default()).0.unwrap();
+        assert_eq!(project.installed(), pairs(&[("gamma", "1.0")]));
+
+        // Now the project wants beta, which needs alpha 2.0, and nothing holds
+        // that any more.
+        project.write_manifest(&["beta"]);
+        let lock = locking_lock(&project);
+        assert_eq!(lock.packages.len(), 2, "{lock:?}");
+        std::fs::remove_file(project.folder().join("alpha-2.0.vip")).unwrap();
+        std::fs::remove_dir_all(project.root.join("cache")).unwrap();
+
+        let (outcome, events) = project.sync(&with(LockPolicy::Locked));
+        let SyncError::Archives(problems) = outcome.unwrap_err() else {
+            panic!("expected archive problems");
+        };
+        assert_eq!(problems.len(), 1);
+        assert_eq!(
+            (problems[0].name.as_str(), problems[0].fault.clone()),
+            ("alpha", ArchiveFault::NotFound)
+        );
+        assert_eq!(project.installed(), pairs(&[("gamma", "1.0")]));
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                Event::SyncPlanned { .. } | Event::PackageStart { .. }
+            )),
+            "nothing was announced or started: {events:?}"
+        );
+    }
+
+    /// The lock for the manifest as it is, made with a sync that fetches it.
+    fn locking_lock(project: &Scratch) -> Lockfile {
+        let sink = Recorder::default();
+        locking::lock(&project.sync_env(&sink)).unwrap()
+    }
+
+    #[test]
+    fn locked_refuses_a_missing_or_stale_lock_and_changes_nothing() {
+        let project = project("locked", &["beta"]);
+        let (outcome, _) = project.sync(&with(LockPolicy::Locked));
+        assert!(
+            matches!(outcome, Err(SyncError::Lock(LockError::NoLock { .. }))),
+            "{outcome:?}"
+        );
+        assert!(project.lock_bytes().is_none(), "no lock is written");
+        assert!(project.installed().is_empty());
+
+        project.sync(&SyncOptions::default()).0.unwrap();
+        let (lock, installed) = (project.lock_bytes(), project.installed());
+        project.write_manifest(&["beta", "gamma"]);
+        let (outcome, _) = project.sync(&with(LockPolicy::Locked));
+        assert!(
+            matches!(
+                &outcome,
+                Err(SyncError::Lock(LockError::Stale(
+                    lockfile::StaleReason::DependencyAdded { name, .. }
+                ))) if name == "gamma"
+            ),
+            "{outcome:?}"
+        );
+        assert_eq!(
+            (project.lock_bytes(), project.installed()),
+            (lock, installed)
+        );
+    }
+
+    #[test]
+    fn frozen_syncs_a_stale_lock_as_it_is_and_fails_without_one() {
+        let project = project("frozen", &["beta"]);
+        let (outcome, _) = project.sync(&with(LockPolicy::Frozen));
+        assert!(
+            matches!(outcome, Err(SyncError::Lock(LockError::NoLock { .. }))),
+            "{outcome:?}"
+        );
+
+        locking_lock(&project);
+        let lock = project.lock_bytes();
+        project.write_manifest(&["beta", "gamma"]);
+        project.sync(&with(LockPolicy::Frozen)).0.unwrap();
+        assert_eq!(
+            project.installed(),
+            pairs(&[("alpha", "2.0"), ("beta", "1.0")])
+        );
+        assert_eq!(project.lock_bytes(), lock, "the lock was not made again");
+    }
+
+    #[test]
+    fn the_first_sync_makes_the_lock_and_says_what_it_takes_out() {
+        let project = project("first", &["gamma"]);
+        project.sync(&SyncOptions::default()).0.unwrap();
+        std::fs::remove_file(project.lock_path()).unwrap();
+        project.write_manifest(&["beta"]);
+
+        let (outcome, events) = project.sync(&SyncOptions::default());
+        outcome.unwrap();
+        let lock = project.lock_path();
+        assert!(
+            events.contains(&Event::SyncLockMissing {
+                path: lock.clone(),
+                dry_run: false
+            }),
+            "{events:?}"
+        );
+        assert!(events.contains(&Event::SyncMigration {
+            removing: vec![PackageRef {
+                name: "gamma".into(),
+                version: "1.0".into()
+            }]
+        }));
+        assert!(lock.is_file());
+        assert_eq!(
+            project.installed(),
+            pairs(&[("alpha", "2.0"), ("beta", "1.0")])
+        );
+    }
+
+    #[test]
+    fn a_dry_run_says_how_the_lock_and_the_destination_would_change_and_changes_neither() {
+        let project = project("dry-run", &["beta"]);
+        project.sync(&SyncOptions::default()).0.unwrap();
+        project.write_manifest(&["beta", "gamma"]);
+        let manifest = std::fs::read(project.root.join(crate::project::FILE_NAME)).unwrap();
+        let (lock, installed) = (project.lock_bytes(), project.installed());
+
+        let (outcome, events) = project.sync(&SyncOptions {
+            install: InstallOptions {
+                dry_run: true,
+                ..InstallOptions::default()
+            },
+            ..SyncOptions::default()
+        });
+        outcome.unwrap();
+        assert!(
+            events.contains(&Event::LockWouldChange {
+                changes: vec![crate::events::LockChange::Added {
+                    name: "gamma".into(),
+                    version: "1.0".into()
+                }]
+            }),
+            "{events:?}"
+        );
+        assert!(
+            events.contains(&Event::SyncPlanned {
+                steps: vec![SyncStep::Install {
+                    name: "gamma".into(),
+                    version: "1.0".into()
+                }],
+                dry_run: true
+            }),
+            "{events:?}"
+        );
+        assert_eq!(
+            (project.lock_bytes(), project.installed()),
+            (lock, installed)
+        );
+        assert_eq!(
+            std::fs::read(project.root.join(crate::project::FILE_NAME)).unwrap(),
+            manifest
+        );
+    }
+
+    #[test]
+    fn a_sync_that_fails_part_way_says_what_is_done_and_what_is_left() {
+        let project = project("part-way", &["alpha", "beta"]);
+        // The lock holds alpha, whose archive is a package, and beta, whose
+        // archive is the right bytes for its hash and not a package at all.
+        let garbage = b"not a zip archive".to_vec();
+        project.scratch_cache_store(&garbage);
+        let alpha = vip("alpha", "2.0", "");
+        put(&project.folder(), "alpha", "2.0", &alpha);
+        let parsed = crate::project::read(&project.root.join(crate::project::FILE_NAME)).unwrap();
+        let mut beta = locked_as("beta", "1.0", &garbage);
+        beta.requires = vec!["alpha".to_string()];
+        let lock = Lockfile {
+            version: lockfile::FORMAT_VERSION,
+            labview: "2024".to_string(),
+            inputs: lockfile::Inputs::of(&parsed),
+            packages: vec![locked_as("alpha", "2.0", &alpha), beta],
+            unresolved: Vec::new(),
+        };
+        std::fs::write(project.lock_path(), lock.to_toml().unwrap()).unwrap();
+
+        let (outcome, _) = project.sync(&with(LockPolicy::Locked));
+        let Err(SyncError::Incomplete { done, left, cause }) = outcome else {
+            panic!("expected a sync that stopped, got {outcome:?}");
+        };
+        assert_eq!(done, [install("alpha", "2.0")]);
+        assert_eq!(left, [install("beta", "1.0")]);
+        assert!(!cause.is_empty());
+        assert_eq!(project.installed(), pairs(&[("alpha", "2.0")]));
+    }
+
+    impl Scratch {
+        fn scratch_cache_store(&self, bytes: &[u8]) {
+            self.cache().store(bytes).unwrap();
+        }
+    }
+
+    #[test]
+    fn the_same_version_from_another_archive_is_installed_again() {
+        let project = project("same-version", &["alpha"]);
+        project.sync(&SyncOptions::default()).0.unwrap();
+        let first = read_hash(&project, "alpha");
+
+        // The same alpha 2.0, built differently, and a lock made again.
+        put(
+            &project.folder(),
+            "alpha",
+            "2.0",
+            &vip("alpha", "2.0", "rebuilt"),
+        );
+        std::fs::remove_file(project.lock_path()).unwrap();
+        project.sync(&SyncOptions::default()).0.unwrap();
+
+        let second = read_hash(&project, "alpha");
+        assert_ne!(first, second);
+        let lock = Lockfile::read(&project.lock_path()).unwrap();
+        assert_eq!(second.as_deref(), Some(&*lock.packages[0].sha256));
+    }
+
+    fn read_hash(project: &Scratch, name: &str) -> Option<String> {
+        let roots = Roots::scratch(&project.root.join("dest"));
+        install::read_manifest(&roots, name).unwrap().archive_sha256
+    }
+
+    #[test]
+    fn a_sync_needs_a_project_and_for_a_new_lock_a_labview() {
+        let bare = Scratch::new("no-project");
+        let (outcome, _) = bare.sync(&SyncOptions::default());
+        assert!(
+            matches!(outcome, Err(SyncError::Lock(LockError::NoManifest { .. }))),
+            "{outcome:?}"
+        );
+
+        let project = Scratch::new("no-labview");
+        std::fs::write(
+            project.root.join(crate::project::FILE_NAME),
+            "[project]\nname = \"x\"\n",
+        )
+        .unwrap();
+        let (outcome, _) = project.sync(&SyncOptions::default());
+        assert!(
+            matches!(outcome, Err(SyncError::Lock(LockError::NoLabview))),
+            "{outcome:?}"
+        );
+        assert!(project.lock_bytes().is_none());
+    }
+
+    #[test]
+    fn an_unresolved_requirement_is_warned_about_at_sync() {
+        let project = project("unresolved", &["beta"]);
+        put(
+            &project.folder(),
+            "beta",
+            "1.0",
+            &vip_requiring("beta", "1.0", "alpha>=1.0,ni_lib_missing>=1.0", ""),
+        );
+        let (outcome, events) = project.sync(&SyncOptions::default());
+        outcome.unwrap();
+        assert!(
+            events.contains(&Event::SyncUnresolved {
+                name: "ni_lib_missing".into(),
+                required_by: "beta".into()
+            }),
+            "{events:?}"
+        );
     }
 }

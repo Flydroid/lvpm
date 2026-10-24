@@ -81,7 +81,7 @@ fn reason_text(reason: SkipReason) -> String {
 async fn core_installs(world: &mut CliWorld, package: String) {
     let sink = RecordingSink::default();
     let env = scratch_env(world, &sink);
-    ops::install::install(&env, Some(&package), None, &InstallOptions::default())
+    ops::install::install(&env, Some(&package), &InstallOptions::default())
         .expect("core installs the package");
     world.core_events = sink.events();
 }

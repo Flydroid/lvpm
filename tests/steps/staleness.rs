@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 /// Every file under a directory: its bytes, and when it was last written.
-type Snapshot = BTreeMap<PathBuf, (Vec<u8>, SystemTime)>;
+pub(super) type Snapshot = BTreeMap<PathBuf, (Vec<u8>, SystemTime)>;
 
 /// What a staleness scenario has changed and found.
 #[derive(Debug, Default)]
@@ -26,7 +26,7 @@ pub struct StalenessState {
     lock_written: Option<SystemTime>,
 }
 
-fn snapshot(dir: &Path) -> Snapshot {
+pub(super) fn snapshot(dir: &Path) -> Snapshot {
     fn add_files(dir: &Path, files: &mut Snapshot) {
         for entry in std::fs::read_dir(dir).expect("read a project directory") {
             let path = entry.expect("a directory entry").path();

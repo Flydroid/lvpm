@@ -15,14 +15,14 @@ use super::uninstall::uninstall_one;
 use crate::cache::sha256_hex;
 use crate::events::{Event, HookKind, PackageFolders, PackageRef, Phase, PlannedFile, SkipReason};
 use crate::index::{Entry, Floor, Index};
-use crate::project::{self, Constraint, Project};
+use crate::project::{self, Constraint};
 use crate::spec::Spec;
 use crate::target::Roots;
 use crate::version::Version;
 use crate::{install, launch, relink, spec, viserver};
 use anyhow::{Result, bail, ensure};
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 type Zip = zip::ZipArchive<std::io::Cursor<Vec<u8>>>;
@@ -149,14 +149,10 @@ fn read_spec(zip: &mut Zip) -> Result<String> {
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
-/// Install a package by name, or name@version — or every dependency a project
-/// manifest lists, when no package is named.
-pub fn install(
-    env: &OpEnv,
-    package: Option<&str>,
-    manifest: Option<&Path>,
-    opts: &InstallOptions,
-) -> Result<()> {
+/// Install a package by name, or name@version, where the destination flags say,
+/// with what it needs. Naming no package is not an install: in a project it is
+/// a sync (see [`super::route`]), and outside one it is an error.
+pub fn install(env: &OpEnv, package: Option<&str>, opts: &InstallOptions) -> Result<()> {
     let dest = env.destination()?;
     let store = dest.store();
     let repo = match &dest {
@@ -165,34 +161,14 @@ pub fn install(
     };
 
     // The project this install belongs to, if any: its `[sources]` count even
-    // when a single package is named. Inside a project a bare `lvpm install`
-    // means the manifest's dependencies — the way `npm install` does.
-    let found = env.manifest_for(manifest, repo.as_deref())?;
-    let wanted = match (package, &found) {
-        (Some(p), _) => vec![named(p)?],
-        (None, Some((_, proj))) => proj.dependencies.clone(),
-        (None, None) => bail!("give a package name, or --manifest <FILE>"),
+    // when a single package is named.
+    let found = env.manifest_for(None, repo.as_deref())?;
+    let Some(package) = package else {
+        bail!("give a package name, or --manifest <FILE>");
     };
-    ensure!(!wanted.is_empty(), "the manifest lists no [dependencies]");
+    let wanted = vec![named(package)?];
 
-    if let (None, Some((path, proj))) = (package, &found) {
-        env.sink.emit(Event::ManifestInUse {
-            path: path.clone(),
-            name: proj.name.clone(),
-            dependencies: wanted.len(),
-            labview: proj.labview.clone(),
-        });
-    }
-    env.sink.emit(match &store.target {
-        Some(t) => Event::InstallTarget {
-            labview: Some(t.label()),
-            path: t.path.clone(),
-        },
-        None => Event::InstallTarget {
-            labview: None,
-            path: store.application.clone(),
-        },
-    });
+    announce_target(env, &store);
 
     // Resolving is loading the indexes and choosing from them.
     env.sink.emit(Event::PhaseStarted {
@@ -205,15 +181,23 @@ pub fn install(
     });
     let plan = resolve_greedy(env, &store, &idx, &wanted, opts.no_deps)?;
 
-    if let (None, Some((_, Project { nipm, .. }))) = (package, &found)
-        && !nipm.is_empty()
-    {
-        env.sink.emit(Event::NipmNotInstalled { count: nipm.len() });
-    }
-
     let mut session = InstallSession::new(dest);
     let applied = apply(env, &mut session, &plan, opts)?;
     finish(env, &mut session, &applied, opts)
+}
+
+/// Say where the packages go: a LabVIEW installation, or a scratch tree.
+pub(super) fn announce_target(env: &OpEnv, store: &Roots) {
+    env.sink.emit(match &store.target {
+        Some(t) => Event::InstallTarget {
+            labview: Some(t.label()),
+            path: t.path.clone(),
+        },
+        None => Event::InstallTarget {
+            labview: None,
+            path: store.application.clone(),
+        },
+    });
 }
 
 /// `name` or `name@version`, as a root of the resolution.

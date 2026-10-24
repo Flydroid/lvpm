@@ -78,6 +78,27 @@ pub enum SyncError {
     Other(#[from] anyhow::Error),
 }
 
+/// Why an install request could not be routed to a mode.
+#[derive(Debug, thiserror::Error)]
+pub enum RouteError {
+    /// In a project a bare install is a sync, and a lock always holds the full
+    /// set of packages, so these ask for something it cannot do.
+    #[error("not supported with a lock (lvpm.lock always holds the full set)")]
+    NotWithLock { option: LockIncompatible },
+    /// Anything else that went wrong: its own text.
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+/// What a request asks for that a sync from a lock cannot give.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LockIncompatible {
+    /// Leaving out the dependencies of the packages.
+    NoDeps,
+    /// Reading the dependencies from another manifest.
+    Manifest,
+}
+
 /// A locked archive that sync could not get as the lock has it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LockedArchiveProblem {

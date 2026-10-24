@@ -15,6 +15,7 @@ pub mod lock;
 pub mod query;
 mod refresh;
 mod relink;
+pub mod sync;
 mod uninstall;
 mod venv;
 mod viserver;
@@ -103,7 +104,13 @@ impl Renderer {
             | Event::RequirementUnresolved { .. }
             | Event::LockChanged { .. }
             | Event::LockWritten { .. }
-            | Event::LockUpToDate { .. } => lock::render(self, event),
+            | Event::LockUpToDate { .. }
+            | Event::LockWouldChange { .. } => lock::render(self, event),
+            Event::SyncLockMissing { .. }
+            | Event::SyncUnresolved { .. }
+            | Event::SyncMigration { .. }
+            | Event::SyncPlanned { .. }
+            | Event::SyncNothingToDo => sync::render(self, event),
             Event::VenvLabviewStarting { .. } => launch::render(self, event),
             Event::LabviewStarting { .. } => viserver::render(self, event),
             Event::VenvSelected { .. } | Event::HeadlessInstallationChosen { .. } => {

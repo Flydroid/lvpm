@@ -26,8 +26,8 @@ use std::path::{Path, PathBuf};
 pub fn lock(env: &OpEnv) -> Result<Lockfile, LockError> {
     let found = find_manifest(env)?;
     let (manifest_path, project) = &found;
-    let labview = project.labview.as_deref().ok_or(LockError::NoLabview)?;
-    let gate = lv_gate(labview)?;
+    // An unusable `labview` is an error even when a lock exists.
+    lv_gate(project.labview.as_deref().ok_or(LockError::NoLabview)?)?;
     let lock_path = manifest_path.with_file_name(lockfile::FILE_NAME);
     // A lock that cannot be read is simply not a preference: it is rewritten.
     let previous = Lockfile::read(&lock_path).ok();
@@ -39,8 +39,31 @@ pub fn lock(env: &OpEnv) -> Result<Lockfile, LockError> {
         return Ok(current.clone());
     }
 
-    let index = env.load_index(Some(&found))?;
-    let resolution = resolve(env, project, &index, previous.as_ref(), gate)?;
+    let (lock, changes) = relock(env, &found, previous.as_ref())?;
+    write_atomically(&lock_path, &lock.to_toml()?)?;
+    if !changes.is_empty() {
+        env.sink.emit(Event::LockChanged { changes });
+    }
+    env.sink.emit(Event::LockWritten {
+        path: lock_path,
+        packages: lock.packages.len(),
+    });
+    Ok(lock)
+}
+
+/// The lock the manifest resolves to now, and how it differs from `previous`,
+/// with nothing written. Resolving keeps the versions `previous` chose where
+/// they still fit; every chosen archive is fetched and hashed.
+pub(super) fn relock(
+    env: &OpEnv,
+    found: &(PathBuf, Project),
+    previous: Option<&Lockfile>,
+) -> Result<(Lockfile, Vec<LockChange>), LockError> {
+    let project = &found.1;
+    let labview = project.labview.as_deref().ok_or(LockError::NoLabview)?;
+    let gate = lv_gate(labview)?;
+    let index = env.load_index(Some(found))?;
+    let resolution = resolve(env, project, &index, previous, gate)?;
     let hashes = hash_archives(env, &resolution)?;
     let feeds = index::feeds(&project.resolved_sources()?, project.default_sources);
     let lock = build(project, labview, &resolution, &hashes, &feeds);
@@ -51,16 +74,8 @@ pub fn lock(env: &OpEnv) -> Result<Lockfile, LockError> {
             required_by: unresolved.required_by.clone(),
         });
     }
-    write_atomically(&lock_path, &lock.to_toml()?)?;
-    let changes = changes(previous.as_ref(), &lock);
-    if !changes.is_empty() {
-        env.sink.emit(Event::LockChanged { changes });
-    }
-    env.sink.emit(Event::LockWritten {
-        path: lock_path,
-        packages: lock.packages.len(),
-    });
-    Ok(lock)
+    let changes = changes(previous, &lock);
+    Ok((lock, changes))
 }
 
 /// Whether `lvpm.lock` exists and still represents the manifest; the error
@@ -76,7 +91,7 @@ pub fn check(env: &OpEnv) -> Result<(), LockError> {
 }
 
 /// The manifest of the project the command runs in.
-fn find_manifest(env: &OpEnv) -> Result<(PathBuf, Project), LockError> {
+pub(super) fn find_manifest(env: &OpEnv) -> Result<(PathBuf, Project), LockError> {
     env.manifest_for(None, None)?
         .ok_or_else(|| LockError::NoManifest {
             searched_from: env.cwd.clone(),
@@ -84,7 +99,7 @@ fn find_manifest(env: &OpEnv) -> Result<(PathBuf, Project), LockError> {
 }
 
 /// The lock at `path`, told apart as missing or unreadable.
-fn read_lock(path: &Path) -> Result<Lockfile, LockError> {
+pub(super) fn read_lock(path: &Path) -> Result<Lockfile, LockError> {
     Lockfile::read(path).map_err(|why| {
         let missing = why
             .downcast_ref::<std::io::Error>()

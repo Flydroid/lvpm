@@ -13,4 +13,5 @@ pub mod run;
 pub mod setup;
 pub mod solver;
 pub mod staleness;
+pub mod sync;
 pub mod venv;

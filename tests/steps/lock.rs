@@ -54,7 +54,7 @@ pub(super) fn name_and_version_pairs(text: &str) -> Vec<(String, String)> {
     pairs
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(super) fn sha256_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
         .map(|byte| format!("{byte:02x}"))
@@ -128,7 +128,7 @@ impl CliWorld {
         }
     }
 
-    fn locked_package(&self, name: &str) -> toml::Table {
+    pub(super) fn locked_package(&self, name: &str) -> toml::Table {
         self.locked_packages()
             .into_iter()
             .find(|package| package["name"].as_str() == Some(name))
