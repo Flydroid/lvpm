@@ -5,7 +5,7 @@
 //! touch. [`set`] and [`remove`] are pure: text in, text out. [`set_file`] and
 //! [`remove_file`] apply one to a file, and write only when the text changed.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use std::path::Path;
 use toml_edit::{DocumentMut, Item, Table, Value};
 
@@ -53,21 +53,53 @@ pub fn set(text: &str, table: DependencyTable, name: &str, constraint: &str) -> 
     Ok(render(text, &doc))
 }
 
-/// `text` without the `name` entry of `table`. The table header stays, even
-/// when that was its last entry. Text without such an entry comes back as it was.
+/// `text` without the `name` entry of `table`: its own line, with any
+/// same-line comment, and nothing else. Comment lines and blank lines above it
+/// stay. The table header stays too, even when that was its last entry. Text
+/// without such an entry comes back as it was.
 pub fn remove(text: &str, table: DependencyTable, name: &str) -> Result<String> {
-    let mut doc = parse(text)?;
+    let doc = toml_edit::Document::parse(text).map_err(not_valid)?;
     let key = table.key();
-    let Some(item) = doc.get_mut(key) else {
+    let Some(item) = doc.get(key) else {
         return Ok(text.to_string());
     };
     let entries = item
-        .as_table_like_mut()
+        .as_table_like()
         .with_context(|| format!("[{key}] is not a table"))?;
-    match entries.remove(name) {
-        Some(_) => Ok(render(text, &doc)),
-        None => Ok(text.to_string()),
+    let Some((entry_key, entry)) = entries.get_key_value(name) else {
+        return Ok(text.to_string());
+    };
+    let line = entry_key
+        .span()
+        .zip(entry.span())
+        .and_then(|(key_span, value_span)| own_line(text, key_span.start, value_span.end));
+    match line {
+        Some(line) => Ok(format!("{}{}", &text[..line.start], &text[line.end..])),
+        None => remove_through_document(text, key, name),
     }
+}
+
+/// The whole lines holding an entry that starts at `start` and ends at `end`,
+/// when it is alone on them, apart from a comment after it. `None` for an
+/// entry sharing its line with something else, such as one in an inline table.
+fn own_line(text: &str, start: usize, end: usize) -> Option<std::ops::Range<usize>> {
+    let line_start = text[..start].rfind('\n').map_or(0, |at| at + 1);
+    let line_end = text[end..].find('\n').map_or(text.len(), |at| end + at + 1);
+    let before = &text[line_start..start];
+    let after = text[end..line_end].trim_start_matches([' ', '\t']);
+    let alone = before.chars().all(|c| c == ' ' || c == '\t')
+        && (after.is_empty() || after.starts_with(['#', '\r', '\n']));
+    alone.then_some(line_start..line_end)
+}
+
+/// The edit for an entry that is not on a line of its own: the document drops
+/// it, comments attached to it included.
+fn remove_through_document(text: &str, table: &str, name: &str) -> Result<String> {
+    let mut doc = parse(text)?;
+    if let Some(entries) = doc.get_mut(table).and_then(Item::as_table_like_mut) {
+        entries.remove(name);
+    }
+    Ok(render(text, &doc))
 }
 
 /// [`set`] on the manifest at `path`. The file is written only if it changed.
@@ -92,11 +124,12 @@ fn edit_file(path: &Path, edit: impl FnOnce(&str) -> Result<String>) -> Result<(
 }
 
 fn parse(text: &str) -> Result<DocumentMut> {
-    match text.parse::<DocumentMut>() {
-        Ok(doc) => Ok(doc),
-        // The parse error names the line and column and quotes the line.
-        Err(why) => bail!("lvpm.toml is not valid TOML, so it was not edited: {why}"),
-    }
+    text.parse::<DocumentMut>().map_err(not_valid)
+}
+
+/// The parse error names the line and column and quotes the line.
+fn not_valid(why: toml_edit::TomlError) -> anyhow::Error {
+    anyhow::anyhow!("lvpm.toml is not valid TOML, so it was not edited: {why}")
 }
 
 /// `text` followed by a new `[key]` table holding the one entry. Built by
@@ -197,6 +230,74 @@ beta = \">=1.0\"
         assert_eq!(
             remove(text, Dependencies, "alpha").unwrap(),
             "[dependencies]\n"
+        );
+    }
+
+    const COMMENTED: &str = "[dependencies]\n# the first\nalpha = \"1.0\"  # same line\n\n# the middle\nbeta = \">=1.0\"\n# the last\ngamma = \"*\"\n";
+
+    #[test]
+    fn removing_a_first_entry_keeps_the_comment_lines_above_it() {
+        assert_eq!(
+            remove(COMMENTED, Dependencies, "alpha").unwrap(),
+            "[dependencies]\n# the first\n\n# the middle\nbeta = \">=1.0\"\n# the last\ngamma = \"*\"\n"
+        );
+    }
+
+    #[test]
+    fn removing_a_middle_entry_keeps_the_comment_lines_above_it() {
+        assert_eq!(
+            remove(COMMENTED, Dependencies, "beta").unwrap(),
+            "[dependencies]\n# the first\nalpha = \"1.0\"  # same line\n\n# the middle\n# the last\ngamma = \"*\"\n"
+        );
+    }
+
+    #[test]
+    fn removing_a_last_entry_keeps_the_comment_lines_above_it() {
+        assert_eq!(
+            remove(COMMENTED, Dependencies, "gamma").unwrap(),
+            "[dependencies]\n# the first\nalpha = \"1.0\"  # same line\n\n# the middle\nbeta = \">=1.0\"\n# the last\n"
+        );
+    }
+
+    #[test]
+    fn removing_an_entry_keeps_comment_lines_in_a_crlf_file() {
+        let crlf = COMMENTED.replace('\n', "\r\n");
+        assert_eq!(
+            remove(&crlf, Dependencies, "beta").unwrap(),
+            "[dependencies]\n# the first\nalpha = \"1.0\"  # same line\n\n# the middle\n# the last\ngamma = \"*\"\n"
+                .replace('\n', "\r\n")
+        );
+        assert_eq!(
+            remove(&crlf, Dependencies, "gamma").unwrap(),
+            COMMENTED
+                .replace("gamma = \"*\"\n", "")
+                .replace('\n', "\r\n")
+        );
+    }
+
+    #[test]
+    fn removing_the_last_entry_without_a_final_newline_works() {
+        assert_eq!(
+            remove(
+                "[dependencies]\n# c\nalpha = \"1.0\"",
+                Dependencies,
+                "alpha"
+            )
+            .unwrap(),
+            "[dependencies]\n# c\n"
+        );
+    }
+
+    #[test]
+    fn an_entry_in_an_inline_table_is_removed_by_the_document() {
+        assert_eq!(
+            remove(
+                "dependencies = { alpha = \"1.0\", beta = \"*\" }\n",
+                Dependencies,
+                "alpha"
+            )
+            .unwrap(),
+            "dependencies = { beta = \"*\" }\n"
         );
     }
 
