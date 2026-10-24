@@ -4,11 +4,12 @@
 //! ended (`  checking feed ... `), so that the end of that line lands on it and
 //! any other output starts on a line of its own. One file per core module holds
 //! the wording of that module's events; this file routes events to them and
-//! owns the two streams.
+//! owns the two streams. `query` words what a query returns instead.
 
 mod env;
 mod index;
 mod launch;
+pub mod query;
 mod relink;
 mod venv;
 mod viserver;

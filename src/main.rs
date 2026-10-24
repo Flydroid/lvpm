@@ -4,7 +4,7 @@
 // it from `lvpm-core` only.
 #![allow(clippy::disallowed_methods)]
 
-use lvpm_core::ops::{Destination, DestinationFlags, OpEnv};
+use lvpm_core::ops::{self, Destination, DestinationFlags, OpEnv};
 use lvpm_core::{
     cache, config, fetch, index, install, launch, project, refresh, relink, spec, target, venv,
     version, viserver,
@@ -290,7 +290,10 @@ fn main() -> Result<()> {
     let sink = render::CliSink::stdio();
     let env = op_env(&cli, &sink)?;
     match &cli.cmd {
-        Cmd::Targets => cmd_targets(&env),
+        Cmd::Targets => {
+            print!("{}", render::query::targets(ops::query::targets(&env)));
+            Ok(())
+        }
         Cmd::Start { wait } => cmd_start(&env, *wait),
         Cmd::Install {
             package,
@@ -351,32 +354,35 @@ fn main() -> Result<()> {
         ),
         Cmd::Venv(sub) => cmd_venv(&env, sub),
         Cmd::Cache(CacheCmd::Add { path }) => {
-            let imports = index::cache_add(&env.config.cache, path, env.refresh)?;
-            for import in &imports {
-                println!(
-                    "{} {} sha256:{}",
-                    if import.reused { "cached" } else { "imported" },
-                    import.path.display(),
-                    import.sha256
-                );
-            }
-            println!("{} package(s) processed", imports.len());
+            print!(
+                "{}",
+                render::query::cache_add(&ops::query::cache_add(&env, path)?)
+            );
             Ok(())
         }
         Cmd::Config(ConfigCmd::Set { key, values }) => {
-            config::set(key, values)?;
+            ops::query::config_set(key, values)?;
             println!("set {key}");
             Ok(())
         }
         Cmd::Config(ConfigCmd::Get { key }) => {
-            for value in config::get(key)? {
+            for value in ops::query::config_get(&env, key)? {
                 println!("{value}");
             }
             Ok(())
         }
         Cmd::Launch { lvproj } => cmd_launch(&env, lvproj.as_deref()),
-        Cmd::List => cmd_list(&env),
-        Cmd::Search { query } => cmd_search(&env, query),
+        Cmd::List => {
+            print!("{}", render::query::list(&ops::query::list(&env)?));
+            Ok(())
+        }
+        Cmd::Search { query } => {
+            print!(
+                "{}",
+                render::query::search(query, &ops::query::search(&env, query)?)
+            );
+            Ok(())
+        }
     }
 }
 
@@ -421,68 +427,6 @@ fn cmd_start(env: &OpEnv, wait: u64) -> Result<()> {
             ""
         }
     );
-    Ok(())
-}
-
-fn cmd_targets(env: &OpEnv) -> Result<()> {
-    let targets = &env.targets;
-    if targets.is_empty() {
-        println!("no LabVIEW installations detected");
-        return Ok(());
-    }
-    for t in targets {
-        println!("{:<34} {}", t.label(), t.path.display());
-    }
-    Ok(())
-}
-
-fn cmd_search(env: &OpEnv, query: &str) -> Result<()> {
-    let manifest = env.manifest_for(None, None)?;
-    let idx = env.load_index(manifest.as_ref())?;
-    let hits = idx.search(query);
-    if hits.is_empty() {
-        println!("no packages matching {query:?}");
-        return Ok(());
-    }
-    for e in hits.iter().take(40) {
-        println!(
-            "{:<52} {:<14} {}",
-            e.name,
-            e.version.to_string(),
-            e.display_name.as_deref().unwrap_or("")
-        );
-    }
-    if hits.len() > 40 {
-        println!("... and {} more", hits.len() - 40);
-    }
-    Ok(())
-}
-
-fn cmd_list(env: &OpEnv) -> Result<()> {
-    let roots = env.destination()?.store();
-    let installed = install::list_installed(&roots)?;
-    if installed.is_empty() {
-        println!("lvpm has installed nothing into this target");
-        return Ok(());
-    }
-    for m in &installed {
-        println!(
-            "{:<52} {:<14} {:>5} files  {:<12}{}",
-            m.name,
-            m.version,
-            m.files.len(),
-            if m.relinked {
-                "relinked"
-            } else {
-                "NOT relinked"
-            },
-            if m.skipped_hooks.is_empty() {
-                String::new()
-            } else {
-                format!("  (hooks skipped: {})", hook_names(&m.skipped_hooks))
-            }
-        );
-    }
     Ok(())
 }
 

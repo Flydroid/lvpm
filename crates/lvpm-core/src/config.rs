@@ -95,8 +95,7 @@ pub fn set(key: &str, values: &[String]) -> Result<()> {
     std::fs::write(&path, text).with_context(|| format!("writing config {}", path.display()))
 }
 
-pub fn get(key: &str) -> Result<Vec<String>> {
-    let cfg = load()?;
+pub fn get(cfg: &Config, key: &str) -> Result<Vec<String>> {
     match key {
         "cache" => Ok(vec![cfg.cache.to_string_lossy().into_owned()]),
         "sources.local" => Ok(cfg

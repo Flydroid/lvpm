@@ -3,5 +3,6 @@
 //! front end called it.
 
 pub mod env;
+pub mod query;
 
 pub use env::{Destination, DestinationFlags, OpEnv};
