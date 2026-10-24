@@ -38,6 +38,9 @@ pub(super) fn render(r: &mut Renderer, event: &Event) {
                 if *packages == 1 { "" } else { "s" }
             ),
         ),
+        Event::LockUpToDate { path } => {
+            r.line(Stream::Out, &format!("{} is up to date", path.display()))
+        }
         _ => unreachable!("routed here by Renderer::render: {event:?}"),
     }
 }
@@ -205,6 +208,16 @@ mod tests {
             "+ alpha 2.0\n~ beta 1.0 -> 1.1\n- gamma 1.5\n\
              wrote lvpm.lock (2 packages); commit it with lvpm.toml\n"
         );
+    }
+
+    #[test]
+    fn a_lock_left_alone_says_it_is_up_to_date() {
+        let (mut renderer, out, err) = renderer();
+        renderer.render(&Event::LockUpToDate {
+            path: PathBuf::from("lvpm.lock"),
+        });
+        assert_eq!(out.text(), "lvpm.lock is up to date\n");
+        assert_eq!(err.text(), "");
     }
 
     fn manifest(package: &str, wanted: &str) -> Fact {

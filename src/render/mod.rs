@@ -102,7 +102,8 @@ impl Renderer {
             Event::LockHashing { .. }
             | Event::RequirementUnresolved { .. }
             | Event::LockChanged { .. }
-            | Event::LockWritten { .. } => lock::render(self, event),
+            | Event::LockWritten { .. }
+            | Event::LockUpToDate { .. } => lock::render(self, event),
             Event::VenvLabviewStarting { .. } => launch::render(self, event),
             Event::LabviewStarting { .. } => viserver::render(self, event),
             Event::VenvSelected { .. } | Event::HeadlessInstallationChosen { .. } => {

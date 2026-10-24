@@ -21,7 +21,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 /// Resolve the project's manifest and write `lvpm.lock` beside it. The lock
-/// comes back as it was written.
+/// comes back as it was written. A lock that still represents the manifest is
+/// left as it is: nothing is resolved, fetched or written.
 pub fn lock(env: &OpEnv) -> Result<Lockfile, LockError> {
     let found = env
         .manifest_for(None, None)?
@@ -34,6 +35,13 @@ pub fn lock(env: &OpEnv) -> Result<Lockfile, LockError> {
     let lock_path = manifest_path.with_file_name(lockfile::FILE_NAME);
     // A lock that cannot be read is simply not a preference: it is rewritten.
     let previous = Lockfile::read(&lock_path).ok();
+    if let Some(current) = previous
+        .as_ref()
+        .filter(|lock| lock.staleness(project).is_none())
+    {
+        env.sink.emit(Event::LockUpToDate { path: lock_path });
+        return Ok(current.clone());
+    }
 
     let index = env.load_index(Some(&found))?;
     let resolution = resolve(env, project, &index, previous.as_ref(), gate)?;
@@ -705,6 +713,78 @@ mod tests {
         }
         assert_eq!(conflict.facts.len(), 2, "{conflict}");
         assert!(!project.lock_path().exists());
+    }
+
+    #[test]
+    fn a_lock_that_still_represents_the_manifest_is_left_alone_and_needs_no_source() {
+        let project = ProjectDir::new("current", MANIFEST, &[("gamma", "1.0", "23.0", "")]);
+        let first = lock(&project.env(&Recorder::default())).unwrap();
+        let modified = |path: &Path| std::fs::metadata(path).unwrap().modified().unwrap();
+        let (bytes, stamp) = (
+            std::fs::read(project.lock_path()).unwrap(),
+            modified(&project.lock_path()),
+        );
+        // With the packages and the cache gone, anything that tried to
+        // resolve or hash would fail.
+        std::fs::remove_dir_all(project.root.join("packages")).unwrap();
+        std::fs::remove_dir_all(project.root.join("cache")).unwrap();
+
+        let sink = Recorder::default();
+        let again = lock(&project.env(&sink)).unwrap();
+        assert_eq!(again, first);
+        assert!(
+            matches!(&sink.events()[..], [Event::LockUpToDate { path }] if *path == project.lock_path()),
+            "{:?}",
+            sink.events()
+        );
+        assert_eq!(std::fs::read(project.lock_path()).unwrap(), bytes);
+        assert_eq!(modified(&project.lock_path()), stamp);
+    }
+
+    #[test]
+    fn a_stale_lock_is_resolved_again_and_keeps_the_versions_that_still_fit() {
+        let gammas = [("gamma", "1.0", "23.0", ""), ("helper", "1.0", "23.0", "")];
+        let project = ProjectDir::new("stale", MANIFEST, &gammas);
+        lock(&project.env(&Recorder::default())).unwrap();
+        write_vip(
+            &project.root.join("packages/gamma-1.5.vip"),
+            ("gamma", "1.5", "23.0", ""),
+        );
+
+        let manifest = MANIFEST.replace("gamma = \"*\"", "gamma = \"*\"\nhelper = \"*\"");
+        std::fs::write(project.root.join(crate::project::FILE_NAME), manifest).unwrap();
+        let sink = Recorder::default();
+        let lock = lock(&project.env(&sink)).unwrap();
+        let locked: Vec<(&str, &str)> = lock
+            .packages
+            .iter()
+            .map(|package| (package.name.as_str(), package.version.as_str()))
+            .collect();
+        assert_eq!(locked, [("gamma", "1.0"), ("helper", "1.0")]);
+        assert!(
+            sink.events()
+                .iter()
+                .any(|event| matches!(event, Event::LockWritten { packages: 2, .. })),
+            "{:?}",
+            sink.events()
+        );
+    }
+
+    #[test]
+    fn a_lock_in_an_older_format_is_written_again() {
+        let project = ProjectDir::new("older", MANIFEST, &[("gamma", "1.0", "23.0", "")]);
+        lock(&project.env(&Recorder::default())).unwrap();
+        let older = std::fs::read_to_string(project.lock_path())
+            .unwrap()
+            .replace("version = 1\n", "version = 0\n");
+        std::fs::write(project.lock_path(), &older).unwrap();
+
+        let lock = lock(&project.env(&Recorder::default())).unwrap();
+        assert_eq!(lock.version, lockfile::FORMAT_VERSION);
+        assert_eq!(
+            std::fs::read_to_string(project.lock_path()).unwrap(),
+            older.replace("version = 0\n", "version = 1\n")
+        );
     }
 
     #[test]

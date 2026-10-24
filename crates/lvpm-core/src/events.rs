@@ -247,6 +247,8 @@ pub enum Event {
     LockChanged { changes: Vec<LockChange> },
     /// The lock is on disk, holding `packages` packages.
     LockWritten { path: PathBuf, packages: usize },
+    /// The lock on disk still represents the manifest, so it was left alone.
+    LockUpToDate { path: PathBuf },
 }
 
 /// A package at a version, as a plan lists it.

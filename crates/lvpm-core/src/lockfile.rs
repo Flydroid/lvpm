@@ -34,9 +34,11 @@
 //! ```
 
 use crate::project::{Constraint, Project};
+use crate::solve::range_of;
+use crate::version::Version;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 /// The lock's file name; it sits beside `lvpm.toml`.
@@ -142,6 +144,138 @@ pub fn constraint_text(constraint: &Constraint) -> String {
 
 fn name_key(name: &str) -> String {
     name.to_lowercase()
+}
+
+/// Why a lock no longer represents the manifest. The first rule that fails
+/// names it; each rule is one predicate on [`Lockfile`], listed in the order
+/// [`Lockfile::staleness`] asks them. What does not appear here never makes a
+/// lock stale: a new upstream release, a relaxed constraint that still admits
+/// the locked version, the project's name, the per-user `sources.local`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StaleReason {
+    /// The lock is in an older format than this lvpm writes.
+    FormatOutdated,
+    /// The manifest's `labview` is not the one the lock was resolved for.
+    LabviewChanged,
+    /// The hosted `[sources]` or `defaults` are not the ones the lock was
+    /// resolved from.
+    SourcesChanged,
+    /// The manifest lists a dependency the lock was not resolved for.
+    DependencyAdded { name: String, dev: bool },
+    /// The lock was resolved for a dependency the manifest no longer lists.
+    DependencyRemoved { name: String, dev: bool },
+    /// The manifest's `constraint` for `name` does not admit the version the
+    /// lock holds.
+    ConstraintExcludesLocked {
+        name: String,
+        constraint: String,
+        locked: String,
+        dev: bool,
+    },
+}
+
+impl Lockfile {
+    /// Why this lock no longer represents `project`, if it does not.
+    pub fn staleness(&self, project: &Project) -> Option<StaleReason> {
+        self.format_is_outdated()
+            .or_else(|| self.labview_changed(project))
+            .or_else(|| self.sources_changed(project))
+            .or_else(|| {
+                [false, true].into_iter().find_map(|dev| {
+                    self.dependency_added(project, dev)
+                        .or_else(|| self.dependency_removed(project, dev))
+                        .or_else(|| self.constraint_excludes_locked(project, dev))
+                })
+            })
+    }
+
+    fn format_is_outdated(&self) -> Option<StaleReason> {
+        (self.version < FORMAT_VERSION).then_some(StaleReason::FormatOutdated)
+    }
+
+    fn labview_changed(&self, project: &Project) -> Option<StaleReason> {
+        let now = project.labview.as_deref().map(str::trim);
+        (now != Some(self.labview.as_str())).then_some(StaleReason::LabviewChanged)
+    }
+
+    /// The hosted sources are a set: listing them in another order asks for
+    /// the same thing.
+    fn sources_changed(&self, project: &Project) -> Option<StaleReason> {
+        let sorted = |mut urls: Vec<String>| {
+            urls.sort();
+            urls
+        };
+        let now = Inputs::of(project);
+        let changed = now.defaults != self.inputs.defaults
+            || sorted(now.sources) != sorted(self.inputs.sources.clone());
+        changed.then_some(StaleReason::SourcesChanged)
+    }
+
+    fn dependency_added(&self, project: &Project, dev: bool) -> Option<StaleReason> {
+        let resolved = self.resolved_names(dev);
+        manifest_lines(project, dev)
+            .iter()
+            .find(|(name, _)| !resolved.contains(&name_key(name)))
+            .map(|(name, _)| StaleReason::DependencyAdded {
+                name: name.clone(),
+                dev,
+            })
+    }
+
+    fn dependency_removed(&self, project: &Project, dev: bool) -> Option<StaleReason> {
+        let listed: HashSet<String> = manifest_lines(project, dev)
+            .iter()
+            .map(|(name, _)| name_key(name))
+            .collect();
+        self.resolved_lines(dev)
+            .keys()
+            .find(|name| !listed.contains(&name_key(name)))
+            .map(|name| StaleReason::DependencyRemoved {
+                name: name.clone(),
+                dev,
+            })
+    }
+
+    fn constraint_excludes_locked(&self, project: &Project, dev: bool) -> Option<StaleReason> {
+        manifest_lines(project, dev)
+            .iter()
+            .find_map(|(name, constraint)| {
+                let locked = self
+                    .packages
+                    .iter()
+                    .find(|package| name_key(&package.name) == name_key(name))?;
+                let admitted = range_of(constraint).contains(&Version::parse(&locked.version));
+                (!admitted).then(|| StaleReason::ConstraintExcludesLocked {
+                    name: name.clone(),
+                    constraint: constraint_text(constraint),
+                    locked: locked.version.clone(),
+                    dev,
+                })
+            })
+    }
+
+    /// The manifest lines the lock was resolved for, in one table.
+    fn resolved_lines(&self, dev: bool) -> &BTreeMap<String, String> {
+        match dev {
+            true => &self.inputs.dev_dependencies,
+            false => &self.inputs.dependencies,
+        }
+    }
+
+    fn resolved_names(&self, dev: bool) -> HashSet<String> {
+        self.resolved_lines(dev)
+            .keys()
+            .map(|name| name_key(name))
+            .collect()
+    }
+}
+
+/// The manifest's lines of one dependency table, in file order.
+fn manifest_lines(project: &Project, dev: bool) -> &[(String, Constraint)] {
+    match dev {
+        true => &project.dev_dependencies,
+        false => &project.dependencies,
+    }
 }
 
 impl Lockfile {
@@ -316,5 +450,190 @@ mod tests {
         std::fs::write(&path, lock().to_toml().unwrap()).unwrap();
         assert_eq!(Lockfile::read(&path).unwrap(), lock());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ---- staleness ----
+
+    /// The manifest `lock()` was resolved from.
+    const MANIFEST: &str = "[project]\nname = \"fixture\"\nlabview = \"2024\"\n\n\
+                            [sources]\nmirror = \"http://127.0.0.1:8090/feed\"\ndefaults = false\n\n\
+                            [dependencies]\nbeta = \">=1.0\"\n\n\
+                            [dev-dependencies]\ncaraya = \"*\"\n";
+
+    /// Why `lock()` is stale for `manifest` with `change` applied to its text.
+    fn staleness_after(change: impl Fn(&str) -> String) -> Option<StaleReason> {
+        lock().staleness(&crate::project::parse(&change(MANIFEST)).unwrap())
+    }
+
+    fn added(name: &str, dev: bool) -> Option<StaleReason> {
+        Some(StaleReason::DependencyAdded {
+            name: name.to_string(),
+            dev,
+        })
+    }
+
+    fn removed(name: &str, dev: bool) -> Option<StaleReason> {
+        Some(StaleReason::DependencyRemoved {
+            name: name.to_string(),
+            dev,
+        })
+    }
+
+    fn excludes(name: &str, constraint: &str, locked: &str, dev: bool) -> Option<StaleReason> {
+        Some(StaleReason::ConstraintExcludesLocked {
+            name: name.to_string(),
+            constraint: constraint.to_string(),
+            locked: locked.to_string(),
+            dev,
+        })
+    }
+
+    #[test]
+    fn the_manifest_a_lock_was_made_from_does_not_make_it_stale() {
+        assert_eq!(staleness_after(str::to_string), None);
+    }
+
+    #[test]
+    fn a_dependency_that_was_added_makes_the_lock_stale() {
+        let reason = staleness_after(|text| {
+            text.replace("beta = \">=1.0\"\n", "beta = \">=1.0\"\ngamma = \"*\"\n")
+        });
+        assert_eq!(reason, added("gamma", false));
+        let reason = staleness_after(|text| format!("{text}zeta = \"*\"\n"));
+        assert_eq!(reason, added("zeta", true), "in [dev-dependencies]");
+    }
+
+    #[test]
+    fn a_dependency_that_was_removed_makes_the_lock_stale() {
+        let reason = staleness_after(|text| text.replace("beta = \">=1.0\"\n", ""));
+        assert_eq!(reason, removed("beta", false));
+        let reason = staleness_after(|text| text.replace("caraya = \"*\"\n", ""));
+        assert_eq!(reason, removed("caraya", true));
+    }
+
+    #[test]
+    fn a_constraint_that_excludes_the_locked_version_makes_the_lock_stale() {
+        let reason = staleness_after(|text| text.replace(">=1.0", "2.0"));
+        assert_eq!(reason, excludes("beta", "2.0", "1.0", false));
+        let reason = staleness_after(|text| text.replace(">=1.0", ">=1.5"));
+        assert_eq!(reason, excludes("beta", ">=1.5", "1.0", false));
+        let reason = staleness_after(|text| text.replace("caraya = \"*\"", "caraya = \"2.0\""));
+        assert_eq!(reason, excludes("caraya", "2.0", "1.0", true));
+    }
+
+    #[test]
+    fn a_constraint_that_still_admits_the_locked_version_keeps_the_lock_current() {
+        for relaxed in ["*", "1.0", "1.0.0.0", ">=0.5", ">=1.0"] {
+            let reason = staleness_after(|text| text.replace(">=1.0", relaxed));
+            assert_eq!(reason, None, "beta = {relaxed:?}");
+        }
+    }
+
+    #[test]
+    fn a_changed_labview_makes_the_lock_stale_and_so_does_having_none() {
+        let reason = staleness_after(|text| text.replace("\"2024\"", "\"2025\""));
+        assert_eq!(reason, Some(StaleReason::LabviewChanged));
+        let reason = staleness_after(|text| text.replace("labview = \"2024\"\n", ""));
+        assert_eq!(reason, Some(StaleReason::LabviewChanged));
+    }
+
+    #[test]
+    fn changed_hosted_sources_or_defaults_make_the_lock_stale() {
+        for change in [
+            |text: &str| text.replace("defaults = false", "defaults = true"),
+            |text: &str| {
+                text.replace(
+                    "defaults = false",
+                    "other = \"http://h/o\"\ndefaults = false",
+                )
+            },
+            |text: &str| text.replace("http://127.0.0.1:8090/feed", "http://127.0.0.1:8090/other"),
+            |text: &str| text.replace("mirror = \"http://127.0.0.1:8090/feed\"\n", ""),
+        ] {
+            assert_eq!(staleness_after(change), Some(StaleReason::SourcesChanged));
+        }
+    }
+
+    #[test]
+    fn what_the_lock_does_not_depend_on_never_makes_it_stale() {
+        type Change = fn(&str) -> String;
+        let unrelated: [(&str, Change); 5] = [
+            ("a comment", |text| format!("# pinned\n{text}")),
+            ("the project's name", |text| {
+                text.replace("fixture", "renamed")
+            }),
+            ("the order of the tables", |text| {
+                let (head, tables) = text.split_once("[sources]").unwrap();
+                let (sources, dependencies) = tables.split_once("[dependencies]").unwrap();
+                format!("{head}[dependencies]{dependencies}\n[sources]{sources}")
+            }),
+            ("the name of a source", |text| {
+                text.replace("mirror", "backup")
+            }),
+            ("the case of a name", |text| text.replace("beta", "Beta")),
+        ];
+        for (what, change) in unrelated {
+            assert_eq!(staleness_after(change), None, "{what}");
+        }
+    }
+
+    #[test]
+    fn the_order_hosted_sources_are_listed_in_does_not_matter() {
+        let mut two = lock();
+        two.inputs.sources = vec!["http://h/a".to_string(), "http://h/b".to_string()];
+        let manifest = crate::project::parse(&MANIFEST.replace(
+            "mirror = \"http://127.0.0.1:8090/feed\"",
+            "b = \"http://h/b\"\na = \"http://h/a\"",
+        ))
+        .unwrap();
+        assert_eq!(two.staleness(&manifest), None);
+    }
+
+    #[test]
+    fn a_lock_in_an_older_format_is_stale_and_one_in_a_newer_format_is_not() {
+        let project = crate::project::parse(MANIFEST).unwrap();
+        let mut older = lock();
+        older.version = FORMAT_VERSION - 1;
+        assert_eq!(older.staleness(&project), Some(StaleReason::FormatOutdated));
+        let mut newer = lock();
+        newer.version = FORMAT_VERSION + 1;
+        assert_eq!(newer.staleness(&project), None);
+    }
+
+    #[test]
+    fn the_first_rule_that_fails_names_the_reason() {
+        let project = crate::project::parse(
+            &MANIFEST
+                .replace("\"2024\"", "\"2025\"")
+                .replace("defaults = false", "defaults = true"),
+        )
+        .unwrap();
+        let mut old = lock();
+        assert_eq!(old.staleness(&project), Some(StaleReason::LabviewChanged));
+        old.version = 0;
+        assert_eq!(old.staleness(&project), Some(StaleReason::FormatOutdated));
+        old.version = FORMAT_VERSION;
+        old.labview = "2025".to_string();
+        assert_eq!(old.staleness(&project), Some(StaleReason::SourcesChanged));
+    }
+
+    #[test]
+    fn a_package_in_both_tables_must_be_admitted_by_both_lines() {
+        let both = "[project]\nlabview = \"2024\"\n\n[sources]\ndefaults = false\n\n\
+                    [dependencies]\ngamma = \">=1.0\"\n\n[dev-dependencies]\ngamma = \"1.5\"\n";
+        let mut lock = Lockfile {
+            version: FORMAT_VERSION,
+            labview: "2024".to_string(),
+            inputs: Inputs::of(&crate::project::parse(both).unwrap()),
+            packages: vec![package("gamma", "1.5")],
+            unresolved: Vec::new(),
+        };
+        let current = crate::project::parse(both).unwrap();
+        assert_eq!(lock.staleness(&current), None);
+        lock.packages = vec![package("gamma", "2.0")];
+        assert_eq!(
+            lock.staleness(&current),
+            excludes("gamma", "1.5", "2.0", true)
+        );
     }
 }

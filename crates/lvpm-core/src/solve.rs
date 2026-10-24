@@ -124,7 +124,7 @@ fn key(name: &str) -> String {
 }
 
 /// The versions a manifest line admits.
-fn range_of(constraint: &Constraint) -> Ranges<Version> {
+pub(crate) fn range_of(constraint: &Constraint) -> Ranges<Version> {
     match constraint {
         Constraint::Exact(version) => Ranges::singleton(version.clone()),
         Constraint::AtLeast(version) => Ranges::higher_than(version.clone()),
