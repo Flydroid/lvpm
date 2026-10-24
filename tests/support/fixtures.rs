@@ -67,6 +67,14 @@ pub const PACKAGES: &[FixturePackage] = &[
 ];
 
 impl FixturePackage {
+    /// The table's package with this name and version.
+    pub fn find(name: &str, version: &str) -> &'static FixturePackage {
+        PACKAGES
+            .iter()
+            .find(|package| package.name == name && package.version == version)
+            .unwrap_or_else(|| panic!("the fixture table has no {name} {version}"))
+    }
+
     /// The id a package directory lists it under, e.g. `alpha-1.0`.
     pub fn id(&self) -> String {
         format!("{}-{}", self.name, self.version)
@@ -148,10 +156,7 @@ mod tests {
     use zip::ZipArchive;
 
     fn package(name: &str, version: &str) -> &'static FixturePackage {
-        PACKAGES
-            .iter()
-            .find(|p| p.name == name && p.version == version)
-            .expect("in the table")
+        FixturePackage::find(name, version)
     }
 
     fn members(vip: &[u8]) -> Vec<(String, Option<DateTime>)> {
@@ -192,6 +197,26 @@ mod tests {
         assert!(
             hooked.iter().all(|(_, time)| *time == Some(epoch)),
             "{hooked:?}"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "no alpha 9.9")]
+    fn finding_a_package_that_is_not_in_the_table_is_an_error() {
+        FixturePackage::find("alpha", "9.9");
+    }
+
+    /// The archive is the same on every machine. If the zip crate or the
+    /// builder changes its bytes, every recording that shows a hash changes
+    /// too (`cache-add`), so update both deliberately.
+    #[test]
+    fn alpha_1_0_has_a_pinned_sha256() {
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(package("alpha", "1.0").build_vip());
+        let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+        assert_eq!(
+            hex,
+            "22b602108e38af6ec1ed0a1a4fbbf851314934ee24b50d08295bf32c9b6166e3"
         );
     }
 

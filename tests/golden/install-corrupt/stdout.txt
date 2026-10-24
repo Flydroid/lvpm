@@ -1,0 +1,5 @@
+
+resolved 1 package:
+  corrupt 1.0
+
++ corrupt 1.0 ... 

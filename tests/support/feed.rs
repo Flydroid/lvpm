@@ -23,11 +23,52 @@ pub const PROJECT_FEED_DIR: &str = "/feed/";
 /// The default feeds' paths on `download.ni.com` and `www.jkisoft.com`.
 pub const NI_FEED_DIR: &str = "/evaluation/labview/lvtn/vipm/";
 pub const JKI_FEED_INDEX: &str = "/packages/jkisoft.ogpd";
+/// Feeds whose archives are broken in the ways a real server's can be.
+pub const FAULTY_FEED_DIR: &str = "/faulty/";
+/// A feed listing more packages than `lvpm search` prints.
+pub const CATALOG_FEED_DIR: &str = "/catalog/";
+/// How many packages the catalog feed lists: more than search's cap of 40.
+pub const CATALOG_SIZE: usize = 45;
+const _: () = assert!(
+    CATALOG_SIZE > 40,
+    "the catalog must exceed search's cap of 40"
+);
 /// Where a listing's `Package.URL` points, relative to the listing's folder.
 const ARCHIVE_SUBDIR: &str = "packages/";
+const INDEX_FILE: &str = "index.vipr";
 const SOCKET_TIMEOUT: Duration = Duration::from_secs(5);
 /// A request head larger than this is not one lvpm sent.
 const MAX_REQUEST_HEAD: usize = 16 * 1024;
+
+/// An archive in the faulty feed: what its listing promises (the MD5 of
+/// `promised`) and what the server then does (`served`, or a 404 when `None`).
+struct FaultyArchive {
+    id: &'static str,
+    promised: &'static [u8],
+    served: Option<&'static [u8]>,
+}
+
+const NOT_AN_ARCHIVE: &[u8] = b"these bytes are not a zip archive";
+const FAULTY_ARCHIVES: &[FaultyArchive] = &[
+    // The MD5 matches what is served, which is not an archive.
+    FaultyArchive {
+        id: "corrupt-1.0",
+        promised: NOT_AN_ARCHIVE,
+        served: Some(NOT_AN_ARCHIVE),
+    },
+    // What is served is not what the listing's MD5 promised.
+    FaultyArchive {
+        id: "tampered-1.0",
+        promised: b"the archive the listing promised",
+        served: Some(b"another archive entirely"),
+    },
+    // Listed, but the server has nothing at the archive's path.
+    FaultyArchive {
+        id: "missing-1.0",
+        promised: b"never served",
+        served: None,
+    },
+];
 
 type Routes = HashMap<String, Vec<u8>>;
 type Hits = Arc<Mutex<BTreeMap<String, usize>>>;
@@ -65,13 +106,14 @@ impl Feed {
         self.addr.to_string()
     }
 
-    /// The value for a project's `[sources]` entry.
+    /// The value for a project's `[sources]` entry serving `dir`.
+    pub fn source_url(&self, dir: &str) -> String {
+        format!("http://{}{}", self.addr, dir.trim_end_matches('/'))
+    }
+
+    /// The `[sources]` entry for the feed of fixture packages.
     pub fn project_source_url(&self) -> String {
-        format!(
-            "http://{}{}",
-            self.addr,
-            PROJECT_FEED_DIR.trim_end_matches('/')
-        )
+        self.source_url(PROJECT_FEED_DIR)
     }
 
     /// The value for `HTTP_PROXY`.
@@ -101,21 +143,63 @@ impl Drop for Feed {
     }
 }
 
+pub fn index_path(dir: &str) -> String {
+    format!("{dir}{INDEX_FILE}")
+}
+
+pub fn archive_path(dir: &str, file_name: &str) -> String {
+    format!("{dir}{ARCHIVE_SUBDIR}{file_name}")
+}
+
 fn routes(packages: &[FixturePackage]) -> Routes {
     let mut routes = Routes::new();
     let vipr = listing(packages, true);
     for dir in [PROJECT_FEED_DIR, NI_FEED_DIR] {
-        routes.insert(format!("{dir}index.vipr"), vipr.clone().into_bytes());
+        routes.insert(index_path(dir), vipr.clone().into_bytes());
         for package in packages {
-            routes.insert(
-                format!("{dir}{ARCHIVE_SUBDIR}{}", package.file_name()),
-                package.build_vip(),
-            );
+            routes.insert(archive_path(dir, &package.file_name()), package.build_vip());
         }
     }
     // JKI's real feed is a package directory; the fixture one lists nothing.
     routes.insert(JKI_FEED_INDEX.to_string(), listing(&[], false).into_bytes());
+    routes.insert(index_path(CATALOG_FEED_DIR), catalog_listing().into_bytes());
+    routes.insert(index_path(FAULTY_FEED_DIR), faulty_listing().into_bytes());
+    for archive in FAULTY_ARCHIVES {
+        if let Some(bytes) = archive.served {
+            routes.insert(
+                archive_path(FAULTY_FEED_DIR, &format!("{}.vip", archive.id)),
+                bytes.to_vec(),
+            );
+        }
+    }
     routes
+}
+
+/// `CATALOG_SIZE` packages named `bulk_package_NN`, none with an archive.
+fn catalog_listing() -> String {
+    let mut body = String::from("; lvpm acceptance fixture: a catalog larger than search prints\n");
+    for number in 1..=CATALOG_SIZE {
+        let id = format!("bulk_package_{number:02}-1.0");
+        body.push_str(&format!(
+            "\n[Package {id}]\nPackage.URL={ARCHIVE_SUBDIR}{id}.vip\n"
+        ));
+        body.push_str(&format!("Package.Display Name=Bulk Package {number:02}\n"));
+    }
+    body
+}
+
+fn faulty_listing() -> String {
+    let mut body = String::from("; lvpm acceptance fixture: archives that cannot be installed\n");
+    for FaultyArchive { id, promised, .. } in FAULTY_ARCHIVES {
+        body.push_str(&format!(
+            "\n[Package {id}]\nPackage.URL={ARCHIVE_SUBDIR}{id}.vip\n"
+        ));
+        body.push_str(&format!(
+            "Package.MD5={}\nPackage.Display Name={id}\n",
+            md5_hex(promised)
+        ));
+    }
+    body
 }
 
 /// An `index.vipr` (with `Package.MD5`) or an `.ogpd` (without) listing.
@@ -224,29 +308,35 @@ fn path_of(target: &str) -> String {
 
 fn respond(request: &Request, routes: &Routes) -> Vec<u8> {
     if request.method != "GET" {
-        return status_only("405 Method Not Allowed");
+        return response("405 Method Not Allowed", &[], b"");
     }
     let Some(body) = routes.get(&request.path) else {
-        return status_only("404 Not Found");
+        return response("404 Not Found", &[], b"");
     };
+    let etag = ("ETag", FEED_ETAG);
     if request.if_none_match.as_deref() == Some(FEED_ETAG) {
-        return format!(
-            "HTTP/1.1 304 Not Modified\r\nETag: {FEED_ETAG}\r\nConnection: close\r\n\r\n"
-        )
-        .into_bytes();
+        return response("304 Not Modified", &[etag], b"");
     }
-    let mut response = format!(
-        "HTTP/1.1 200 OK\r\nETag: {FEED_ETAG}\r\nContent-Type: application/octet-stream\r\n\
-         Content-Length: {}\r\nConnection: close\r\n\r\n",
-        body.len()
+    response(
+        "200 OK",
+        &[etag, ("Content-Type", "application/octet-stream")],
+        body,
     )
-    .into_bytes();
-    response.extend_from_slice(body);
-    response
 }
 
-fn status_only(status: &str) -> Vec<u8> {
-    format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").into_bytes()
+/// An HTTP/1.1 response that ends the connection after `body`.
+fn response(status: &str, headers: &[(&str, &str)], body: &[u8]) -> Vec<u8> {
+    let mut head = format!("HTTP/1.1 {status}\r\n");
+    for (name, value) in headers {
+        head.push_str(&format!("{name}: {value}\r\n"));
+    }
+    head.push_str(&format!(
+        "Content-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    ));
+    let mut bytes = head.into_bytes();
+    bytes.extend_from_slice(body);
+    bytes
 }
 
 #[cfg(test)]
@@ -329,6 +419,42 @@ mod tests {
         assert_eq!(reply.status_line, "HTTP/1.1 200 OK");
         assert!(!reply.body.is_empty());
         assert!(!String::from_utf8(reply.body).unwrap().contains("[Package "));
+    }
+
+    #[test]
+    fn the_catalog_feed_lists_more_packages_than_search_prints() {
+        let feed = Feed::start(PACKAGES);
+        let body = String::from_utf8(get(&feed, "/catalog/index.vipr", "").body).unwrap();
+        assert_eq!(body.matches("[Package ").count(), CATALOG_SIZE);
+        assert!(body.contains("[Package bulk_package_45-1.0]"), "{body}");
+    }
+
+    #[test]
+    fn the_faulty_feed_serves_a_non_archive_a_different_archive_and_nothing() {
+        let feed = Feed::start(PACKAGES);
+        let listing = String::from_utf8(get(&feed, "/faulty/index.vipr", "").body).unwrap();
+        for id in ["corrupt-1.0", "tampered-1.0", "missing-1.0"] {
+            assert!(listing.contains(&format!("[Package {id}]")), "{listing}");
+        }
+        let corrupt = get(&feed, "/faulty/packages/corrupt-1.0.vip", "").body;
+        assert!(listing.contains(&format!("Package.MD5={}", md5_hex(&corrupt))));
+        assert!(zip::ZipArchive::new(std::io::Cursor::new(corrupt)).is_err());
+        let tampered = get(&feed, "/faulty/packages/tampered-1.0.vip", "").body;
+        assert!(
+            !listing.contains(&md5_hex(&tampered)),
+            "the MD5 must not match"
+        );
+        let missing = get(&feed, "/faulty/packages/missing-1.0.vip", "");
+        assert_eq!(missing.status_line, "HTTP/1.1 404 Not Found");
+    }
+
+    #[test]
+    fn route_builders_join_a_feed_dir_with_its_index_and_archives() {
+        assert_eq!(index_path(PROJECT_FEED_DIR), "/feed/index.vipr");
+        assert_eq!(
+            archive_path(NI_FEED_DIR, "a-1.0.vip"),
+            "/evaluation/labview/lvtn/vipm/packages/a-1.0.vip"
+        );
     }
 
     #[test]
