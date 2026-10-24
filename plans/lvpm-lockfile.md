@@ -1932,10 +1932,11 @@ and version.
   - [x] Step 4.1: Parse `[dev-dependencies]`
   - [x] Step 4.2: Format-preserving edits
   - Commits e46c505, 2895668, 6347533 (AC-M2 fix: `remove` keeps whole-line comments above the entry). Out-of-list edits: `tests/acceptance.rs` (feature registration, `manifest` world field), `tests/steps/{mod,manifest}.rs`. For Slice 13: `remove` of an absent entry returns the text unchanged, so `ops::remove` checks presence and both tables for the `--dev` hint; `add`/`remove` compute text with the pure functions and write only after lock and sync succeed (AC-M3).
-- [ ] Slice 5: PubGrub solver
-  - [ ] Step 5.1: Provider over `Index`, version mapping, gate, preferences
-  - [ ] Step 5.2: Conflict report, unresolved requirements, cancellation
+- [x] Slice 5: PubGrub solver
+  - [x] Step 5.1: Provider over `Index`, version mapping, gate, preferences
+  - [x] Step 5.2: Conflict report, unresolved requirements, cancellation
 
+  - Commits add2df1, e24a3dc, 9fd3d0c. Cancellation is `SolveError::Cancelled` until Slice 15 adds the typed error. Open, pre-existing (in `version.rs`/`index.rs`, not the solver): prerelease tails are discarded so `1.0alpha1 == 1.0alpha2` and dedup can lock the wrong archive; `1.0.0alpha1-1` sorts above `1.0.0`; a `>` requirement is stored as `>=`. Gate messages truncate LabVIEW minor versions (`25.3` shows as 2025). Decide before Slice 8 writes locks.
 #### Wave 4
 - [ ] Slice 6: `OpEnv` and query operations in core
   - [ ] Step 6.1: `OpEnv`, destination and index loading
