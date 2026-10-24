@@ -2,6 +2,7 @@
 //! `lvpm` made in it: the two facts that differ between worlds and machines.
 
 use regex::Regex;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
@@ -35,6 +36,41 @@ pub fn find_labview(targets_output: &str, year: &str) -> Option<LabviewInstall> 
     })
 }
 
+/// The first port of the range `lvpm` hashes a venv's path into, and its size.
+const PORT_RANGE_START: u16 = 3400;
+const PORT_RANGE_SIZE: u64 = 600;
+/// FNV-1a, 64-bit.
+const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+/// The VI Server port `lvpm venv create` will give the venv in `venv_dir`.
+///
+/// Mirrors `port_for` in `src/venv.rs`, so a sandbox can be made at a path
+/// whose port nothing else on the machine is using. `Sandbox::learn_venv_port`
+/// checks it against the port `lvpm` actually wrote.
+pub fn predicted_port(venv_dir: &Path) -> u16 {
+    let key = venv_dir.to_string_lossy().to_lowercase().replace('\\', "/");
+    let mut hash = FNV_OFFSET;
+    for byte in key.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    PORT_RANGE_START + u16::try_from(hash % PORT_RANGE_SIZE).expect("below 600")
+}
+
+/// The ports with something listening, from `netstat -an` output
+/// (`TCP    0.0.0.0:3582    0.0.0.0:0    LISTENING`).
+pub fn listening_ports(netstat_output: &str) -> HashSet<u16> {
+    netstat_output
+        .lines()
+        .filter(|line| line.to_uppercase().contains("LISTEN"))
+        .filter_map(|line| {
+            let local = line.split_whitespace().nth(1)?;
+            local.rsplit(':').next()?.parse().ok()
+        })
+        .collect()
+}
+
 /// The VI Server port in `.lv-venv/.lvpm/venv.json`, hashed from the venv's
 /// path, so it differs for every sandbox.
 pub fn read_port(project_dir: &Path) -> Option<u16> {
@@ -58,6 +94,29 @@ mod tests {
         let dir = project.join(VENV_DIR).join(VENV_STATE_DIR);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(VENV_BINDING_FILE), json).unwrap();
+    }
+
+    #[test]
+    fn the_predicted_port_is_stable_in_range_and_indifferent_to_case_and_slashes() {
+        let port = predicted_port(Path::new(r"C:\Git\Repo\.lv-venv"));
+        assert_eq!(port, predicted_port(Path::new("c:/git/repo/.lv-venv")));
+        assert!((3400..4000).contains(&port));
+        assert_ne!(port, predicted_port(Path::new(r"C:\Git\Other\.lv-venv")));
+    }
+
+    #[test]
+    fn listening_ports_are_read_from_netstat_and_other_states_are_not() {
+        let netstat = "Active Connections
+
+  Proto  Local Address          Foreign Address        State
+  TCP    0.0.0.0:3582           0.0.0.0:0              LISTENING
+  TCP    127.0.0.1:3364         0.0.0.0:0              LISTENING
+  TCP    127.0.0.1:50000        127.0.0.1:3364         ESTABLISHED
+  TCP    [::]:49668             [::]:0                 LISTENING
+  UDP    0.0.0.0:5353           *:*
+";
+        assert_eq!(listening_ports(netstat), HashSet::from([3582, 3364, 49668]));
+        assert!(listening_ports("").is_empty());
     }
 
     #[test]

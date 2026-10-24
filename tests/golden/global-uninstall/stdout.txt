@@ -1,0 +1,5 @@
+removed lvpm_test_fixture 1.0 (1 files)
+
+refreshing palettes and menus
+  palettes  ok (<DUR>)
+  menus     ok (<DUR>)

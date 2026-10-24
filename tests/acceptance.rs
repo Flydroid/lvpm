@@ -86,7 +86,7 @@ fn after_scenario<'a>(
 ) -> LocalBoxFuture<'a, ()> {
     Box::pin(async move {
         if let Some(world) = world {
-            steps::venv::close_labview(world);
+            steps::venv::clean_up(world);
         }
     })
 }

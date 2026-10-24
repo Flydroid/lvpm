@@ -8,14 +8,50 @@ use std::io::{Cursor, Write};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, DateTime, ZipWriter};
 
-/// Where a fixture's payload file is installed (`<application>` is a scratch
-/// prefix under `--prefix`).
-const PAYLOAD_DIR: &str = "vi.lib/lvpm_fixture";
+/// Where a text fixture's payload file is installed (`<application>` is a
+/// scratch prefix under `--prefix`).
+const TEXT_PAYLOAD_DIR: &str = "vi.lib/lvpm_fixture";
+/// The file name of a real VI payload inside its directory.
+const VI_PAYLOAD_FILE: &str = "payload.vi";
+/// Where the venv fixture's VI is installed.
+const VENV_VI_PAYLOAD_DIR: &str = "vi.lib/lvpm_vi_fixture";
+/// The only folder the LabVIEW-installation fixture may write to, below the
+/// installation's directory.
+pub const GLOBAL_PAYLOAD_DIR: &str = "vi.lib/_lvpm_test_fixture";
+/// A real VI to relink: the relink VI itself, saved under another name, so it
+/// never collides with the copy lvpm runs.
+const REAL_VI: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/src/lv-src/relink-package.vi"
+));
+/// A real PostInstall hook: reads the `Package Name` attribute of its `Variant`
+/// control and writes it to `lvpm-test-hook-marker.txt` in LabVIEW's temp dir.
+const REAL_HOOK: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/hooks/PostInstall.vi"
+));
 /// The archive member lvpm extracts for a declared PostInstall hook.
 const HOOK_MEMBER: &str = "PostInstall.vi";
 /// Stands in for a real script VI; lvpm never opens it under `--prefix`.
 const HOOK_PLACEHOLDER: &[u8] = b"placeholder for a PostInstall script VI\n";
 const ZIP_ENTRY_MODE: u32 = 0o644;
+
+/// What a package installs.
+pub enum Payload {
+    /// One text file, `vi.lib/lvpm_fixture/<name>.txt`.
+    Text,
+    /// One real VI, `<dir>/payload.vi`.
+    Vi {
+        dir: &'static str,
+        bytes: &'static [u8],
+    },
+}
+
+/// A PostInstall script VI: the path the spec declares, and the file shipped.
+pub struct HookVi {
+    pub declared: &'static str,
+    pub bytes: &'static [u8],
+}
 
 pub struct FixturePackage {
     pub name: &'static str,
@@ -25,8 +61,9 @@ pub struct FixturePackage {
     pub requires: &'static [(&'static str, &'static str)],
     /// Minimum LabVIEW, e.g. `20.0`.
     pub lv_min: &'static str,
+    pub payload: Payload,
     /// The PostInstall script VI the spec declares, if any.
-    pub post_install_hook: Option<&'static str>,
+    pub post_install_hook: Option<HookVi>,
 }
 
 /// alpha 1.0 and 2.0, beta 1.0 requiring alpha >= 1.0, and hooked 1.0
@@ -38,6 +75,7 @@ pub const PACKAGES: &[FixturePackage] = &[
         display_name: "Alpha",
         requires: &[],
         lv_min: "20.0",
+        payload: Payload::Text,
         post_install_hook: None,
     },
     FixturePackage {
@@ -46,6 +84,7 @@ pub const PACKAGES: &[FixturePackage] = &[
         display_name: "Alpha",
         requires: &[],
         lv_min: "20.0",
+        payload: Payload::Text,
         post_install_hook: None,
     },
     FixturePackage {
@@ -54,6 +93,7 @@ pub const PACKAGES: &[FixturePackage] = &[
         display_name: "Beta",
         requires: &[("alpha", "1.0")],
         lv_min: "20.0",
+        payload: Payload::Text,
         post_install_hook: None,
     },
     FixturePackage {
@@ -62,7 +102,46 @@ pub const PACKAGES: &[FixturePackage] = &[
         display_name: "Hooked",
         requires: &[],
         lv_min: "20.0",
-        post_install_hook: Some(HOOK_MEMBER),
+        payload: Payload::Text,
+        post_install_hook: Some(HookVi {
+            declared: HOOK_MEMBER,
+            bytes: HOOK_PLACEHOLDER,
+        }),
+    },
+];
+
+/// Packages with real VIs. They are not in any feed: a scenario puts one in
+/// the sandbox's local package folder, so no recording of a search sees them.
+pub const VI_PACKAGES: &[FixturePackage] = &[
+    // Installed into a venv, where `relink` really relinks its VI.
+    FixturePackage {
+        name: "lvpm_vi_fixture",
+        version: "1.0",
+        display_name: "LVPM VI Fixture",
+        requires: &[],
+        lv_min: "20.0",
+        payload: Payload::Vi {
+            dir: VENV_VI_PAYLOAD_DIR,
+            bytes: REAL_VI,
+        },
+        post_install_hook: None,
+    },
+    // Installed into the LabVIEW installation: a VI to relink under
+    // `vi.lib/_lvpm_test_fixture`, and a hook that leaves a marker.
+    FixturePackage {
+        name: "lvpm_test_fixture",
+        version: "1.0",
+        display_name: "LVPM Test Fixture",
+        requires: &[],
+        lv_min: "20.0",
+        payload: Payload::Vi {
+            dir: GLOBAL_PAYLOAD_DIR,
+            bytes: REAL_VI,
+        },
+        post_install_hook: Some(HookVi {
+            declared: HOOK_MEMBER,
+            bytes: REAL_HOOK,
+        }),
     },
 ];
 
@@ -71,8 +150,14 @@ impl FixturePackage {
     pub fn find(name: &str, version: &str) -> &'static FixturePackage {
         PACKAGES
             .iter()
+            .chain(VI_PACKAGES)
             .find(|package| package.name == name && package.version == version)
-            .unwrap_or_else(|| panic!("the fixture table has no {name} {version}"))
+            .unwrap_or_else(|| panic!("the fixture tables have no {name} {version}"))
+    }
+
+    /// The package with real VIs of this name, if there is one.
+    pub fn find_vi_package(name: &str) -> Option<&'static FixturePackage> {
+        VI_PACKAGES.iter().find(|package| package.name == name)
     }
 
     /// The id a package directory lists it under, e.g. `alpha-1.0`.
@@ -94,8 +179,19 @@ impl FixturePackage {
         parts.join(",")
     }
 
-    fn payload_path(&self) -> String {
-        format!("{PAYLOAD_DIR}/{}.txt", self.name)
+    /// The payload's path below `<application>`, as the spec lists it.
+    pub fn payload_path(&self) -> String {
+        match &self.payload {
+            Payload::Text => format!("{TEXT_PAYLOAD_DIR}/{}.txt", self.name),
+            Payload::Vi { dir, .. } => format!("{dir}/{VI_PAYLOAD_FILE}"),
+        }
+    }
+
+    fn payload_bytes(&self) -> Vec<u8> {
+        match &self.payload {
+            Payload::Text => format!("{} {}\n", self.name, self.version).into_bytes(),
+            Payload::Vi { bytes, .. } => bytes.to_vec(),
+        }
     }
 
     fn spec_text(&self) -> String {
@@ -113,8 +209,11 @@ impl FixturePackage {
             "[Platform]\nExclusive_LabVIEW_Version=\"LabVIEW>={}\"\n\n",
             self.lv_min
         ));
-        if let Some(hook) = self.post_install_hook {
-            spec.push_str(&format!("[Script VIs]\nPostInstall=\"{hook}\"\n\n"));
+        if let Some(hook) = &self.post_install_hook {
+            spec.push_str(&format!(
+                "[Script VIs]\nPostInstall=\"{}\"\n\n",
+                hook.declared
+            ));
         }
         spec.push_str(&format!(
             "[Files]\nNum File Groups=\"1\"\n\n[File Group 0]\nTarget Dir=\"<application>\"\n\
@@ -140,10 +239,10 @@ impl FixturePackage {
         add("spec", self.spec_text().as_bytes());
         add(
             &format!("File Group 0/{}", self.payload_path()),
-            format!("{} {}\n", self.name, self.version).as_bytes(),
+            &self.payload_bytes(),
         );
-        if self.post_install_hook.is_some() {
-            add(HOOK_MEMBER, HOOK_PLACEHOLDER);
+        if let Some(hook) = &self.post_install_hook {
+            add(HOOK_MEMBER, hook.bytes);
         }
         writer.finish().expect("finish zip in memory").into_inner()
     }
@@ -167,6 +266,66 @@ mod tests {
                 (entry.name().to_string(), entry.last_modified())
             })
             .collect()
+    }
+
+    fn member_bytes(vip: &[u8], name: &str) -> Vec<u8> {
+        let mut archive = ZipArchive::new(Cursor::new(vip)).expect("a valid zip");
+        let mut bytes = Vec::new();
+        archive
+            .by_name(name)
+            .unwrap_or_else(|_| panic!("no member {name}"))
+            .read_to_end(&mut bytes)
+            .unwrap();
+        bytes
+    }
+
+    #[test]
+    fn the_real_vis_are_labview_files() {
+        for vi in [REAL_VI, REAL_HOOK] {
+            assert_eq!(&vi[..4], b"RSRC", "not a LabVIEW resource file");
+        }
+    }
+
+    #[test]
+    fn the_vi_packages_are_not_in_the_feed_table_and_build_the_same_every_time() {
+        for pkg in VI_PACKAGES {
+            assert!(PACKAGES.iter().all(|feed| feed.name != pkg.name));
+            assert_eq!(pkg.build_vip(), pkg.build_vip(), "{} differs", pkg.id());
+        }
+    }
+
+    #[test]
+    fn the_venv_fixture_ships_the_real_vi_and_no_hook() {
+        let vip = package("lvpm_vi_fixture", "1.0").build_vip();
+        let payload = member_bytes(&vip, "File Group 0/vi.lib/lvpm_vi_fixture/payload.vi");
+        assert!(payload == REAL_VI, "the payload is not the real VI");
+        let names: Vec<String> = members(&vip).into_iter().map(|(name, _)| name).collect();
+        assert!(!names.contains(&"PostInstall.vi".to_string()), "{names:?}");
+    }
+
+    #[test]
+    fn the_installation_fixture_writes_only_below_its_own_folder_and_ships_the_real_hook() {
+        let fixture = package("lvpm_test_fixture", "1.0");
+        assert!(
+            fixture
+                .payload_path()
+                .starts_with("vi.lib/_lvpm_test_fixture/"),
+            "{}",
+            fixture.payload_path()
+        );
+        let vip = fixture.build_vip();
+        assert!(
+            member_bytes(&vip, "PostInstall.vi") == REAL_HOOK,
+            "the hook is not the real hook VI"
+        );
+        let spec = String::from_utf8(member_bytes(&vip, "spec")).unwrap();
+        assert!(spec.contains("Num Files=1"), "{spec}");
+        assert!(spec.contains("PostInstall=\"PostInstall.vi\""), "{spec}");
+        assert_eq!(
+            spec.matches("File ").count(),
+            spec.matches("File Group").count() + spec.matches("File 0=").count(),
+            "only one payload file is declared: {spec}"
+        );
     }
 
     #[test]

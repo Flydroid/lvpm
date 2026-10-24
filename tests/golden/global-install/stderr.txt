@@ -1,0 +1,5 @@
+target: LabVIEW 2026 (64-bit)  v<LV_VERSION>  (<LABVIEW>)
+loading indexes...
+  downloading feed http://download.ni.com/evaluation/labview/lvtn/vipm/index.vipr (first run) ... 0.0 MB in <DUR>
+  downloading feed http://www.jkisoft.com/packages/jkisoft.ogpd (first run) ... 0.0 MB in <DUR>
+  5 package versions known

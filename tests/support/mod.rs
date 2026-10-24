@@ -4,6 +4,7 @@
 
 pub mod feed;
 pub mod fixtures;
+pub mod global;
 pub mod golden;
 pub mod normalise;
 pub mod process;

@@ -1,0 +1,15 @@
+
+resolved 1 package:
+  lvpm_vi_fixture 1.0
+
++ lvpm_vi_fixture 1.0 ... 2 files
+
+done. 1 files written.
+
+relinking 1 folder(s) with <TEMP>\lvpm-relink-package-0.2.1.vi
+  lvpm_vi_fixture
+      <SANDBOX>\work\.lv-venv\lvpm_vi_fixture\1\vi.lib\lvpm_vi_fixture ... <DUR>
+        saved nothing
+
+next: `lvpm launch` starts LabVIEW on this venv — a LabVIEW already open on it
+      has to be restarted to see what was just installed

@@ -1,0 +1,19 @@
+
+resolved 1 package:
+  lvpm_test_fixture 1.0
+
++ lvpm_test_fixture 1.0 ... 1 files
+
+done. 1 files written.
+
+relinking 1 folder(s) with <TEMP>\lvpm-relink-package-0.2.1.vi
+  lvpm_test_fixture
+      <LABVIEW>\vi.lib\_lvpm_test_fixture ... <DUR>
+        saved nothing
+
+running 1 post-install hook(s)
+  lvpm_test_fixture ... ok (<DUR>)
+
+refreshing palettes and menus
+  palettes  ok (<DUR>)
+  menus     ok (<DUR>)

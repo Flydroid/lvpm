@@ -1,0 +1,5 @@
+
+relinking 1 folder(s) with <TEMP>\lvpm-relink-package-0.2.1.vi
+  lvpm_test_fixture
+      <LABVIEW>\vi.lib\_lvpm_test_fixture ... <DUR>
+        saved nothing

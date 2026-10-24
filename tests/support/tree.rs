@@ -15,6 +15,18 @@ const MAX_ENTRIES: usize = 10_000;
 
 /// The listing of `root`, with paths relative to `base` and `/` separators.
 pub fn list_files(root: &Path, base: &Path, normalise: impl Fn(&str) -> String) -> String {
+    list(root, base, |path, shown| {
+        format!("{shown} {}", content_hash(path, &normalise))
+    })
+}
+
+/// The same listing without hashes, for files LabVIEW rewrites on every save
+/// (a relinked VI), whose bytes differ from run to run.
+pub fn list_names(root: &Path, base: &Path) -> String {
+    list(root, base, |_, shown| shown.to_string())
+}
+
+fn list(root: &Path, base: &Path, file_line: impl Fn(&Path, &str) -> String) -> String {
     if !root.exists() {
         return ABSENT.to_string();
     }
@@ -31,7 +43,7 @@ pub fn list_files(root: &Path, base: &Path, normalise: impl Fn(&str) -> String) 
             lines.push(format!("{shown}/"));
             pending.extend(children(&path));
         } else {
-            lines.push(format!("{shown} {}", content_hash(&path, &normalise)));
+            lines.push(file_line(&path, &shown));
         }
     }
     lines.sort();
@@ -103,6 +115,19 @@ mod tests {
                 sha(b"z")
             )
         );
+    }
+
+    #[test]
+    fn names_only_lists_the_same_paths_without_hashes() {
+        let base = tempfile::tempdir().unwrap();
+        let root = base.path().join("dest");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("sub").join("payload.vi"), [0xff, 0x00]).unwrap();
+        assert_eq!(
+            list_names(&root, base.path()),
+            "dest/\ndest/sub/\ndest/sub/payload.vi\n"
+        );
+        assert_eq!(list_names(&base.path().join("gone"), base.path()), ABSENT);
     }
 
     #[test]

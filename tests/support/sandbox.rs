@@ -8,15 +8,17 @@
 
 use super::feed::{Feed, PROJECT_FEED_DIR};
 use super::fixtures::FixturePackage;
+use super::global;
 use super::golden::Output;
 use super::normalise::{Anchors, normalise};
 use super::process::{self, PORT_CLOSE_DEADLINE};
 use super::project::{MANIFEST_FILE, ProjectManifest};
 use super::tree;
 use super::venv::{self, LabviewInstall, VENV_DIR};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 use tempfile::TempDir;
 
@@ -67,12 +69,48 @@ const INHERITED_ENV_VARS: &[&str] = &[
 const PROXY_ENV_VARS: &[&str] = &["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"];
 const NO_PROXY_ENV_VARS: &[&str] = &["NO_PROXY", "no_proxy"];
 
+/// The ports something other than this test run is listening on, read once.
+/// A venv's VI Server port follows from its path, so a sandbox is made at a
+/// path whose port is free; otherwise `venv status` would report a LabVIEW
+/// that is not there and `launch` would refuse to start one.
+static FOREIGN_LISTENERS: LazyLock<HashSet<u16>> = LazyLock::new(|| {
+    Command::new("netstat")
+        .arg("-an")
+        .output()
+        .map(|out| venv::listening_ports(&String::from_utf8_lossy(&out.stdout)))
+        .unwrap_or_default()
+});
+/// A sandbox directory whose venv port is none of those: any one path has a
+/// small chance of colliding, so this is a handful of tries at most.
+const MAX_DIR_ATTEMPTS: usize = 1_000;
+
+fn create_dir_avoiding(taken: &HashSet<u16>) -> TempDir {
+    for _ in 0..MAX_DIR_ATTEMPTS {
+        let dir = tempfile::Builder::new()
+            .prefix(TEMP_DIR_PREFIX)
+            .tempdir()
+            .expect("create the sandbox directory");
+        let port = venv::predicted_port(&dir.path().join(WORK_DIR).join(VENV_DIR));
+        if !taken.contains(&port) {
+            return dir;
+        }
+    }
+    panic!("no sandbox path in {MAX_DIR_ATTEMPTS} tries has a free venv port");
+}
+
 /// What the sandbox has learned from running `lvpm`, kept because it is gone
 /// from disk by the time the output is normalised (`venv remove`).
 #[derive(Debug, Default)]
 struct Learned {
     venv_port: Option<u16>,
     labview: Option<LabviewInstall>,
+    /// The LabVIEW installation's own VI Server port.
+    labview_port: Option<u16>,
+    /// Set once the scenario has checked the installation is free of the
+    /// fixture, which is what allows it to be touched and cleaned up.
+    global_fixture_armed: bool,
+    /// Whether `%ProgramData%/lvpm` existed before the scenario started.
+    store_existed: bool,
 }
 
 #[derive(Debug)]
@@ -84,10 +122,7 @@ pub struct Sandbox {
 
 impl Sandbox {
     pub fn new() -> Sandbox {
-        let dir = tempfile::Builder::new()
-            .prefix(TEMP_DIR_PREFIX)
-            .tempdir()
-            .expect("create the sandbox directory");
+        let dir = create_dir_avoiding(&FOREIGN_LISTENERS);
         let sandbox = Sandbox {
             dir,
             feed: None,
@@ -184,6 +219,16 @@ impl Sandbox {
         std::fs::write(folder.join(alpha.file_name()), alpha.build_vip()).expect("write alpha");
     }
 
+    /// Put a package in the folder lvpm reads local packages from, so that
+    /// `install <name>` finds it without any feed listing it.
+    pub fn put_local_package(&self, package: &FixturePackage) {
+        let path = self
+            .root()
+            .join(LOCAL_PACKAGES_DIR)
+            .join(package.file_name());
+        std::fs::write(path, package.build_vip()).expect("write the local package");
+    }
+
     /// Run `lvpm` as a scenario's setup, which must succeed.
     pub fn setup_lvpm(&self, args: &[&str]) {
         let output = self.run_lvpm(args, None);
@@ -244,19 +289,24 @@ impl Sandbox {
         let listing = self.run_lvpm(&["targets"], None);
         let install = venv::find_labview(&listing.stdout, LABVIEW_YEAR)
             .unwrap_or_else(|| panic!("LabVIEW {LABVIEW_YEAR} is not installed: {listing:?}"));
-        self.learned.lock().expect("learned facts").labview = Some(install);
+        self.learned().labview = Some(install);
     }
 
     fn learn_venv_port(&self) {
         if let Some(port) = venv::read_port(&self.work_dir()) {
-            self.learned.lock().expect("learned facts").venv_port = Some(port);
+            let predicted = venv::predicted_port(&self.venv_dir());
+            assert_eq!(
+                port, predicted,
+                "lvpm gave the venv another port than `predicted_port`"
+            );
+            self.learned().venv_port = Some(port);
         }
     }
 
     /// Stop whatever the sandbox started that is still running (a LabVIEW on
     /// its venv), and say whether the venv's VI Server port is now quiet.
     pub fn close_venv_labview(&self) -> bool {
-        let Some(port) = self.learned.lock().expect("learned facts").venv_port else {
+        let Some(port) = self.learned().venv_port else {
             return true;
         };
         process::stop_processes_in(&self.venv_dir());
@@ -267,7 +317,8 @@ impl Sandbox {
     /// replaced.
     pub fn normalised_text(&self, text: &str) -> String {
         let origin = self.feed.as_ref().map(Feed::origin);
-        let learned = self.learned.lock().expect("learned facts");
+        let temp_dir = std::env::temp_dir();
+        let learned = self.learned();
         let mut anchors = Anchors::new(self.root());
         anchors.feed_origin = origin.as_deref();
         anchors.labview_dir = learned
@@ -279,6 +330,8 @@ impl Sandbox {
             .as_ref()
             .map(|install| install.version.as_str());
         anchors.venv_port = learned.venv_port;
+        anchors.labview_port = learned.labview_port;
+        anchors.temp_dir = Some(temp_dir.as_path());
         normalise(text, &anchors)
     }
 
@@ -292,23 +345,131 @@ impl Sandbox {
         }
     }
 
-    /// The files under `relative` (to the working directory), normalised, as
-    /// recorded in a recording's `tree.txt`.
+    /// The names of the files under `relative` (to the working directory), for
+    /// files LabVIEW rewrites on every save, which cannot be hashed.
+    pub fn list_file_names(&self, relative: &str) -> String {
+        let work = self.work_dir();
+        tree::list_names(&work.join(relative), &work)
+    }
+
+    /// The files under `relative` (to the working directory), each with the
+    /// SHA-256 of its normalised content, as recorded in `tree.txt`.
     pub fn list_files(&self, relative: &str) -> String {
         let work = self.work_dir();
         tree::list_files(&work.join(relative), &work, |text| {
             self.normalised_text(text)
         })
     }
+
+    /// Make sure the LabVIEW installation is free of the fixture package and
+    /// that its VI Server is answering, then allow the scenario to install the
+    /// fixture into it. Refuses (panics) otherwise: nothing that was not put
+    /// there by this scenario may ever be removed, and a LabVIEW is never
+    /// started or restarted on the user's behalf.
+    pub fn require_clean_labview_installation(&self) {
+        let labview = self.detected_labview();
+        let program_data = global::program_data();
+        let existing = global::leftovers(&labview.dir, &program_data, &global::marker_path());
+        assert!(
+            existing.is_empty(),
+            "refusing to touch the LabVIEW installation: {existing:?} already exist"
+        );
+        let ini = std::fs::read_to_string(labview.dir.join("LabVIEW.ini")).unwrap_or_else(|e| {
+            panic!("reading the LabVIEW.ini of {}: {e}", labview.dir.display())
+        });
+        let port = global::vi_server_port(&ini);
+        assert!(
+            global::vi_server_enabled(&ini) && process::port_is_listening(port),
+            "LabVIEW {LABVIEW_YEAR} is not answering VI Server on port {port}: start it yourself, \
+             this scenario never starts or restarts the user's LabVIEW"
+        );
+        let mut learned = self.learned();
+        learned.labview_port = Some(port);
+        learned.store_existed = global::store_dir(&program_data).exists();
+        learned.global_fixture_armed = true;
+    }
+
+    fn detected_labview(&self) -> LabviewInstall {
+        let detected = self.learned().labview.clone();
+        // The lock is released before this can panic, so a refusal does not
+        // poison what `Drop` needs to clean up with.
+        detected.unwrap_or_else(|| panic!("detect LabVIEW {LABVIEW_YEAR} first"))
+    }
+
+    /// What has been learned so far. A scenario that panicked while holding
+    /// the lock must still be cleaned up after, so a poisoned lock is used as is.
+    fn learned(&self) -> MutexGuard<'_, Learned> {
+        self.learned.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// What the fixture's hook wrote to the marker file, if it has run since
+    /// the marker was last removed.
+    pub fn hook_marker(&self) -> Option<String> {
+        global::read_marker(&global::marker_path())
+    }
+
+    pub fn remove_hook_marker(&self) {
+        std::fs::remove_file(global::marker_path()).ok();
+    }
+
+    /// What of the fixture package is still on the LabVIEW installation or in
+    /// lvpm's store.
+    pub fn fixture_leftovers(&self) -> Vec<PathBuf> {
+        let labview = self.detected_labview();
+        global::leftovers(
+            &labview.dir,
+            &global::program_data(),
+            &global::marker_path(),
+        )
+    }
+
+    /// The fixture's payload on the installation.
+    pub fn fixture_payload(&self) -> PathBuf {
+        global::fixture_dir(&self.detected_labview().dir).join("payload.vi")
+    }
+
+    /// Put the installation back as the scenario found it: uninstall the
+    /// fixture through lvpm if lvpm still has it, delete whatever is left of
+    /// it, and report anything that could not be removed.
+    pub fn restore_labview_installation(&self) -> Result<(), String> {
+        let (armed, store_existed) = {
+            let learned = self.learned();
+            (learned.global_fixture_armed, learned.store_existed)
+        };
+        if !armed {
+            return Ok(());
+        }
+        let labview = self.detected_labview();
+        let program_data = global::program_data();
+        if !global::manifests(&program_data).is_empty() {
+            let uninstall = [
+                "uninstall",
+                global::FIXTURE_NAME,
+                "--labview-version",
+                LABVIEW_YEAR,
+            ];
+            self.run_lvpm(&uninstall, None);
+        }
+        global::remove_leftovers(&labview.dir, &program_data, &global::marker_path())?;
+        if !store_existed {
+            global::remove_empty_dirs(&global::store_dir(&program_data));
+        }
+        self.learned().global_fixture_armed = false;
+        match self.fixture_leftovers().as_slice() {
+            [] => Ok(()),
+            left => Err(format!("still present: {left:?}")),
+        }
+    }
 }
 
 impl Drop for Sandbox {
-    /// A scenario that failed half way must not leave a LabVIEW behind.
+    /// A scenario that failed half way must not leave a LabVIEW or the
+    /// fixture package behind.
     fn drop(&mut self) {
-        let venv_was_made = self
-            .learned
-            .lock()
-            .is_ok_and(|learned| learned.venv_port.is_some());
+        if let Err(why) = self.restore_labview_installation() {
+            eprintln!("could not remove the fixture from the LabVIEW installation: {why}");
+        }
+        let venv_was_made = self.learned().venv_port.is_some();
         if venv_was_made {
             process::stop_processes_in(&self.venv_dir());
         }
@@ -465,21 +626,53 @@ mod tests {
     #[test]
     fn a_learned_venv_port_anchors_normalised_text_after_the_venv_is_gone() {
         let sandbox = sandbox_with_feed();
+        let port = venv::predicted_port(&sandbox.venv_dir());
         let state = sandbox.venv_dir().join(".lvpm");
         std::fs::create_dir_all(&state).unwrap();
-        std::fs::write(state.join("venv.json"), r#"{"port":3412}"#).unwrap();
+        std::fs::write(state.join("venv.json"), format!(r#"{{"port":{port}}}"#)).unwrap();
         sandbox.learn_venv_port();
         std::fs::remove_dir_all(sandbox.venv_dir()).unwrap();
         assert_eq!(
-            sandbox.normalised_text("VI Server port 3412"),
+            sandbox.normalised_text(&format!("VI Server port {port}")),
             "VI Server port <PORT>"
         );
     }
 
     #[test]
+    #[should_panic(expected = "another port than `predicted_port`")]
+    fn a_venv_port_that_is_not_the_predicted_one_is_an_error() {
+        let sandbox = sandbox_with_feed();
+        let wrong = venv::predicted_port(&sandbox.venv_dir()) + 1;
+        let state = sandbox.venv_dir().join(".lvpm");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(state.join("venv.json"), format!(r#"{{"port":{wrong}}}"#)).unwrap();
+        sandbox.learn_venv_port();
+    }
+
+    #[test]
+    fn a_sandbox_is_made_at_a_path_whose_venv_port_is_free() {
+        // Everything but ports 3500..3510 is taken: the path found must hash there.
+        let taken: HashSet<u16> = (3400..4000)
+            .filter(|port| !(3500..3510).contains(port))
+            .collect();
+        let dir = create_dir_avoiding(&taken);
+        let port = venv::predicted_port(&dir.path().join(WORK_DIR).join(VENV_DIR));
+        assert!((3500..3510).contains(&port), "{port}");
+    }
+
+    #[test]
+    fn a_sandbox_never_gets_a_venv_port_something_else_listens_on() {
+        for _ in 0..5 {
+            let sandbox = sandbox_with_feed();
+            let port = venv::predicted_port(&sandbox.venv_dir());
+            assert!(!FOREIGN_LISTENERS.contains(&port), "{port}");
+        }
+    }
+
+    #[test]
     fn a_detected_labview_anchors_its_dir_and_build_number() {
         let sandbox = sandbox_with_feed();
-        sandbox.learned.lock().unwrap().labview = Some(LabviewInstall {
+        sandbox.learned().labview = Some(LabviewInstall {
             dir: PathBuf::from(r"C:\LV\2026"),
             version: "26.3".into(),
         });
@@ -556,6 +749,46 @@ mod tests {
             listing_of(),
             "manifests must not carry clock or path noise"
         );
+    }
+
+    #[test]
+    fn a_local_package_installs_by_name_without_any_feed_listing_it() {
+        let sandbox = sandbox_with_feed();
+        sandbox.put_local_package(FixturePackage::find("lvpm_vi_fixture", "1.0"));
+        sandbox.setup_lvpm(&["install", "lvpm_vi_fixture", "--prefix", DEST_DIR]);
+        let payload = sandbox
+            .work_dir()
+            .join(DEST_DIR)
+            .join("LabVIEW/vi.lib/lvpm_vi_fixture/payload.vi");
+        assert!(std::fs::metadata(payload).unwrap().len() > 10_000);
+        let names = sandbox.list_file_names(DEST_DIR);
+        assert!(
+            names.contains("payload.vi\n"),
+            "names only, no hash: {names}"
+        );
+    }
+
+    #[test]
+    fn the_installation_fixture_extracts_its_real_hook_when_installed_into_a_scratch_tree() {
+        let sandbox = sandbox_with_feed();
+        sandbox.put_local_package(FixturePackage::find("lvpm_test_fixture", "1.0"));
+        sandbox.setup_lvpm(&["install", "lvpm_test_fixture", "--prefix", DEST_DIR]);
+        let hook = sandbox
+            .work_dir()
+            .join(DEST_DIR)
+            .join(".lvpm/hooks/lvpm_test_fixture-PostInstall.vi");
+        assert_eq!(&std::fs::read(hook).unwrap()[..4], b"RSRC");
+    }
+
+    #[test]
+    #[should_panic(expected = "detect LabVIEW 2026 first")]
+    fn the_installation_cannot_be_touched_before_labview_is_detected() {
+        sandbox_with_feed().require_clean_labview_installation();
+    }
+
+    #[test]
+    fn restoring_an_installation_the_scenario_never_touched_does_nothing() {
+        assert_eq!(sandbox_with_feed().restore_labview_installation(), Ok(()));
     }
 
     #[test]

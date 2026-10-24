@@ -16,6 +16,8 @@ pub const FEED_TOKEN: &str = "<FEED>";
 pub const LABVIEW_TOKEN: &str = "<LABVIEW>";
 pub const LABVIEW_VERSION_TOKEN: &str = "<LV_VERSION>";
 pub const PORT_TOKEN: &str = "<PORT>";
+pub const LABVIEW_PORT_TOKEN: &str = "<LV_PORT>";
+pub const TEMP_TOKEN: &str = "<TEMP>";
 pub const EPOCH_TOKEN: &str = "<EPOCH>";
 pub const TIMESTAMP_TOKEN: &str = "<TS>";
 pub const DURATION_TOKEN: &str = "<DUR>";
@@ -46,6 +48,10 @@ pub struct Anchors<'a> {
     pub labview_version: Option<&'a str>,
     /// The VI Server port a venv in this sandbox got, derived from its path.
     pub venv_port: Option<u16>,
+    /// The VI Server port of the LabVIEW installation itself.
+    pub labview_port: Option<u16>,
+    /// The machine's temp directory, where lvpm puts the relink VI.
+    pub temp_dir: Option<&'a Path>,
 }
 
 impl<'a> Anchors<'a> {
@@ -57,6 +63,8 @@ impl<'a> Anchors<'a> {
             labview_dir: None,
             labview_version: None,
             venv_port: None,
+            labview_port: None,
+            temp_dir: None,
         }
     }
 }
@@ -66,6 +74,9 @@ pub fn normalise(text: &str, anchors: &Anchors) -> String {
     if let Some(dir) = anchors.labview_dir {
         text = replace_path(&text, dir, LABVIEW_TOKEN);
     }
+    if let Some(dir) = anchors.temp_dir {
+        text = replace_path(&text, dir, TEMP_TOKEN);
+    }
     if let Some(version) = anchors.labview_version {
         let pattern = format!(r"\bv{}\b", regex::escape(version));
         text = replace(&text, &pattern, &format!("v{LABVIEW_VERSION_TOKEN}"));
@@ -74,15 +85,24 @@ pub fn normalise(text: &str, anchors: &Anchors) -> String {
         let pattern = format!("{}{BOUNDARY}", regex::escape(origin));
         text = replace(&text, &pattern, &format!("{FEED_TOKEN}${{next}}"));
     }
-    if let Some(port) = anchors.venv_port {
-        // `port 3412` in a message, `"port": 3412` in venv.json.
-        let pattern = format!(r#"\b(port"?:? ){port}\b"#);
-        text = replace(&text, &pattern, &format!("${{1}}{PORT_TOKEN}"));
+    for (port, token) in [
+        (anchors.venv_port, PORT_TOKEN),
+        (anchors.labview_port, LABVIEW_PORT_TOKEN),
+    ] {
+        if let Some(port) = port {
+            text = replace_port(&text, port, token);
+        }
     }
     let text = replace_regex(&text, &EPOCH_SECONDS, &format!("${{1}}{EPOCH_TOKEN}"));
     // Timestamps before durations: a `12:00:00` must not be read as `00s`.
     let text = replace_regex(&text, &TIMESTAMP, TIMESTAMP_TOKEN);
     replace_regex(&text, &DURATION, DURATION_TOKEN)
+}
+
+/// `port 3412` in a message, `"port": 3412` in venv.json.
+fn replace_port(text: &str, port: u16, token: &str) -> String {
+    let pattern = format!(r#"\b(port"?:? ){port}\b"#);
+    replace(text, &pattern, &format!("${{1}}{token}"))
 }
 
 /// Replace every match of `pattern`, which is built from escaped anchors.
@@ -98,7 +118,9 @@ fn replace_regex(text: &str, regex: &Regex, with: &str) -> String {
 /// `path` in both separator spellings, the drive letter in either case, and
 /// not followed by more of a name.
 fn replace_path(text: &str, path: &Path, token: &str) -> String {
+    // `temp_dir()` ends in a separator; the text names the path without it.
     let spelled = path.to_string_lossy();
+    let spelled = spelled.trim_end_matches(['/', '\\']);
     let backslashed = spelled.replace('/', "\\");
     let slashed = spelled.replace('\\', "/");
     let pattern = format!(
@@ -134,6 +156,8 @@ mod tests {
         anchors.labview_dir = Some(Path::new(LABVIEW_DIR));
         anchors.labview_version = Some("26.3");
         anchors.venv_port = Some(3412);
+        anchors.labview_port = Some(3364);
+        anchors.temp_dir = Some(Path::new(r"C:\Users\me\AppData\Local\Temp"));
         normalise(text, &anchors)
     }
 
@@ -283,6 +307,49 @@ mod tests {
         for untouched in ["v26.30", "v26.2", "version 26.3", "alpha 26.3"] {
             assert_eq!(sandbox(untouched), untouched);
         }
+    }
+
+    #[test]
+    fn the_labview_installations_own_port_gets_its_own_token() {
+        assert_eq!(
+            sandbox("VI Server answering on port 3364 (was already running)"),
+            "VI Server answering on port <LV_PORT> (was already running)"
+        );
+        assert_eq!(sandbox("port 3365"), "port 3365");
+    }
+
+    #[test]
+    fn an_anchor_path_with_a_trailing_separator_still_matches_the_path_without_one() {
+        let mut anchors = Anchors::new(Path::new("/w"));
+        anchors.temp_dir = Some(Path::new(r"C:\Users\me\AppData\Local\Temp\"));
+        assert_eq!(
+            normalise(
+                r"at C:\Users\me\AppData\Local\Temp\lvpm-relink.vi",
+                &anchors
+            ),
+            r"at <TEMP>\lvpm-relink.vi"
+        );
+    }
+
+    #[test]
+    fn the_machines_temp_dir_is_replaced_and_the_sandbox_inside_it_comes_first() {
+        assert_eq!(
+            sandbox(r"with C:\Users\me\AppData\Local\Temp\lvpm-relink-package-0.2.1.vi"),
+            r"with <TEMP>\lvpm-relink-package-0.2.1.vi"
+        );
+        let mut anchors = Anchors::new(Path::new(
+            r"C:\Users\me\AppData\Local\Temp\lvpm-acceptance-x",
+        ));
+        anchors.temp_dir = Some(Path::new(r"C:\Users\me\AppData\Local\Temp"));
+        assert_eq!(
+            normalise(
+                r"C:\Users\me\AppData\Local\Temp\lvpm-acceptance-x\work and C:\Users\me\AppData\Local\Temp\other",
+                &anchors
+            ),
+            r"<SANDBOX>\work and <TEMP>\other"
+        );
+        let sibling = r"C:\Users\me\AppData\Local\Temp2\x";
+        assert_eq!(sandbox(sibling), sibling);
     }
 
     #[test]

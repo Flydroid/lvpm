@@ -2,13 +2,14 @@ Feature: The current CLI's output is recorded so later changes can be compared a
 
   # How the rows below are read:
   #  - "files" names a directory, relative to the project, whose files are
-  #    listed and recorded as tree.txt after the command ("-" lists nothing).
+  #    listed and recorded as tree.txt after the command ("-" lists nothing;
+  #    "names:<dir>" lists names without hashes, for VIs LabVIEW rewrites).
   #  - Every setup runs its own lvpm commands in a fresh sandbox.
-  #  - @labview rows need LVPM_TEST_LABVIEW=1 and a real LabVIEW. They work
-  #    inside a venv in the sandbox, never on the LabVIEW installation:
-  #    `run-hooks`, `refresh` and `start` name no destination here, so they
-  #    record lvpm's refusal; passing --labview-version would act on the
-  #    installation, which no row below does.
+  #  - @labview scenarios need LVPM_TEST_LABVIEW=1 and a real LabVIEW. They
+  #    work inside a venv in the sandbox, except the one scenario that says
+  #    it uses the LabVIEW installation. In the venv rows, `run-hooks`,
+  #    `refresh` and `start` name no destination, so they record lvpm's
+  #    refusal.
 
   Background:
     Given fixture packages "alpha" 1.0 and 2.0, "beta" 1.0 requiring "alpha" >= 1.0, and "hooked" 1.0 declaring a PostInstall hook
@@ -79,10 +80,42 @@ Feature: The current CLI's output is recorded so later changes can be compared a
       | a venv for LabVIEW 2026                       | lvpm install beta                         | .lv-venv  | venv-install-beta |
       | a venv with beta installed                    | lvpm relink --all                         | .lv-venv  | relink-all        |
       | a venv with hooked installed                  | lvpm run-hooks hooked                     | -         | run-hooks         |
+      | a venv for LabVIEW 2026 and the VI fixture package | lvpm install lvpm_vi_fixture         | names:.lv-venv | venv-install-vi-fixture |
+      | a venv with lvpm_vi_fixture installed         | lvpm relink --all                         | names:.lv-venv | relink-all-vi-fixture |
       | a venv for LabVIEW 2026                       | lvpm refresh                              | -         | refresh           |
       | a venv for LabVIEW 2026                       | lvpm start                                | -         | start             |
       | a venv for LabVIEW 2026                       | lvpm launch                               | -         | launch            |
       | a venv for LabVIEW 2026                       | lvpm venv remove --yes                    | .lv-venv  | venv-remove-yes   |
+
+  # The one scenario that acts on the LabVIEW installation, with the fixture
+  # package `lvpm_test_fixture`: a VI under vi.lib/_lvpm_test_fixture and a real
+  # PostInstall hook that writes the package name to a marker file in LabVIEW's
+  # temp directory. It refuses to start when the fixture, its manifest or the
+  # marker already exists or the user's LabVIEW is not answering VI Server, it
+  # never starts or restarts a LabVIEW, and an after-hook removes the fixture
+  # even when a step fails.
+  @labview
+  Scenario: a package is installed into, run against and removed from the LabVIEW installation
+    Given no project
+    And a LabVIEW 2026 installation
+    And the lvpm test fixture in the local package folder
+    And the LabVIEW installation is free of the lvpm test fixture
+    When I run "lvpm install lvpm_test_fixture --labview-version 2026"
+    Then stdout, stderr and the exit code equal the recording "global-install"
+    And the lvpm test fixture is installed on the LabVIEW installation
+    And the PostInstall hook ran for "lvpm_test_fixture"
+    When I run "lvpm run-hooks lvpm_test_fixture --labview-version 2026"
+    Then stdout, stderr and the exit code equal the recording "global-run-hooks"
+    And the PostInstall hook ran for "lvpm_test_fixture"
+    When I run "lvpm refresh --labview-version 2026"
+    Then stdout, stderr and the exit code equal the recording "global-refresh"
+    When I run "lvpm start --labview-version 2026"
+    Then stdout, stderr and the exit code equal the recording "global-start"
+    When I run "lvpm relink lvpm_test_fixture --labview-version 2026"
+    Then stdout, stderr and the exit code equal the recording "global-relink"
+    When I run "lvpm uninstall lvpm_test_fixture --labview-version 2026"
+    Then stdout, stderr and the exit code equal the recording "global-uninstall"
+    And the lvpm test fixture is gone from the LabVIEW installation
 
   @labview
   Scenario Outline: the venv remove prompt is recorded
