@@ -10,7 +10,7 @@
 //! Package keys are lowercased, as everywhere else in lvpm.
 
 use crate::cancel::CancelToken;
-use crate::index::{Entry, Index};
+use crate::index::{Entry, Floor, Index};
 use crate::project::Constraint;
 use crate::version::Version;
 use pubgrub::{
@@ -133,8 +133,15 @@ fn range_of(constraint: &Constraint) -> Ranges<Version> {
 }
 
 /// The versions a package's requirement admits: its floor, or any version.
-fn floor_range(floor: Option<&Version>) -> Ranges<Version> {
-    floor.map_or_else(Ranges::full, |version| Ranges::higher_than(version.clone()))
+fn floor_range(floor: Option<&Floor>) -> Ranges<Version> {
+    floor.map_or_else(Ranges::full, |floor| {
+        let version = floor.version.clone();
+        if floor.exclusive {
+            Ranges::strictly_higher_than(version)
+        } else {
+            Ranges::higher_than(version)
+        }
+    })
 }
 
 // ---- the provider over an index ----
@@ -340,7 +347,7 @@ impl DependencyProvider for Provider<'_> {
                 .map(|requirement| {
                     (
                         Pkg::Named(self::key(&requirement.name)),
-                        floor_range(requirement.min.as_ref()),
+                        floor_range(requirement.floor().as_ref()),
                     )
                 })
                 .collect(),
@@ -575,6 +582,7 @@ mod tests {
                 .map(|(name, floor)| Requirement {
                     name: name.to_string(),
                     min: Some(Version::parse(floor)),
+                    min_exclusive: false,
                 })
                 .collect(),
             lv_min: None,
@@ -641,6 +649,38 @@ mod tests {
         assert!(!floor.contains(&Version::parse("1.1.9")));
         assert!(range_of(&Constraint::Any).contains(&Version::parse("0.0.1")));
         assert_eq!(floor_range(None), Ranges::full());
+    }
+
+    #[test]
+    fn a_strict_floor_excludes_its_own_version() {
+        let strict = Floor {
+            version: Version::parse("1.2"),
+            exclusive: true,
+        };
+        let range = floor_range(Some(&strict));
+        assert!(!range.contains(&Version::parse("1.2")));
+        assert!(!range.contains(&Version::parse("1.2.0")));
+        assert!(range.contains(&Version::parse("1.2.1")));
+        assert!(
+            floor_range(Some(&Floor::at_least(Version::parse("1.2")))).contains(&strict.version)
+        );
+    }
+
+    #[test]
+    fn a_requirement_that_needs_something_above_the_only_listed_version_conflicts() {
+        let mut a = entry("a", "1.0", &[]);
+        a.requires = vec![Requirement {
+            name: "c".into(),
+            min: Some(Version::parse("1.0")),
+            min_exclusive: true,
+        }];
+        let index = Index {
+            entries: vec![a, entry("c", "1.0", &[])],
+        };
+        assert!(matches!(
+            run(&[("a", "*")], &index, &[], None),
+            Err(SolveError::Conflict(_))
+        ));
     }
 
     #[test]

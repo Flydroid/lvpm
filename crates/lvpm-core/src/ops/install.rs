@@ -14,7 +14,7 @@ use super::session::InstallSession;
 use super::uninstall::uninstall_one;
 use crate::cache::sha256_hex;
 use crate::events::{Event, HookKind, PackageFolders, PackageRef, Phase, PlannedFile, SkipReason};
-use crate::index::{Entry, Index};
+use crate::index::{Entry, Floor, Index};
 use crate::project::{self, Constraint, Project};
 use crate::spec::Spec;
 use crate::target::Roots;
@@ -84,15 +84,15 @@ impl Applied {
 enum Req {
     /// This version and no other — a root written as an exact pin.
     Exact(Version),
-    /// The newest version not below the floor; no floor means the newest.
-    Floor(Option<Version>),
+    /// The newest version the floor admits; no floor means the newest.
+    Floor(Option<Floor>),
 }
 
 impl From<&Constraint> for Req {
     fn from(c: &Constraint) -> Req {
         match c {
             Constraint::Exact(v) => Req::Exact(v.clone()),
-            Constraint::AtLeast(v) => Req::Floor(Some(v.clone())),
+            Constraint::AtLeast(v) => Req::Floor(Some(Floor::at_least(v.clone()))),
             Constraint::Any => Req::Floor(None),
         }
     }
@@ -102,7 +102,10 @@ impl std::fmt::Display for Req {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Req::Exact(v) => write!(f, "@{}", v.raw),
-            Req::Floor(Some(v)) => write!(f, " >={}", v.raw),
+            Req::Floor(Some(floor)) => {
+                let op = if floor.exclusive { ">" } else { ">=" };
+                write!(f, " {op}{}", floor.version.raw)
+            }
             Req::Floor(None) => Ok(()),
         }
     }
@@ -236,11 +239,11 @@ pub fn resolve_greedy(
         // version the index resolves, and the install loop decides whether
         // that is a no-op, an upgrade, or a refused downgrade.
         if !is_root
-            && let Req::Floor(min) = &req
+            && let Req::Floor(floor) = &req
             && let Ok(have) = install::read_manifest(store, &n)
-            && min
+            && floor
                 .as_ref()
-                .is_none_or(|m| &Version::parse(&have.version) >= m)
+                .is_none_or(|f| f.admits(&Version::parse(&have.version)))
         {
             env.sink.emit(Event::DependencySatisfied {
                 name: have.name,
@@ -254,7 +257,7 @@ pub fn resolve_greedy(
                 .into_iter()
                 .find(|e| &e.version == v)
                 .cloned(),
-            Req::Floor(min) => idx.best(&n, min.as_ref(), lv_gate).cloned(),
+            Req::Floor(floor) => idx.best(&n, floor.as_ref(), lv_gate).cloned(),
         };
 
         let Some(entry) = entry else {
@@ -269,7 +272,7 @@ pub fn resolve_greedy(
         };
         if !no_deps {
             for r in &entry.requires {
-                queue.push((r.name.clone(), Req::Floor(r.min.clone()), false));
+                queue.push((r.name.clone(), Req::Floor(r.floor()), false));
             }
         }
         entries.push(entry);

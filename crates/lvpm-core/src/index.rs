@@ -34,6 +34,43 @@ pub(crate) const SOURCES: &[(&str, &str)] = &[
 pub struct Requirement {
     pub name: String,
     pub min: Option<Version>,
+    /// `min` is a strict bound (`>`), not an inclusive one (`>=`, `=`).
+    /// Meaningless without `min`.
+    pub min_exclusive: bool,
+}
+
+impl Requirement {
+    pub fn floor(&self) -> Option<Floor> {
+        self.min.clone().map(|version| Floor {
+            version,
+            exclusive: self.min_exclusive,
+        })
+    }
+}
+
+/// A lower bound on a package's version: at least `version`, or strictly
+/// above it.
+#[derive(Debug, Clone)]
+pub struct Floor {
+    pub version: Version,
+    pub exclusive: bool,
+}
+
+impl Floor {
+    pub fn at_least(version: Version) -> Self {
+        Floor {
+            version,
+            exclusive: false,
+        }
+    }
+
+    pub fn admits(&self, candidate: &Version) -> bool {
+        if self.exclusive {
+            candidate > &self.version
+        } else {
+            candidate >= &self.version
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -58,9 +95,11 @@ impl From<&Entry> for LocalEntry {
                 .requires
                 .iter()
                 .map(|requirement| {
+                    // A strict floor is stored as `>1.2`, an inclusive one as `1.2`.
+                    let strict = if requirement.min_exclusive { ">" } else { "" };
                     (
                         requirement.name.clone(),
-                        requirement.min.as_ref().map(ToString::to_string),
+                        requirement.min.as_ref().map(|min| format!("{strict}{min}")),
                     )
                 })
                 .collect(),
@@ -79,9 +118,13 @@ fn local_entry(entry: LocalEntry, url: String, md5: Option<String>) -> Entry {
         requires: entry
             .requires
             .into_iter()
-            .map(|(name, min)| Requirement {
-                name,
-                min: min.map(|version| Version::parse(&version)),
+            .map(|(name, min)| {
+                let min_exclusive = min.as_deref().is_some_and(|m| m.starts_with('>'));
+                Requirement {
+                    name,
+                    min: min.map(|m| Version::parse(m.trim_start_matches('>'))),
+                    min_exclusive,
+                }
             })
             .collect(),
         lv_min: entry.lv_min,
@@ -105,9 +148,9 @@ impl Index {
     }
 
     /// Best entry for a requirement, honouring an optional LabVIEW gate.
-    pub fn best(&self, name: &str, min: Option<&Version>, lv: Option<f64>) -> Option<&Entry> {
+    pub fn best(&self, name: &str, floor: Option<&Floor>, lv: Option<f64>) -> Option<&Entry> {
         self.versions_of(name).into_iter().find(|e| {
-            min.is_none_or(|m| &e.version >= m)
+            floor.is_none_or(|f| f.admits(&e.version))
                 && lv.is_none_or(|lv| e.lv_min.is_none_or(|need| lv + 1e-9 >= need))
         })
     }
@@ -526,12 +569,14 @@ fn parse_requires(s: &str) -> Vec<Requirement> {
                     return Some(Requirement {
                         name: n.trim().to_string(),
                         min,
+                        min_exclusive: op == ">",
                     });
                 }
             }
             Some(Requirement {
                 name: part.to_string(),
                 min: None,
+                min_exclusive: false,
             })
         })
         .collect()
@@ -939,5 +984,68 @@ Package.Display Name=A Thing
         let idx = Index { entries: out };
         assert!(idx.best("abcdef_thing", None, Some(20.0)).is_some());
         assert!(idx.best("abcdef_thing", None, Some(10.0)).is_none());
+    }
+
+    fn entry_requiring(requires: &str) -> Entry {
+        Entry {
+            name: "dependent".into(),
+            version: Version::parse("1.0"),
+            url: String::new(),
+            md5: None,
+            display_name: None,
+            requires: parse_requires(requires),
+            lv_min: None,
+        }
+    }
+
+    fn listed(versions: &[&str]) -> Index {
+        Index {
+            entries: versions
+                .iter()
+                .map(|v| Entry {
+                    name: "foo".into(),
+                    version: Version::parse(v),
+                    ..entry_requiring("")
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_strict_requirement_excludes_its_own_version() {
+        let requirements = parse_requires("a>1.2,b>=1.2,c=1.2,d==1.2,e<1.2,f");
+        let strict: Vec<bool> = requirements.iter().map(|r| r.min_exclusive).collect();
+        assert_eq!(strict, [true, false, false, false, false, false]);
+
+        let index = listed(&["1.1", "1.2"]);
+        let above = requirements[0].floor();
+        let at_least = requirements[1].floor();
+        assert!(index.best("foo", above.as_ref(), None).is_none());
+        assert_eq!(
+            index
+                .best("foo", at_least.as_ref(), None)
+                .map(|e| e.version.raw.as_str()),
+            Some("1.2")
+        );
+        let newer = listed(&["1.2", "1.2.1"]);
+        assert_eq!(
+            newer
+                .best("foo", above.as_ref(), None)
+                .map(|e| e.version.raw.as_str()),
+            Some("1.2.1")
+        );
+    }
+
+    #[test]
+    fn a_strict_requirement_stays_strict_through_the_cache() {
+        let entry = entry_requiring("a>1.2,b>=1.2");
+        let stored = LocalEntry::from(&entry);
+        assert_eq!(stored.requires[0].1.as_deref(), Some(">1.2"));
+        assert_eq!(stored.requires[1].1.as_deref(), Some("1.2"));
+
+        let restored = local_entry(stored, String::new(), None);
+        assert!(restored.requires[0].min_exclusive);
+        assert_eq!(restored.requires[0].min.as_ref().unwrap().raw, "1.2");
+        assert!(!restored.requires[1].min_exclusive);
     }
 }

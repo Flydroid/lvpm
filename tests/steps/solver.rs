@@ -95,6 +95,7 @@ fn entries_described(text: &str) -> Vec<Entry> {
                 described.requires.push(Requirement {
                     name: dep.as_str().to_string(),
                     min: Some(Version::parse(floor.as_str())),
+                    min_exclusive: false,
                 });
             }
             if let Some(year) = clause.name("year") {
