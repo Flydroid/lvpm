@@ -15,6 +15,9 @@
 //! oglib_error = ">=6.0.1"           # the newest version satisfying the floor
 //! jki_lib_caraya = "*"              # the newest version
 //!
+//! [dev-dependencies]                # test and CI tooling, same syntax
+//! jki_lib_unit_test = "*"
+//!
 //! [nipm.dependencies]               # NI Package Manager packages, reported only
 //! ni-daqmx-labview-support = "26.0"
 //! ```
@@ -82,6 +85,8 @@ pub struct Project {
     pub default_sources: bool,
     /// `[dependencies]`, in file order.
     pub dependencies: Vec<(String, Constraint)>,
+    /// `[dev-dependencies]`, in file order: the same syntax as `[dependencies]`.
+    pub dev_dependencies: Vec<(String, Constraint)>,
     /// `[nipm.dependencies]` names, for reporting only.
     pub nipm: Vec<String>,
 }
@@ -95,6 +100,7 @@ impl Default for Project {
             sources: Vec::new(),
             default_sources: true,
             dependencies: Vec::new(),
+            dev_dependencies: Vec::new(),
             nipm: Vec::new(),
         }
     }
@@ -121,6 +127,8 @@ struct File {
     project: ProjectTable,
     sources: toml::Table,
     dependencies: toml::Table,
+    #[serde(rename = "dev-dependencies")]
+    dev_dependencies: toml::Table,
     nipm: NipmTable,
 }
 
@@ -173,18 +181,27 @@ pub(crate) fn parse(text: &str) -> Result<Project> {
             }
         }
     }
-    for (name, value) in f.dependencies {
-        let toml::Value::String(s) = value else {
-            bail!(
-                "[dependencies] {name}: expected a quoted version, got {}",
-                value.type_str()
-            );
-        };
-        let c = Constraint::parse(&s).with_context(|| format!("[dependencies] {name}"))?;
-        p.dependencies.push((name, c));
-    }
+    p.dependencies = parse_dependencies("dependencies", f.dependencies)?;
+    p.dev_dependencies = parse_dependencies("dev-dependencies", f.dev_dependencies)?;
     p.nipm = f.nipm.dependencies.into_iter().map(|(k, _)| k).collect();
     Ok(p)
+}
+
+/// One dependency table, in file order. `table` names it in error messages.
+fn parse_dependencies(table: &str, entries: toml::Table) -> Result<Vec<(String, Constraint)>> {
+    entries
+        .into_iter()
+        .map(|(name, value)| {
+            let toml::Value::String(s) = value else {
+                bail!(
+                    "[{table}] {name}: expected a quoted version, got {}",
+                    value.type_str()
+                );
+            };
+            let c = Constraint::parse(&s).with_context(|| format!("[{table}] {name}"))?;
+            Ok((name, c))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -312,5 +329,37 @@ ni-daqmx-labview-support = "26.0.0.49434-0+f282"
             folder.resolved_sources().is_err(),
             "a path on disk is not a source"
         );
+    }
+
+    #[test]
+    fn dev_dependencies_use_the_dependency_syntax() {
+        let p = parse(
+            "[dependencies]\nalpha = \"1.0\"\n\n[dev-dependencies]\ncaraya = \"*\"\nunit = \">=2.1\"\n",
+        )
+        .unwrap();
+        assert_eq!(p.dependencies.len(), 1, "the tables stay apart");
+        assert_eq!(
+            p.dev_dependencies,
+            vec![
+                ("caraya".to_string(), Constraint::Any),
+                (
+                    "unit".to_string(),
+                    Constraint::AtLeast(Version::parse("2.1"))
+                )
+            ]
+        );
+        let none = parse("[project]\nname = \"x\"\n").unwrap();
+        assert!(none.dev_dependencies.is_empty());
+    }
+
+    #[test]
+    fn an_unsupported_dev_dependency_constraint_names_the_entry_and_the_constraint() {
+        let why = format!(
+            "{:#}",
+            parse("[dev-dependencies]\ncaraya = \"~1.0\"\n").unwrap_err()
+        );
+        assert!(why.contains("[dev-dependencies] caraya"), "{why}");
+        assert!(why.contains("~1.0"), "{why}");
+        assert!(parse("[dev-dependencies]\ncaraya = 1.0\n").is_err());
     }
 }
