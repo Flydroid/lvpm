@@ -22,7 +22,7 @@ async fn labview_project(world: &mut CliWorld) {
 
 /// `venv create` binds the venv to the installation and starts no LabVIEW.
 #[given("a venv for LabVIEW 2026")]
-async fn venv_for_labview(world: &mut CliWorld) {
+pub(super) async fn venv_for_labview(world: &mut CliWorld) {
     labview_project(world).await;
     world
         .sandbox

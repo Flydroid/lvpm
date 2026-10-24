@@ -62,6 +62,10 @@ pub struct Manifest {
     /// rather than the LabVIEW tree, as `Target Dir (N files)`.
     #[serde(default)]
     pub skipped_groups: Vec<String>,
+    /// The SHA-256 of the archive these files came from, as lowercase hex.
+    /// Manifests written before it was recorded have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive_sha256: Option<String>,
 }
 
 /// What an install *would* do. Produced first so `--dry-run` and the real run
@@ -223,13 +227,15 @@ pub(crate) fn addon_info(name: &str, target: &LvTarget) -> String {
     .expect("a fixed shape of strings serialises")
 }
 
-/// Execute a plan and record the manifest.
+/// Execute a plan and record the manifest, with the SHA-256 of the archive
+/// the files were read from.
 pub fn apply(
     roots: &Roots,
     spec: &Spec,
     zip: &mut Archive,
     plan: &Plan,
     pre_install_vi: Option<&Path>,
+    archive_sha256: &str,
 ) -> Result<Manifest> {
     let mut written = Vec::new();
 
@@ -320,6 +326,7 @@ pub fn apply(
             .iter()
             .map(|(dir, n)| format!("{dir} ({n} files)"))
             .collect(),
+        archive_sha256: Some(archive_sha256.to_string()),
     };
 
     write_manifest(roots, &manifest)?;
@@ -444,6 +451,16 @@ mod tests {
         assert!(safe_relative("/etc/passwd").is_err());
         assert!(safe_relative(r"C:\windows\system32\evil.dll").is_err());
         assert!(safe_relative("vi.lib/addons/ok.llb").is_ok());
+    }
+
+    #[test]
+    fn a_manifest_from_before_the_archive_hash_reads_without_one_and_is_written_back_as_it_was() {
+        let legacy = r#"{"name":"a","version":"1","display_name":null,"installed_at":0,
+            "target":"t","files":[],"skipped_hooks":[]}"#;
+        let manifest: Manifest = serde_json::from_str(legacy).unwrap();
+        assert_eq!(manifest.archive_sha256, None);
+        let written = serde_json::to_string(&manifest).unwrap();
+        assert!(!written.contains("archive_sha256"), "{written}");
     }
 
     #[test]

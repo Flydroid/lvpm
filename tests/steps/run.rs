@@ -28,7 +28,7 @@ async fn run_and_answer(world: &mut CliWorld, command_line: String, answer: Stri
 /// `-` lists nothing; `names:<dir>` lists names only, for directories holding
 /// files LabVIEW rewrites on every save; any other value lists names and hashes.
 #[when(expr = "I list the files under {string}")]
-async fn list_files(world: &mut CliWorld, directory: String) {
+pub(super) async fn list_files(world: &mut CliWorld, directory: String) {
     let listing = match directory.as_str() {
         NO_FILES => return,
         named => match named.strip_prefix(NAMES_ONLY_PREFIX) {

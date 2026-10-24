@@ -47,6 +47,9 @@ impl Renderer {
 
     pub fn render(&mut self, event: &Event) {
         match event {
+            // Progress for a front end that draws it; the CLI's own lines
+            // come from the events that carry what happened.
+            Event::PhaseStarted { .. } => {}
             Event::FeedCheckStart { .. }
             | Event::FeedChecked { .. }
             | Event::LocalPackageIgnored { .. } => index::render(self, event),
@@ -214,6 +217,39 @@ mod tests {
         let (out, err) = (Capture::default(), Capture::default());
         let renderer = Renderer::new(Box::new(out.clone()), Box::new(err.clone()));
         (renderer, out, err)
+    }
+
+    #[test]
+    fn a_phase_starting_draws_nothing_in_the_cli() {
+        let (mut renderer, out, err) = renderer();
+        renderer.begin(Stream::Out, "+ alpha 2.0 ... ");
+        renderer.render(&Event::PhaseStarted {
+            phase: lvpm_core::events::Phase::Unpack,
+        });
+        assert_eq!(out.text(), "+ alpha 2.0 ... ");
+        assert_eq!(err.text(), "");
+    }
+
+    #[test]
+    fn more_of_a_line_extends_the_open_one_and_ends_one_on_another_stream() {
+        let (mut renderer, out, err) = renderer();
+        renderer.begin(Stream::Out, "+ alpha 2.0 ... ");
+        renderer.append(Stream::Out, "[hook ok] ");
+        renderer.end(Stream::Out, "1 files");
+        assert_eq!(
+            out.text(),
+            "+ alpha 2.0 ... [hook ok] 1 files
+"
+        );
+        renderer.begin(Stream::Out, "waiting ... ");
+        renderer.append(Stream::Err, "note");
+        assert_eq!(
+            out.text(),
+            "+ alpha 2.0 ... [hook ok] 1 files
+waiting ... 
+"
+        );
+        assert_eq!(err.text(), "note");
     }
 
     #[test]

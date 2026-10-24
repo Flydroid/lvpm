@@ -8,6 +8,7 @@ pub mod install;
 pub mod query;
 pub mod refresh;
 pub mod relink;
+pub mod session;
 pub mod uninstall;
 
 pub use env::{Destination, DestinationFlags, OpEnv};

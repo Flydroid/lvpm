@@ -142,6 +142,10 @@ pub enum Event {
     /// The install is finished as far as the files go. On a dry run `files`
     /// would be written and nothing changed.
     InstallDone { files: usize, dry_run: bool },
+    /// A phase of the operation begins. Resolve begins once; Download and
+    /// Unpack begin once for each package; Relink, Hooks and Refresh begin
+    /// only when they run, and are otherwise reported by `PhaseSkipped`.
+    PhaseStarted { phase: Phase },
     /// A phase of the operation did not run. `skipped` counts what it left
     /// undone, in the phase's own unit: folders to relink, hooks to run, files
     /// that a palette refresh would show. Zero when there was nothing to do.
@@ -249,10 +253,17 @@ pub struct PackageFolders {
     pub folders: Vec<PathBuf>,
 }
 
-/// The phases an install goes through.
+/// The phases an install goes through, in order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Phase {
+    /// Loading the indexes and choosing what to install.
+    Resolve,
+    /// Getting a package's archive: from the cache, a folder or a feed.
+    Download,
+    /// Writing a package's files. Nothing past this point can be taken back by
+    /// cancelling.
+    Unpack,
     Relink,
     Hooks,
     Refresh,

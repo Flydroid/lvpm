@@ -36,6 +36,14 @@ static EPOCH_SECONDS: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"("(?:installed_at|created_at)":\s*)\d+"#).expect("epoch pattern is valid")
 });
 
+/// The hash of its archive that an install manifest records, which the
+/// recordings made before that field existed do not hold. It is the manifest's
+/// last field, so the comma before it goes with it, and the manifest then reads
+/// as it did without the field.
+static ARCHIVE_SHA256: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#",\s*"archive_sha256":\s*"[0-9a-f]{64}""#).expect("archive hash pattern is valid")
+});
+
 /// What is specific to one scenario's sandbox.
 pub struct Anchors<'a> {
     /// The directory every path in the output lives under.
@@ -93,6 +101,7 @@ pub fn normalise(text: &str, anchors: &Anchors) -> String {
             text = replace_port(&text, port, token);
         }
     }
+    let text = replace_regex(&text, &ARCHIVE_SHA256, "");
     let text = replace_regex(&text, &EPOCH_SECONDS, &format!("${{1}}{EPOCH_TOKEN}"));
     // Timestamps before durations: a `12:00:00` must not be read as `00s`.
     let text = replace_regex(&text, &TIMESTAMP, TIMESTAMP_TOKEN);
@@ -242,6 +251,19 @@ mod tests {
         );
         let other = r#"{"size": 1761312000}"#;
         assert_eq!(sandbox(other), other);
+    }
+
+    #[test]
+    fn an_install_manifests_archive_hash_is_left_out_with_its_comma() {
+        let hash = "ab".repeat(32);
+        let with = format!("{{\n  \"skipped_groups\": [],\n  \"archive_sha256\": \"{hash}\"\n}}");
+        assert_eq!(sandbox(&with), "{\n  \"skipped_groups\": []\n}");
+        for untouched in [
+            r#"{"a": [], "sha256": "ab"}"#,
+            r#"{"a": 1, "archive_sha256": "short"}"#,
+        ] {
+            assert_eq!(sandbox(untouched), untouched);
+        }
     }
 
     #[test]

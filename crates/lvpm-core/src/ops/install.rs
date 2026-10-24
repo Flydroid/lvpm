@@ -1,21 +1,31 @@
-//! Installing packages: resolve, fetch, unpack, then relink, run hooks and
-//! refresh the palettes.
+//! Installing packages, in three steps a caller can take apart.
+//!
+//! [`resolve_greedy`] turns what was asked for into an [`InstallPlan`];
+//! [`apply`] puts the plan's packages on disk, whoever wrote the plan; and
+//! [`finish`] does what waits for the last package: one relink pass, the
+//! PostInstall hooks and one palette refresh. The steps share an
+//! [`InstallSession`], and [`install`] runs them in that order.
 
 use super::env::{Destination, OpEnv};
-use super::hooks::{
-    HOOK_TIMEOUT_SECS, PostInstallHook, hook_action_info, run_hook_vi, run_post_install_hooks,
-};
+use super::hooks::{HOOK_TIMEOUT_SECS, PostInstallHook, hook_action_info, run_post_install_hooks};
 use super::refresh::refresh_palettes_and_menus;
 use super::relink::{RelinkOptions, run_relink};
+use super::session::InstallSession;
 use super::uninstall::uninstall_one;
+use crate::cache::sha256_hex;
 use crate::events::{Event, HookKind, PackageFolders, PackageRef, Phase, PlannedFile, SkipReason};
+use crate::index::{Entry, Index};
+use crate::project::{self, Constraint, Project};
+use crate::spec::Spec;
+use crate::target::Roots;
 use crate::version::Version;
-use crate::viserver::Connection;
-use crate::{cache, fetch, index, install, launch, project, relink, spec, viserver};
+use crate::{install, launch, relink, spec, viserver};
 use anyhow::{Result, bail, ensure};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+type Zip = zip::ZipArchive<std::io::Cursor<Vec<u8>>>;
 
 /// What an install is asked, without the flags a front end spells them as.
 #[derive(Debug, Clone, Default)]
@@ -40,6 +50,36 @@ pub struct InstallOptions {
     pub relink: RelinkOptions,
 }
 
+/// The packages to install, dependencies before dependents. [`apply`] takes
+/// the entries as they are, so a plan can come from anywhere: the greedy
+/// resolution here, or a front end that built one by hand.
+#[derive(Debug, Clone, Default)]
+pub struct InstallPlan {
+    pub entries: Vec<Entry>,
+}
+
+/// What [`apply`] did, as [`finish`] needs to know it.
+#[derive(Debug, Clone, Default)]
+pub struct Applied {
+    /// Files written; on a dry run, files that would be.
+    pub files: usize,
+    /// Files taken off disk by a removal run. An upgrade's removal of the old
+    /// version is not counted: its replacement is.
+    pub removed: usize,
+    pub dry_run: bool,
+}
+
+impl Applied {
+    /// What an uninstall hands [`finish`]: files gone, none written.
+    pub fn removals(files: usize) -> Applied {
+        Applied {
+            files: 0,
+            removed: files,
+            dry_run: false,
+        }
+    }
+}
+
 /// What one resolution step asks of the index.
 enum Req {
     /// This version and no other — a root written as an exact pin.
@@ -48,13 +88,12 @@ enum Req {
     Floor(Option<Version>),
 }
 
-impl From<&project::Constraint> for Req {
-    fn from(c: &project::Constraint) -> Req {
-        use project::Constraint::*;
+impl From<&Constraint> for Req {
+    fn from(c: &Constraint) -> Req {
         match c {
-            Exact(v) => Req::Exact(v.clone()),
-            AtLeast(v) => Req::Floor(Some(v.clone())),
-            Any => Req::Floor(None),
+            Constraint::Exact(v) => Req::Exact(v.clone()),
+            Constraint::AtLeast(v) => Req::Floor(Some(v.clone())),
+            Constraint::Any => Req::Floor(None),
         }
     }
 }
@@ -69,7 +108,7 @@ impl std::fmt::Display for Req {
     }
 }
 
-fn read_spec(zip: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>) -> Result<String> {
+fn read_spec(zip: &mut Zip) -> Result<String> {
     // Almost always literally "spec" at the archive root.
     let idx = (0..zip.len()).find(|i| {
         zip.by_index(*i)
@@ -94,58 +133,32 @@ pub fn install(
     manifest: Option<&Path>,
     opts: &InstallOptions,
 ) -> Result<()> {
-    let (dry_run, no_deps, no_relink) = (opts.dry_run, opts.no_deps, opts.no_relink);
-    let (allow_downgrade, relink_options) = (opts.allow_downgrade, &opts.relink);
-    // Headless (containers, CI): nothing opens the IDE, and whatever the job
-    // does next — compile, build, test — resolves the links as it loads, so
-    // the pass is off unless asked for. Skipping it saved ten minutes of a
-    // twelve-minute DQMH install; the mass compile after it found nothing
-    // wrong.
-    let headless_skip = env.headless && !opts.force_relink && !no_relink;
-    // Hooks likewise: the ones measured (DQMH's six) write a marker file and
-    // add a palette entry — IDE furniture. Skipping them means a headless
-    // install never starts LabVIEW at all. A package whose hook does real
-    // setup gets `--hooks`; the caveat is documented with the flag.
-    let hooks_off_headless = env.headless && !opts.run_hooks;
     let dest = env.destination()?;
-    // The store is one per destination; in a venv each package gets roots of
-    // its own inside the loop, because every package there is its own addon.
     let store = dest.store();
-    let venv = match &dest {
-        Destination::Venv(v) => Some(v.clone()),
+    let repo = match &dest {
+        Destination::Venv(v) => Some(v.repo.clone()),
         _ => None,
     };
-    let lv_gate = store.target.as_ref().map(|t| t.version);
-    // Hooks act on the LabVIEW installation; a venv is not one, and a headless
-    // machine has no one to see what they set up.
-    let hooks_on = venv.is_none() && !hooks_off_headless;
 
     // The project this install belongs to, if any: its `[sources]` count even
     // when a single package is named. Inside a project a bare `lvpm install`
     // means the manifest's dependencies — the way `npm install` does.
-    let found = env.manifest_for(manifest, venv.as_ref().map(|v| v.repo.as_path()))?;
-    let (wanted, from_manifest): (Vec<(String, project::Constraint)>, _) = match (package, &found) {
-        (Some(p), _) => {
-            let w = match p.split_once('@') {
-                Some((n, v)) => vec![(n.to_string(), project::Constraint::parse(v)?)],
-                None => vec![(p.to_string(), project::Constraint::Any)],
-            };
-            (w, None)
-        }
-        (None, Some((path, proj))) => (proj.dependencies.clone(), Some((path, proj))),
+    let found = env.manifest_for(manifest, repo.as_deref())?;
+    let wanted = match (package, &found) {
+        (Some(p), _) => vec![named(p)?],
+        (None, Some((_, proj))) => proj.dependencies.clone(),
         (None, None) => bail!("give a package name, or --manifest <FILE>"),
     };
     ensure!(!wanted.is_empty(), "the manifest lists no [dependencies]");
 
-    if let Some((path, proj)) = &from_manifest {
+    if let (None, Some((path, proj))) = (package, &found) {
         env.sink.emit(Event::ManifestInUse {
-            path: path.to_path_buf(),
+            path: path.clone(),
             name: proj.name.clone(),
             dependencies: wanted.len(),
             labview: proj.labview.clone(),
         });
     }
-
     env.sink.emit(match &store.target {
         Some(t) => Event::InstallTarget {
             labview: Some(t.label()),
@@ -157,26 +170,60 @@ pub fn install(
         },
     });
 
+    // Resolving is loading the indexes and choosing from them.
+    env.sink.emit(Event::PhaseStarted {
+        phase: Phase::Resolve,
+    });
     env.sink.emit(Event::IndexesLoading);
     let idx = env.load_index(found.as_ref())?;
     env.sink.emit(Event::IndexesLoaded {
         versions: idx.entries.len(),
     });
+    let plan = resolve_greedy(env, &store, &idx, &wanted, opts.no_deps)?;
 
-    // Depth-first over the dependency graph, from every root at once. No
-    // conflict resolution: the first resolution of a name wins, and a floor
-    // resolves to the newest version satisfying it. Roots are seeded in
-    // reverse so the plan comes out in the order they were written.
-    //
-    // A root asks for what its constraint says; a dependency carried by a
-    // package is always a floor.
+    if let (None, Some((_, Project { nipm, .. }))) = (package, &found)
+        && !nipm.is_empty()
+    {
+        env.sink.emit(Event::NipmNotInstalled { count: nipm.len() });
+    }
+
+    let mut session = InstallSession::new(dest);
+    let applied = apply(env, &mut session, &plan, opts)?;
+    finish(env, &mut session, &applied, opts)
+}
+
+/// `name` or `name@version`, as a root of the resolution.
+fn named(package: &str) -> Result<(String, Constraint)> {
+    Ok(match package.split_once('@') {
+        Some((n, v)) => (n.to_string(), Constraint::parse(v)?),
+        None => (package.to_string(), Constraint::Any),
+    })
+}
+
+/// Depth-first over the dependency graph, from every root at once. No
+/// conflict resolution: the first resolution of a name wins, and a floor
+/// resolves to the newest version satisfying it. Roots are seeded in reverse so
+/// the plan comes out in the order they were written.
+///
+/// A root asks for what its constraint says; a dependency carried by a
+/// package is always a floor. A dependency the installed version already
+/// satisfies stays as it is, and a root that nothing lists fails the whole
+/// resolution, with every such root named.
+pub fn resolve_greedy(
+    env: &OpEnv,
+    store: &Roots,
+    idx: &Index,
+    wanted: &[(String, Constraint)],
+    no_deps: bool,
+) -> Result<InstallPlan> {
+    let lv_gate = store.target.as_ref().map(|t| t.version);
     let mut queue: Vec<(String, Req, bool)> = wanted
         .iter()
         .rev()
         .map(|(n, c)| (n.clone(), Req::from(c), true))
         .collect();
     let mut done: HashSet<String> = HashSet::new();
-    let mut plan: Vec<index::Entry> = Vec::new();
+    let mut entries: Vec<Entry> = Vec::new();
     let mut unresolved: Vec<String> = Vec::new();
 
     while let Some((n, req, is_root)) = queue.pop() {
@@ -190,7 +237,7 @@ pub fn install(
         // that is a no-op, an upgrade, or a refused downgrade.
         if !is_root
             && let Req::Floor(min) = &req
-            && let Ok(have) = install::read_manifest(&store, &n)
+            && let Ok(have) = install::read_manifest(store, &n)
             && min
                 .as_ref()
                 .is_none_or(|m| &Version::parse(&have.version) >= m)
@@ -225,7 +272,7 @@ pub fn install(
                 queue.push((r.name.clone(), Req::Floor(r.min.clone()), false));
             }
         }
-        plan.push(entry);
+        entries.push(entry);
     }
 
     if !unresolved.is_empty() {
@@ -238,10 +285,10 @@ pub fn install(
         );
     }
 
-    plan.reverse(); // dependencies before dependents
+    entries.reverse(); // dependencies before dependents
 
     env.sink.emit(Event::Resolved {
-        packages: plan
+        packages: entries
             .iter()
             .map(|e| PackageRef {
                 name: e.name.clone(),
@@ -249,250 +296,424 @@ pub fn install(
             })
             .collect(),
     });
+    Ok(InstallPlan { entries })
+}
 
-    if let Some((_, proj)) = &from_manifest
-        && !proj.nipm.is_empty()
-    {
-        env.sink.emit(Event::NipmNotInstalled {
-            count: proj.nipm.len(),
-        });
+/// Which hooks this install runs. Hooks act on the LabVIEW installation; a
+/// venv is not one, and a headless machine has no one to see what they set up.
+#[derive(Debug, Clone, Copy)]
+struct HookPolicy {
+    /// Run the hooks.
+    on: bool,
+    /// They are off because LabVIEW runs headless here, which is worth saying.
+    off_headless: bool,
+}
+
+impl HookPolicy {
+    /// The ones measured (DQMH's six) write a marker file and add a palette
+    /// entry — IDE furniture. Skipping them headless means an install never
+    /// starts LabVIEW at all. A package whose hook does real setup gets
+    /// `--hooks`; the caveat is documented with the flag.
+    fn new(env: &OpEnv, session: &InstallSession, opts: &InstallOptions) -> HookPolicy {
+        let off_headless = env.headless && !opts.run_hooks;
+        HookPolicy {
+            on: session.venv().is_none() && !off_headless,
+            off_headless: off_headless && session.venv().is_none(),
+        }
     }
+}
 
-    let client = reqwest::blocking::Client::builder()
-        .user_agent(concat!("lvpm/", env!("CARGO_PKG_VERSION")))
-        .build()?;
-    let package_cache = cache::Cache::open(&env.config.cache)?;
-
-    let mut total_writes = 0usize;
+/// Put every package of the plan on disk, in order.
+///
+/// A package already installed is judged by version: the same one is left
+/// alone; an older one is upgraded, its recorded footprint removed first so
+/// files the new version no longer ships do not linger; a newer one is never
+/// silently downgraded. The archive of each is fetched just before it is
+/// unpacked.
+pub fn apply(
+    env: &OpEnv,
+    session: &mut InstallSession,
+    plan: &InstallPlan,
+    opts: &InstallOptions,
+) -> Result<Applied> {
+    let hooks = HookPolicy::new(env, session, opts);
+    let mut files = 0usize;
     // How many packages declared a hook this install did not run — decides
     // whether the headless note below is owed. Each package already said which.
     let mut hooks_unrun = 0usize;
-    // PostInstall hooks extracted during this run, executed only after the
-    // relink pass has made them runnable.
-    let mut hook_runs: Vec<PostInstallHook> = Vec::new();
-    // PreInstall hooks run inline instead, before their package's files are
-    // copied — that is the contract their PostInstall counterparts rely on
-    // (DQMH's pair passes a marker file between them).
-    let mut hook_conn: Option<Connection> = None;
-    // Per package, in install order: the folders its files landed in. Relinking
-    // happens after every package is on disk, so no package can be relinked
-    // against a dependency that is not there yet.
-    let mut relink_work: Vec<(String, Vec<PathBuf>)> = Vec::new();
-
-    for e in &plan {
-        // In a venv every package is an addon of its own; the store is shared.
-        let roots = match &venv {
-            Some(v) => v.roots_for_pkg(&e.name)?,
-            None => store.clone(),
-        };
-        // An installed package is judged by version. The same one is left
-        // alone; an older one is upgraded, its recorded footprint removed
-        // first so files the new version no longer ships do not linger; a
-        // newer one is never silently downgraded.
-        let installed = match install::is_installed(&roots, &e.name) {
-            true => Some(install::read_manifest(&roots, &e.name)?),
-            false => None,
-        };
-        if let Some(old) = &installed {
-            use std::cmp::Ordering::*;
-            let order = Version::parse(&old.version).cmp(&e.version);
-            match order {
-                Equal => {
-                    env.sink.emit(Event::PackageAlreadyInstalled {
-                        name: e.name.clone(),
-                        version: old.version.clone(),
-                    });
-                    continue;
-                }
-                Greater if !allow_downgrade => {
-                    env.sink.emit(Event::PackageNotDowngraded {
-                        name: e.name.clone(),
-                        installed: old.version.clone(),
-                        wanted: e.version.to_string(),
-                    });
-                    continue;
-                }
-                Greater | Less => {}
-            }
-            env.sink.emit(Event::PackageReplacing {
-                name: e.name.clone(),
-                installed: old.version.clone(),
-                wanted: e.version.to_string(),
-                upgrade: order == Less,
-                old_files: old.files.len(),
-                dry_run,
-            });
-            if !dry_run {
-                uninstall_one(env, &store, &e.name, &mut hook_conn)?;
-            }
-        }
-        env.sink.emit(Event::PackageStart {
-            name: e.name.clone(),
-            version: e.version.to_string(),
-            dry_run,
-        });
-
-        let bytes = fetch::package(&package_cache, &client, e)?;
-
-        let mut zip = install::open_archive(bytes)?;
-        let spec = spec::parse(&read_spec(&mut zip)?)?;
-        let p = install::plan(&roots, &spec, &mut zip)?;
-
-        total_writes += p.writes.len();
-
-        if dry_run {
-            env.sink.emit(Event::PackageDone {
-                files: p.writes.len(),
-                dry_run,
-            });
-            env.sink.emit(Event::PlannedWrites {
-                files: p
-                    .writes
-                    .iter()
-                    .map(|w| PlannedFile {
-                        path: w.dest.clone(),
-                        overwrites: w.overwrites,
-                    })
-                    .collect(),
-            });
-            relink_work.push((e.name.clone(), relink::folders_for_spec(&roots, &spec)?));
-        } else {
-            let pre = match spec
-                .script_vis
-                .iter()
-                .any(|(h, v)| h == "PreInstall" && !v.is_empty())
-            {
-                true => install::extract_hook(&roots, &e.name, &mut zip, "PreInstall.vi")?,
-                false => None,
-            };
-            if hooks_on && let (Some(vi), Some(t)) = (&pre, &roots.target) {
-                let planned: Vec<String> = p
-                    .writes
-                    .iter()
-                    .map(|w| w.dest.to_string_lossy().into_owned())
-                    .collect();
-                let info = hook_action_info(&e.name, e.display_name.as_deref(), t, &planned);
-                env.sink.emit(Event::HookStarting {
-                    package: e.name.clone(),
-                    hook: HookKind::PreInstall,
-                });
-                match run_hook_vi(env, &mut hook_conn, t, relink_options.timeout, vi, &info) {
-                    Ok(took) => env.sink.emit(Event::HookRan {
-                        package: e.name.clone(),
-                        hook: HookKind::PreInstall,
-                        took,
-                    }),
-                    Err(err) => env.sink.emit(Event::HookFailed {
-                        package: e.name.clone(),
-                        hook: HookKind::PreInstall,
-                        error: format!("{err:#}"),
-                    }),
-                }
-            }
-            let m = install::apply(&roots, &spec, &mut zip, &p, pre.as_deref())?;
-            env.sink.emit(Event::PackageDone {
-                files: m.files.len(),
-                dry_run,
-            });
-            relink_work.push((
-                e.name.clone(),
-                m.relink_folders.iter().map(PathBuf::from).collect(),
-            ));
-            if hooks_on && let Some(hook) = &m.post_install_vi {
-                hook_runs.push(PostInstallHook {
-                    package: e.name.clone(),
-                    vi: PathBuf::from(hook),
-                    files: m.files.clone(),
-                });
-            }
-            // The manifest assumes a global install runs its hooks; headless
-            // did not, and `lvpm list` should say so.
-            if hooks_off_headless && venv.is_none() {
-                for (h, v) in &spec.script_vis {
-                    install::mark_hook_skipped(&roots, &e.name, &format!("{h}={v}"))?;
-                }
-            }
-        }
-
-        if !p.kept.is_empty() {
-            env.sink.emit(Event::FilesKept {
-                count: p.kept.len(),
-            });
-        }
-        for (dir, n) in &p.skipped_groups {
-            env.sink.emit(Event::GroupSkipped {
-                target_dir: dir.clone(),
-                files: *n,
-            });
-        }
-        for miss in &p.missing_from_archive {
-            env.sink.emit(Event::MissingFromArchive {
-                entry: miss.clone(),
-            });
-        }
-        // Warn only about hooks this install owes and will not run. Globally,
-        // PreInstall has run, PostInstall runs after the relink pass, and the
-        // uninstall hooks are extracted for `lvpm uninstall` to run — nothing
-        // to say. In a venv, or headless, no hook runs at all, so every
-        // declared one is reported.
-        let skipped: Vec<String> = spec
-            .script_vis
-            .iter()
-            .filter(|(h, _)| {
-                !hooks_on || (h == "PostInstall" && !hook_runs.iter().any(|r| r.package == e.name))
-            })
-            .map(|(h, v)| format!("{h}={v}"))
-            .collect();
-        if !skipped.is_empty() {
-            env.sink.emit(Event::HooksNotRun { hooks: skipped });
-            hooks_unrun += 1;
+    for entry in &plan.entries {
+        if let Some(done) = install_one(env, session, entry, opts, hooks)? {
+            files += done.files;
+            hooks_unrun += usize::from(done.hooks_unrun);
         }
     }
-    if hooks_off_headless && venv.is_none() && hooks_unrun > 0 {
+    if hooks.off_headless && hooks_unrun > 0 {
         env.sink.emit(Event::PhaseSkipped {
             phase: Phase::Hooks,
             reason: SkipReason::Headless,
             skipped: hooks_unrun,
         });
     }
-
     env.sink.emit(Event::InstallDone {
-        files: total_writes,
-        dry_run,
+        files,
+        dry_run: opts.dry_run,
+    });
+    Ok(Applied {
+        files,
+        removed: 0,
+        dry_run: opts.dry_run,
+    })
+}
+
+/// What one package amounted to, when it was not left alone.
+struct Installed {
+    /// Files it would write; the total [`Applied`] reports.
+    files: usize,
+    /// It declared a hook this install did not run.
+    hooks_unrun: bool,
+}
+
+/// One package's archive, open for planning and unpacking.
+struct Unpacking<'e> {
+    entry: &'e Entry,
+    roots: Roots,
+    spec: Spec,
+    plan: install::Plan,
+    zip: Zip,
+    archive_sha256: String,
+}
+
+fn install_one(
+    env: &OpEnv,
+    session: &mut InstallSession,
+    entry: &Entry,
+    opts: &InstallOptions,
+    hooks: HookPolicy,
+) -> Result<Option<Installed>> {
+    let roots = session.roots_for(&entry.name)?;
+    if !settle_installed(env, session, &roots, entry, opts)? {
+        return Ok(None);
+    }
+    env.sink.emit(Event::PackageStart {
+        name: entry.name.clone(),
+        version: entry.version.to_string(),
+        dry_run: opts.dry_run,
     });
 
-    if let Some(c) = hook_conn.take() {
-        c.close();
+    env.sink.emit(Event::PhaseStarted {
+        phase: Phase::Download,
+    });
+    let bytes = session.fetch(env, entry)?;
+    let archive_sha256 = sha256_hex(&bytes);
+    let mut zip = install::open_archive(bytes)?;
+    let spec = spec::parse(&read_spec(&mut zip)?)?;
+    let plan = install::plan(&roots, &spec, &mut zip)?;
+    let mut pkg = Unpacking {
+        entry,
+        roots,
+        spec,
+        plan,
+        zip,
+        archive_sha256,
+    };
+
+    let files = pkg.plan.writes.len();
+    match opts.dry_run {
+        true => preview(env, session, &pkg)?,
+        false => unpack(env, session, &mut pkg, opts, hooks)?,
+    }
+    report_leftovers(env, &pkg.plan);
+    let hooks_unrun = report_unrun_hooks(env, session, &pkg, hooks);
+    Ok(Some(Installed { files, hooks_unrun }))
+}
+
+/// Decide what an installed version of `entry` means. False: leave the package
+/// alone. True: install it, the old version's files already gone (or, on a dry
+/// run, said to go).
+fn settle_installed(
+    env: &OpEnv,
+    session: &mut InstallSession,
+    roots: &Roots,
+    entry: &Entry,
+    opts: &InstallOptions,
+) -> Result<bool> {
+    if !install::is_installed(roots, &entry.name) {
+        return Ok(true);
+    }
+    use std::cmp::Ordering::*;
+    let old = install::read_manifest(roots, &entry.name)?;
+    let order = Version::parse(&old.version).cmp(&entry.version);
+    match order {
+        Equal => {
+            env.sink.emit(Event::PackageAlreadyInstalled {
+                name: entry.name.clone(),
+                version: old.version,
+            });
+            return Ok(false);
+        }
+        Greater if !opts.allow_downgrade => {
+            env.sink.emit(Event::PackageNotDowngraded {
+                name: entry.name.clone(),
+                installed: old.version,
+                wanted: entry.version.to_string(),
+            });
+            return Ok(false);
+        }
+        Greater | Less => {}
+    }
+    env.sink.emit(Event::PackageReplacing {
+        name: entry.name.clone(),
+        installed: old.version.clone(),
+        wanted: entry.version.to_string(),
+        upgrade: order == Less,
+        old_files: old.files.len(),
+        dry_run: opts.dry_run,
+    });
+    if !opts.dry_run {
+        let store = session.store().clone();
+        uninstall_one(env, &store, &entry.name, &mut session.hook_connection)?;
+    }
+    Ok(true)
+}
+
+/// A dry run: say what would be written, and note the folders a relink pass
+/// would walk.
+fn preview(env: &OpEnv, session: &mut InstallSession, pkg: &Unpacking) -> Result<()> {
+    env.sink.emit(Event::PackageDone {
+        files: pkg.plan.writes.len(),
+        dry_run: true,
+    });
+    env.sink.emit(Event::PlannedWrites {
+        files: pkg
+            .plan
+            .writes
+            .iter()
+            .map(|w| PlannedFile {
+                path: w.dest.clone(),
+                overwrites: w.overwrites,
+            })
+            .collect(),
+    });
+    session.relink_work.push((
+        pkg.entry.name.clone(),
+        relink::folders_for_spec(&pkg.roots, &pkg.spec)?,
+    ));
+    Ok(())
+}
+
+/// Write the package's files, with its PreInstall hook run just before and its
+/// PostInstall hook queued for [`finish`].
+fn unpack(
+    env: &OpEnv,
+    session: &mut InstallSession,
+    pkg: &mut Unpacking,
+    opts: &InstallOptions,
+    hooks: HookPolicy,
+) -> Result<()> {
+    let name = &pkg.entry.name;
+    // The point of no return: nothing is written before this, and what
+    // follows cannot be taken back. Cancellation's `begin_unpack()` goes here
+    // (plans/lvpm-lockfile.md, Slice 15), ahead of the first file written,
+    // which is the PreInstall hook's extraction below.
+    env.sink.emit(Event::PhaseStarted {
+        phase: Phase::Unpack,
+    });
+
+    // PreInstall hooks run before their package's files are copied — that is
+    // the contract their PostInstall counterparts rely on (DQMH's pair passes
+    // a marker file between them).
+    let pre = match pkg
+        .spec
+        .script_vis
+        .iter()
+        .any(|(h, v)| h == "PreInstall" && !v.is_empty())
+    {
+        true => install::extract_hook(&pkg.roots, name, &mut pkg.zip, "PreInstall.vi")?,
+        false => None,
+    };
+    if hooks.on
+        && let (Some(vi), Some(t)) = (&pre, &pkg.roots.target)
+    {
+        let planned: Vec<String> = pkg
+            .plan
+            .writes
+            .iter()
+            .map(|w| w.dest.to_string_lossy().into_owned())
+            .collect();
+        let info = hook_action_info(name, pkg.entry.display_name.as_deref(), t, &planned);
+        env.sink.emit(Event::HookStarting {
+            package: name.clone(),
+            hook: HookKind::PreInstall,
+        });
+        match session.run_hook(env, t, opts.relink.timeout, vi, &info) {
+            Ok(took) => env.sink.emit(Event::HookRan {
+                package: name.clone(),
+                hook: HookKind::PreInstall,
+                took,
+            }),
+            Err(err) => env.sink.emit(Event::HookFailed {
+                package: name.clone(),
+                hook: HookKind::PreInstall,
+                error: format!("{err:#}"),
+            }),
+        }
     }
 
-    // Relink is the second phase, and only a real LabVIEW installation has a
-    // LabVIEW to do it: a scratch tree has no VI Server to talk to.
-    let folders: usize = relink_work.iter().map(|(_, f)| f.len()).sum();
-    let target = store.target.clone();
-    let skipped_relink = |reason| Event::PhaseSkipped {
+    let m = install::apply(
+        &pkg.roots,
+        &pkg.spec,
+        &mut pkg.zip,
+        &pkg.plan,
+        pre.as_deref(),
+        &pkg.archive_sha256,
+    )?;
+    env.sink.emit(Event::PackageDone {
+        files: m.files.len(),
+        dry_run: false,
+    });
+    session.relink_work.push((
+        name.clone(),
+        m.relink_folders.iter().map(PathBuf::from).collect(),
+    ));
+    if hooks.on
+        && let Some(hook) = &m.post_install_vi
+    {
+        session.post_install_hooks.push(PostInstallHook {
+            package: name.clone(),
+            vi: PathBuf::from(hook),
+            files: m.files.clone(),
+        });
+    }
+    // The manifest assumes a global install runs its hooks; headless did not,
+    // and `lvpm list` should say so.
+    if hooks.off_headless {
+        for (h, v) in &pkg.spec.script_vis {
+            install::mark_hook_skipped(&pkg.roots, name, &format!("{h}={v}"))?;
+        }
+    }
+    Ok(())
+}
+
+/// What the plan left out or could not find, one note each.
+fn report_leftovers(env: &OpEnv, plan: &install::Plan) {
+    if !plan.kept.is_empty() {
+        env.sink.emit(Event::FilesKept {
+            count: plan.kept.len(),
+        });
+    }
+    for (dir, n) in &plan.skipped_groups {
+        env.sink.emit(Event::GroupSkipped {
+            target_dir: dir.clone(),
+            files: *n,
+        });
+    }
+    for miss in &plan.missing_from_archive {
+        env.sink.emit(Event::MissingFromArchive {
+            entry: miss.clone(),
+        });
+    }
+}
+
+/// Warn only about hooks this install owes and will not run. Globally,
+/// PreInstall has run, PostInstall runs after the relink pass, and the
+/// uninstall hooks are extracted for `lvpm uninstall` to run — nothing to say.
+/// In a venv, or headless, no hook runs at all, so every declared one is
+/// reported. Whether there was any.
+fn report_unrun_hooks(
+    env: &OpEnv,
+    session: &InstallSession,
+    pkg: &Unpacking,
+    hooks: HookPolicy,
+) -> bool {
+    let unrun: Vec<String> = pkg
+        .spec
+        .script_vis
+        .iter()
+        .filter(|(h, _)| {
+            !hooks.on
+                || (h == "PostInstall"
+                    && !session
+                        .post_install_hooks
+                        .iter()
+                        .any(|r| r.package == pkg.entry.name))
+        })
+        .map(|(h, v)| format!("{h}={v}"))
+        .collect();
+    if unrun.is_empty() {
+        return false;
+    }
+    env.sink.emit(Event::HooksNotRun { hooks: unrun });
+    true
+}
+
+/// What waits for the last package: the relink pass over everything that
+/// landed, then the PostInstall hooks that need it, then one palette refresh.
+/// An uninstall hands over what it removed instead of what it wrote.
+pub fn finish(
+    env: &OpEnv,
+    session: &mut InstallSession,
+    applied: &Applied,
+    opts: &InstallOptions,
+) -> Result<()> {
+    session.close_hook_connection();
+    relink_pass(env, session, applied, opts)?;
+    post_install_hooks(env, session, opts);
+    refresh_palettes(env, session, applied);
+    if session.venv().is_some() && applied.files > 0 && !applied.dry_run {
+        env.sink.emit(Event::LaunchHint);
+    }
+    Ok(())
+}
+
+/// Relink is the second phase, and only a real LabVIEW installation has a
+/// LabVIEW to do it: a scratch tree has no VI Server to talk to.
+fn relink_pass(
+    env: &OpEnv,
+    session: &InstallSession,
+    applied: &Applied,
+    opts: &InstallOptions,
+) -> Result<()> {
+    // Headless (containers, CI): nothing opens the IDE, and whatever the job
+    // does next — compile, build, test — resolves the links as it loads, so
+    // the pass is off unless asked for. Skipping it saved ten minutes of a
+    // twelve-minute DQMH install; the mass compile after it found nothing
+    // wrong.
+    let headless_skip = env.headless && !opts.force_relink && !opts.no_relink;
+    let work = &session.relink_work;
+    let folders: usize = work.iter().map(|(_, f)| f.len()).sum();
+    let skipped = |reason| Event::PhaseSkipped {
         phase: Phase::Relink,
         reason,
         skipped: folders,
     };
-    match &target {
-        None => env
-            .sink
-            .emit(skipped_relink(SkipReason::ScratchDestination)),
-        // Nothing with linker tables was installed — palettes and docs only.
-        Some(_) if folders == 0 => {}
-        Some(_) if headless_skip => env.sink.emit(skipped_relink(SkipReason::Headless)),
-        Some(_) if no_relink => env.sink.emit(skipped_relink(SkipReason::Declined)),
-        Some(_) if dry_run => env.sink.emit(Event::RelinkPlanned {
+    let Some(target) = session.target() else {
+        env.sink.emit(skipped(SkipReason::ScratchDestination));
+        return Ok(());
+    };
+    // Nothing with linker tables was installed — palettes and docs only.
+    if folders == 0 {
+        return Ok(());
+    }
+    if headless_skip {
+        env.sink.emit(skipped(SkipReason::Headless));
+    } else if opts.no_relink {
+        env.sink.emit(skipped(SkipReason::Declined));
+    } else if applied.dry_run {
+        env.sink.emit(Event::RelinkPlanned {
             folders,
-            packages: relink_work
+            packages: work
                 .iter()
                 .map(|(package, folders)| PackageFolders {
                     package: package.clone(),
                     folders: folders.clone(),
                 })
                 .collect(),
-        }),
-        Some(t) => match &venv {
+        });
+    } else {
+        env.sink.emit(Event::PhaseStarted {
+            phase: Phase::Relink,
+        });
+        match session.venv() {
             // A LabVIEW of the venv's own, started after the files landed so
             // that it sees them, and closed again unless asked to stay.
             Some(v) => {
@@ -503,8 +724,8 @@ pub fn install(
                     env.headless,
                     env.sink,
                 )?;
-                let outcome = run_relink(env, &store, inst.port, relink_options, &relink_work);
-                if relink_options.keep_open {
+                let outcome = run_relink(env, session.store(), inst.port, &opts.relink, work);
+                if opts.relink.keep_open {
                     env.sink
                         .emit(Event::VenvLabviewLeftOpen { port: inst.port });
                 } else {
@@ -514,50 +735,69 @@ pub fn install(
             }
             None => {
                 let port = viserver::ensure_vi_server(
-                    t,
+                    target,
                     Duration::from_secs(120),
                     env.headless,
                     env.sink,
                 )?;
-                run_relink(env, &store, port, relink_options, &relink_work)?;
+                run_relink(env, session.store(), port, &opts.relink, work)?;
             }
-        },
-    }
-
-    // PostInstall hooks, after relinking so the hook VI and whatever it loads
-    // are runnable. Failures are reported, not fatal: the files are installed.
-    if !hook_runs.is_empty() {
-        match &target {
-            Some(t) => run_post_install_hooks(env, &store, t, relink_options.timeout, &hook_runs),
-            None => env.sink.emit(Event::PhaseSkipped {
-                phase: Phase::Hooks,
-                reason: SkipReason::ScratchDestination,
-                skipped: hook_runs.len(),
-            }),
         }
     }
-
-    // Palettes and menus last, after the hooks: a hook is free to write more
-    // palette files of its own. Not for a venv: its LabVIEW
-    // is started fresh on launch and builds them from the overlay then.
-    if total_writes > 0 && !dry_run && venv.is_none() {
-        match &target {
-            // A headless LabVIEW (containers, CI) shows no palette to anyone,
-            // and rebuilding one would start LabVIEW for nothing when the
-            // install had no hooks to run.
-            Some(_) if env.headless => env.sink.emit(Event::PhaseSkipped {
-                phase: Phase::Refresh,
-                reason: SkipReason::Headless,
-                skipped: total_writes,
-            }),
-            Some(t) => refresh_palettes_and_menus(env, t, HOOK_TIMEOUT_SECS),
-            // Nothing to refresh: a scratch tree's palettes belong to no IDE.
-            None => {}
-        }
-    }
-    if total_writes > 0 && !dry_run && venv.is_some() {
-        env.sink.emit(Event::LaunchHint);
-    }
-
     Ok(())
+}
+
+/// PostInstall hooks, after relinking so the hook VI and whatever it loads
+/// are runnable. Failures are reported, not fatal: the files are installed.
+fn post_install_hooks(env: &OpEnv, session: &InstallSession, opts: &InstallOptions) {
+    let hooks = &session.post_install_hooks;
+    match session.target() {
+        None => env.sink.emit(Event::PhaseSkipped {
+            phase: Phase::Hooks,
+            reason: SkipReason::ScratchDestination,
+            skipped: hooks.len(),
+        }),
+        Some(t) if !hooks.is_empty() => {
+            env.sink.emit(Event::PhaseStarted {
+                phase: Phase::Hooks,
+            });
+            run_post_install_hooks(env, session.store(), t, opts.relink.timeout, hooks);
+        }
+        Some(_) => {}
+    }
+}
+
+/// Palettes and menus last, after the hooks: a hook is free to write more
+/// palette files of its own. Not for a venv: its LabVIEW is started fresh on
+/// launch and builds them from the overlay then.
+fn refresh_palettes(env: &OpEnv, session: &InstallSession, applied: &Applied) {
+    if session.venv().is_some() {
+        return;
+    }
+    let written = if applied.dry_run { 0 } else { applied.files };
+    let skipped = |reason, skipped| Event::PhaseSkipped {
+        phase: Phase::Refresh,
+        reason,
+        skipped,
+    };
+    match session.target() {
+        // A scratch tree's palettes belong to no IDE.
+        None => env.sink.emit(skipped(
+            SkipReason::ScratchDestination,
+            written + applied.removed,
+        )),
+        // A headless LabVIEW (containers, CI) shows no palette to anyone, and
+        // rebuilding one would start LabVIEW for nothing when the install had
+        // no hooks to run.
+        Some(_) if written > 0 && env.headless => {
+            env.sink.emit(skipped(SkipReason::Headless, written))
+        }
+        Some(t) if written > 0 || applied.removed > 0 => {
+            env.sink.emit(Event::PhaseStarted {
+                phase: Phase::Refresh,
+            });
+            refresh_palettes_and_menus(env, t, HOOK_TIMEOUT_SECS);
+        }
+        Some(_) => {}
+    }
 }

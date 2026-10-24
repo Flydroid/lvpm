@@ -124,6 +124,7 @@ mod tests {
             pre_uninstall_vi: None,
             post_uninstall_vi: None,
             skipped_groups: Vec::new(),
+            archive_sha256: None,
         }
     }
 

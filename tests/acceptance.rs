@@ -34,6 +34,7 @@ const FEATURE_FILES: &[&str] = &[
     "tests/features/lvpm-lockfile/slice-4-manifest-editing-and-dev-dependencies.feature",
     "tests/features/lvpm-lockfile/slice-5-pubgrub-solver.feature",
     "tests/features/lvpm-lockfile/slice-6-openv-and-query-operations-in-core.feature",
+    "tests/features/lvpm-lockfile/slice-7-install-and-uninstall-in-core-with-reusable-seams.feature",
 ];
 const LABVIEW_TAG: &str = "labview";
 const TEST_LABVIEW_ENV_VAR: &str = "LVPM_TEST_LABVIEW";
@@ -60,6 +61,8 @@ pub struct CliWorld {
     pub solver: steps::solver::SolverState,
     /// What an `@core` destination scenario has set up and seen.
     pub destination: steps::destination::DestinationState,
+    /// What an `@core` install scenario has set up.
+    pub install: steps::install::InstallState,
 }
 
 impl CliWorld {
@@ -75,6 +78,7 @@ impl CliWorld {
             manifest: Default::default(),
             solver: Default::default(),
             destination: Default::default(),
+            install: Default::default(),
         }
     }
 

@@ -4,6 +4,7 @@
 
 pub mod destination;
 pub mod in_process;
+pub mod install;
 pub mod installation;
 pub mod manifest;
 pub mod recording;

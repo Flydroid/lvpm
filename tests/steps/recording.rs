@@ -1,6 +1,6 @@
 //! Steps that compare what a command did with a recording.
 
-use super::{setup, venv};
+use super::{run, setup, venv};
 use crate::CliWorld;
 use crate::support::golden::{Golden, Mode, Output};
 use crate::support::sandbox::ALTERED_RECORDINGS_DIR;
@@ -152,6 +152,7 @@ enum Setup {
     NoProjectWithLabview,
     VenvDirSet,
     FolderWithAlpha,
+    VenvForLabview,
 }
 
 /// A row of the characterization table that later features re-run: the setup
@@ -162,6 +163,9 @@ struct Row {
     setup: Setup,
     command: &'static str,
     only_lines_mentioning: Option<&'static str>,
+    /// The directory, relative to the project, whose files the row lists after
+    /// the command, as the table's `files` column does.
+    files: Option<&'static str>,
 }
 
 const fn row(name: &'static str, setup: Setup, command: &'static str) -> Row {
@@ -170,6 +174,7 @@ const fn row(name: &'static str, setup: Setup, command: &'static str) -> Row {
         setup,
         command,
         only_lines_mentioning: None,
+        files: None,
     }
 }
 
@@ -200,6 +205,62 @@ const ROWS: &[Row] = &[
     ),
     row("config-get", Setup::VenvDirSet, "lvpm config get venv.dir"),
     row("cache-add", Setup::FolderWithAlpha, "lvpm cache add folder"),
+    Row {
+        files: Some("dest"),
+        ..row(
+            "install-dry-run",
+            Setup::LoopbackProject,
+            "lvpm install beta --dry-run --prefix dest",
+        )
+    },
+    Row {
+        files: Some("dest"),
+        ..row(
+            "install-beta",
+            Setup::LoopbackProject,
+            "lvpm install beta --prefix dest",
+        )
+    },
+    Row {
+        files: Some("dest"),
+        ..row(
+            "install-hooked",
+            Setup::LoopbackProject,
+            "lvpm install hooked --prefix dest",
+        )
+    },
+    Row {
+        files: Some("dest"),
+        ..row(
+            "install-missing",
+            Setup::LoopbackProject,
+            "lvpm install does_not_exist --prefix dest",
+        )
+    },
+    Row {
+        files: Some("dest"),
+        ..row(
+            "uninstall-beta",
+            Setup::BetaInstalledInDest,
+            "lvpm uninstall beta --prefix dest",
+        )
+    },
+    Row {
+        files: Some("dest"),
+        ..row(
+            "uninstall-missing",
+            Setup::EmptyDest,
+            "lvpm uninstall beta --prefix dest",
+        )
+    },
+    Row {
+        files: Some(".lv-venv"),
+        ..row(
+            "venv-install-beta",
+            Setup::VenvForLabview,
+            "lvpm install beta",
+        )
+    },
 ];
 
 #[when(expr = "the characterization row {string} runs")]
@@ -219,8 +280,12 @@ async fn row_runs(world: &mut CliWorld, name: String) {
         }
         Setup::VenvDirSet => setup::venv_dir_set(world).await,
         Setup::FolderWithAlpha => setup::folder_with_alpha(world).await,
+        Setup::VenvForLabview => venv::venv_for_labview(world).await,
     }
     world.run(row.command, None);
+    if let Some(files) = row.files {
+        run::list_files(world, files.to_string()).await;
+    }
     if let Some(mention) = row.only_lines_mentioning {
         let output = world.last_output.as_ref().expect("the row ran");
         world.last_output = Some(only_lines_mentioning(output, mention));
