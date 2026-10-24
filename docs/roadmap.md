@@ -93,11 +93,13 @@ Reference and `vipm.toml` comparison: [manifest.md](manifest.md).
   Design in [manifest.md](manifest.md#to-do).
 - Per-dependency tables: `{ version = "...", hooks = "run", source = "local" }`.
 - `[venv]` overrides: `dir`, `vi-server-port`, `bitness`.
-- **`vipm.toml` compatibility layer** — a function converting the known
-  `vipm.toml` fields (`labview-version`, `[dependencies]`,
-  `[dev-dependencies]`, `[nipm.*]`) into a `Project`, reporting what it
-  dropped; then discover `vipm.toml` when there is no `lvpm.toml`. Mapping in
-  [manifest.md](manifest.md#to-do).
+- **`vipm.toml` conversion** — done for `--manifest vipm.toml`
+  (`src/vipm_interop.rs`: `labview-version`, exact `[dependencies]`,
+  `[nipm.dependencies]`, a note naming what was not used). Not discovered;
+  whether it should be is an open decision in
+  [manifest.md](manifest.md#to-do). Remaining: `[dev-dependencies]` once
+  groups exist. Mapping in
+  [manifest.md](manifest.md#reading-a-vipmtoml-with-lvpm).
 
 ## Configuration
 
