@@ -18,20 +18,21 @@ Status:
 - **partial**: some of it exists;
 - **planned**: in [../roadmap.md](../roadmap.md), [distribution-design.md](distribution-design.md)
   or the [vision milestones](README.md#milestones) (milestone given);
-- **open**: found here, not planned yet.
+- **open**: found here, not planned yet;
+- **n/a**: not needed for lvpm.
 
 | VIPM | lvpm | Status |
 |---|---|---|
 | `install <pkg>[@ver]` | `lvpm install` | have |
 | `install <file.vip / .ogp>` | `lvpm cache add <file>`, then `install` | have (two steps) |
 | `install <file.vipc / .dragon>` | `lvpm init --from <file>` | planned (M1) |
-| `install --upgrade` | upgrade | planned (roadmap, M1) |
+| `install --upgrade` | `lvpm update` | planned (roadmap, M1) |
 | `uninstall` | `lvpm uninstall` / `--all` | have |
 | `uninstall --allow-version-mismatch` | — | open |
 | `list`, `list --installed` | `lvpm list` | have |
 | `info <pkg>` (versions, deps, files) | `lvpm info` | planned (M1) |
 | `search` | `lvpm search` | have |
-| `refresh` (`--no-cache`, `--force`) | `--refresh` flag | have |
+| `refresh` (`--no-cache`, `--force`) | `--refresh` flag (`lvpm refresh` is different: it rebuilds palettes and menus) | have |
 | `init` | `lvpm init` | planned (M1) |
 | `add` / `remove` (`--dev`, `--feed-url`) | `lvpm add` / `remove` | planned (roadmap, M1) |
 | `lock`, `lock --check` (non-zero exit on drift) | `lvpm.lock`, `lock --check` | planned (roadmap, M1) |
@@ -44,7 +45,7 @@ Status:
 | `labview list` | `lvpm targets` | have |
 | `version` | `lvpm --version` | have |
 | `about` (paths, config) | — | open |
-| `activate` | — | not needed (no licensing) |
+| `activate` | — | n/a (no licensing) |
 
 Global behaviour:
 
@@ -63,6 +64,6 @@ Global behaviour:
 What lvpm has that VIPM's docs do not show:
 
 - per-project venvs, each with its own LabVIEW process;
-- install hooks skipped in a venv and on headless machines, with `--hooks` to opt in;
+- install hooks that never run in a venv, and on headless machines only with `--hooks`;
 - explicit relink control;
 - VI Server primitives for diagnosis.

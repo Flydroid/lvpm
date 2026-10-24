@@ -24,7 +24,7 @@
     { "id": "nipm", "type": "external", "label": "NIPM drivers", "sublabel": "DAQmx · VISA · RT", "pos": [40, 540], "size": [170, 64] },
     { "id": "lock", "type": "database", "label": "lvpm.lock", "sublabel": "sha256 · feed · signer · --check", "pos": [330, 540], "size": [190, 64], "tag": "proposed" },
     { "id": "venvA", "type": "database", "label": ".lv-venv (A)", "sublabel": "App: libA 1.4 · libX 1.2", "pos": [600, 540], "size": [200, 64] },
-    { "id": "venvB", "type": "database", "label": ".lv-venv (B)", "sublabel": "Library B: libA ^1.4 · libX 2.0", "pos": [890, 540], "size": [200, 64] },
+    { "id": "venvB", "type": "database", "label": ".lv-venv (B)", "sublabel": "Library B: libA >=1.4 · libX 2.0", "pos": [890, 540], "size": [200, 64] },
 
     { "id": "global", "type": "external", "label": "Global LabVIEW install", "sublabel": "real vi.lib", "pos": [260, 690], "size": [200, 64] },
     { "id": "lvA", "type": "frontend", "label": "LabVIEW process A", "sublabel": "own port · app build (proposed)", "pos": [600, 690], "size": [200, 64] },
@@ -58,7 +58,7 @@
     { "id": "shadow", "from": "global", "to": "lvA", "label": "always wins", "variant": "dashed" }
   ],
   "cards": [
-    { "dot": "emerald", "title": "Works today", "items": ["Per-project .lv-venv, one LabVIEW process each: same package, different versions, no clash (a global copy still shadows it)", "Install from VIPM/NI indexes and folders; hooks skipped in a venv and headless (--hooks opts in)", "NIPM dependencies checked; lvpm launch / relink / refresh"] },
+    { "dot": "emerald", "title": "Works today", "items": ["Per-project .lv-venv, one LabVIEW process each: same package, different versions, no clash (a global copy still shadows it)", "Install from VIPM/NI indexes and folders; hooks never run in a venv; headless skips them unless --hooks", "NIPM dependencies checked; lvpm launch / relink / refresh"] },
     { "dot": "cyan", "title": "Build (proposed)", "items": ["Kind: source (any LabVIEW ≥ min) or ppl (version + bitness)", "Format: .lvpkg native, .vip for VIPM users, from one lvpm.toml", "Linker check without LabVIEW; app builds + SBOM via lvproj specs"] },
     { "dot": "rose", "title": "Trust (proposed)", "items": ["SHA-256 pinned in lvpm.lock; lock --check in CI", "Publish from CI only: OIDC, Sigstore, SLSA provenance", "@org scopes resolve from one feed only: no dependency confusion"] },
     { "dot": "amber", "title": "Distributed sources (proposed)", "items": ["Registry ≠ storage: a git index maps names to repos and hashes", "Release files stay on GitHub Releases or any OCI registry", "Anyone can fork or mirror the index; vipm.io is one source of many"] },

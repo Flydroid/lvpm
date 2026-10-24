@@ -30,7 +30,8 @@ This folder is this fork's direction. The upstream author's plan stays in
    or fork; files live wherever the author releases them.
 3. **Verify, don't trust.** SHA-256 pinned in the lock, signatures and
    provenance checked against the consumer's policy, no install-time code
-   unless allowed by name.
+   unless allowed by name. (Target: today hooks still run by default on a
+   developer machine.)
 4. **Meet people where they are.** Read VIPM and NI indexes, write `.vip`
    for VIPM users, import `.vipc` projects, check NIPM drivers.
 5. **Standard infrastructure.** OCI registries, git, GitHub Releases,
@@ -41,13 +42,13 @@ This folder is this fork's direction. The upstream author's plan stays in
 Each one is usable on its own. Ticks mean done.
 
 **M0 — consume (done)**
-- [x] Install from VIPM/NI indexes and folders; hooks run on a developer machine, are skipped in a venv and headless (`--hooks` opts in)
+- [x] Install from VIPM/NI indexes and folders; hooks run on a developer machine, never run in a venv, and are skipped headless unless `--hooks` is given
 - [x] Per-project venvs, `lvpm launch`, relink, refresh, headless
 - [x] NIPM dependencies checked
 
 **M1 — reproducible projects**
 - [ ] `lvpm.lock` with SHA-256, `lock --check`, `sync` (also removes extras)
-- [ ] `init` (incl. `--from project.vipc`), `add`, `remove`, `info`, upgrade
+- [ ] `init` (incl. `--from project.vipc`), `add`, `remove`, `info`, `update`
 - [ ] `--json`, documented exit codes, `--yes`, `--labview-bitness`
 
 **M2 — build**
