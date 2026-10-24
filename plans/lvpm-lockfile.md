@@ -1978,9 +1978,10 @@ and version.
   - Commit 41f9b75. `ops::sync::strictness(headless, LockFlags) -> Strictness { policy, implied_by_headless }` (precedence: `--frozen`, `--locked`, `--no-locked`, then headless); `SyncOptions.headless_implied` makes `sync` emit `Event::HeadlessImpliesLocked` before anything else, and the CLI words the failure with `render::sync::headless_error` only when headless alone implied it. The note goes to stderr, like the other headless notes. The CLI's headless notes now share `src/render/headless.rs` (byte-identical). The sandbox runs children headless on request (`Sandbox::set_headless`), and `real_installation_risk` takes `headless` so it settles a headless child's destination as lvpm does. The `add`/`remove` rows are `@pending-13` (the harness skips any `@pending-*` scenario and counts it): Slice 13 removes the tag.
 
 #### Wave 10
-- [ ] Slice 12: Upgrades
-  - [ ] Step 12.1: `--upgrade` / `--upgrade-package X` (repeatable)
-  - [ ] Step 12.2: `X@ver` with constraint rewriting and the restore guard
+- [x] Slice 12: Upgrades
+  - [x] Step 12.1: `--upgrade` / `--upgrade-package X` (repeatable)
+  - [x] Step 12.2: `X@ver` with constraint rewriting and the restore guard
+  - Commits 7edb5cb, 588f7e8, 6af600b. `--upgrade` and `--upgrade-package` conflict with each other and with `--check`. A manifest floor that excludes `@ver` is rewritten in memory (never `*`, never a transitive package); manifest then lock are written inside `ops::snapshot::restoring_on_failure`, which Slice 13 reuses. Pins show as `--upgrade-package X@ver` in conflicts (6af600b). One feature-file wording change to avoid an ambiguous step.
 
 #### Wave 11
 - [ ] Slice 13: `lvpm add` / `lvpm remove`; `install <pkg>` routing
