@@ -1951,8 +1951,9 @@ and version.
 
   - Commits c84c66d, 46f7b40, 3f348b1. Plan premise corrected: install manifests now record `archive_sha256`, which changes the hashed manifests in `tests/golden/*/tree.txt`; the harness normaliser drops that one field before comparing (accepted by the user 2026-10-24). Unrecorded output changes: relink progress lines start on their own line; a stderr event during an open stdout line ends that line first. `finish` takes `InstallOptions`; the `begin_unpack` seam is the top of `unpack()` in `ops/install.rs`. Dropped the unreachable dry-run hook listing. `reqwest` left the CLI crate, `zip` moved to dev-dependencies. For Slice 10: `InstallPlan` is `entries: Vec<Entry>` and `apply` checks no hash yet. For Slice 14: `cmd_relink` duplicates `finish`'s relink block.
 #### Wave 6
-- [ ] Slice 7b (inserted 2026-10-24 by user decision): version comparison fixes before locking
+- [x] Slice 7b (inserted 2026-10-24 by user decision): version comparison fixes before locking
   - Prerelease tails compare (`1.0alpha1 < 1.0alpha2`, no dedup merge); a prerelease sorts below its release even with a revision suffix; a `>` requirement is strict. May change which version the greedy CLI picks when prereleases are involved.
+  - Commits 0227c0a, a82451e, efcc104. `Requirement` gained `min_exclusive`; `Floor` type in `index.rs`; strict floors cached as `">1.2"`. No golden changed; no CLI version choice changed in any fixture.
 - [ ] Slice 8: `lvpm lock`
   - [ ] Step 8.1: Lock format
   - [ ] Step 8.2: `ops::lock` and `lvpm lock`
