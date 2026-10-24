@@ -9,16 +9,17 @@
 //!
 //! Package keys are lowercased, as everywhere else in lvpm.
 
+use crate::cancel::CancelToken;
 use crate::index::{Entry, Index};
 use crate::project::Constraint;
 use crate::version::Version;
 use pubgrub::{
-    DefaultStringReporter, Dependencies, DependencyConstraints, DependencyProvider,
-    PackageResolutionStatistics, PubGrubError, Ranges, Reporter,
+    Dependencies, DependencyConstraints, DependencyProvider, DerivationTree, External,
+    PackageResolutionStatistics, PubGrubError, Ranges,
 };
 use std::collections::{BTreeMap, HashMap};
-use std::convert::Infallible;
 use std::fmt;
+use std::ops::Bound;
 
 // ---- what the solver returns ----
 
@@ -27,12 +28,25 @@ use std::fmt;
 #[derive(Debug, Clone)]
 pub struct Resolution {
     pub packages: BTreeMap<String, Entry>,
+    /// Requirements of the chosen packages that no source lists, by name then
+    /// requirer. They are not a failure: the package is simply not locked.
+    pub unresolved: Vec<Unresolved>,
 }
 
-/// No set of versions satisfies the constraints.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Conflict {
-    pub report: String,
+/// A requirement that no source lists, and the package that has it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unresolved {
+    pub name: String,
+    pub required_by: String,
+}
+
+/// Why `solve` returned no resolution.
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum SolveError {
+    #[error("{0}")]
+    Conflict(Conflict),
+    #[error("the solver was cancelled")]
+    Cancelled,
 }
 
 /// Solve `constraints` (a manifest's direct dependencies, in file order)
@@ -42,13 +56,14 @@ pub struct Conflict {
 /// existing lock holds: a new upstream release then changes nothing. `lv_gate`
 /// is the project's LabVIEW in the index's own units (`lv_min`, so 24.0 for
 /// LabVIEW 2024): no package that needs a newer LabVIEW is chosen. `None`
-/// applies no gate.
+/// applies no gate. A cancelled `cancel` stops the solver.
 pub fn solve(
     constraints: &[(String, Constraint)],
     index: &Index,
     prefs: &[(String, Version)],
     lv_gate: Option<f64>,
-) -> Result<Resolution, Conflict> {
+    cancel: &CancelToken,
+) -> Result<Resolution, SolveError> {
     let provider = Provider {
         catalog: Catalog::new(index),
         direct: constraints
@@ -60,10 +75,11 @@ pub fn solve(
             .map(|(name, version)| (key(name), version.clone()))
             .collect(),
         lv_gate,
+        cancel,
     };
     match pubgrub::resolve(&provider, Pkg::Root, root_version()) {
-        Ok(selected) => Ok(Resolution {
-            packages: selected
+        Ok(selected) => {
+            let packages: BTreeMap<String, Entry> = selected
                 .into_iter()
                 .filter_map(|(package, version)| match package {
                     Pkg::Root => None,
@@ -72,17 +88,27 @@ pub fn solve(
                         .entry(&key, &version)
                         .map(|entry| (key, entry.clone())),
                 })
-                .collect(),
-        }),
-        Err(PubGrubError::NoSolution(tree)) => Err(Conflict {
-            report: DefaultStringReporter::report(&tree),
-        }),
-        // The provider's errors are `Infallible`: it cannot fail, only say no.
+                .collect();
+            let unresolved = provider.unresolved_in(&packages);
+            Ok(Resolution {
+                packages,
+                unresolved,
+            })
+        }
+        Err(PubGrubError::NoSolution(tree)) => Err(SolveError::Conflict(Conflict::explain(
+            &tree,
+            &Names {
+                catalog: &provider.catalog,
+                manifest: constraints,
+            },
+        ))),
+        // The provider fails only to say it was cancelled, from any of the
+        // three places pubgrub lets it.
         Err(
-            PubGrubError::ErrorRetrievingDependencies { source, .. }
-            | PubGrubError::ErrorChoosingVersion { source, .. }
-            | PubGrubError::ErrorInShouldCancel(source),
-        ) => match source {},
+            PubGrubError::ErrorRetrievingDependencies { .. }
+            | PubGrubError::ErrorChoosingVersion { .. }
+            | PubGrubError::ErrorInShouldCancel(_),
+        ) => Err(SolveError::Cancelled),
     }
 }
 
@@ -182,15 +208,46 @@ impl<'a> Catalog<'a> {
     }
 }
 
+/// The one way the provider fails: its token was cancelled.
+#[derive(Debug, thiserror::Error)]
+#[error("the solver was cancelled")]
+struct Stopped;
+
 struct Provider<'a> {
     catalog: Catalog<'a>,
     /// The manifest's constraints, by lowercased name.
     direct: Vec<(String, Ranges<Version>)>,
     prefs: HashMap<String, Version>,
     lv_gate: Option<f64>,
+    cancel: &'a CancelToken,
 }
 
 impl Provider<'_> {
+    /// The requirements of the chosen packages that no source lists: they are
+    /// left out of the solve and reported instead.
+    fn unresolved_in(&self, chosen: &BTreeMap<String, Entry>) -> Vec<Unresolved> {
+        let mut unresolved: Vec<Unresolved> = chosen
+            .values()
+            .flat_map(|entry| {
+                entry
+                    .requires
+                    .iter()
+                    .filter(|requirement| self.is_unlisted(&requirement.name))
+                    .map(|requirement| Unresolved {
+                        name: requirement.name.clone(),
+                        required_by: entry.name.clone(),
+                    })
+            })
+            .collect();
+        unresolved.sort_by_key(|u| (key(&u.name), key(&u.required_by)));
+        unresolved.dedup();
+        unresolved
+    }
+
+    fn is_unlisted(&self, name: &str) -> bool {
+        self.catalog.versions(&key(name)).is_empty()
+    }
+
     /// The LabVIEW year `entry` needs, when that is newer than the project's.
     fn gated(&self, entry: &Entry) -> Option<Gated> {
         let (gate, needs) = (self.lv_gate?, entry.lv_min?);
@@ -212,7 +269,7 @@ impl DependencyProvider for Provider<'_> {
     type VS = Ranges<Version>;
     type Priority = ();
     type M = Gated;
-    type Err = Infallible;
+    type Err = Stopped;
 
     fn prioritize(
         &self,
@@ -222,11 +279,18 @@ impl DependencyProvider for Provider<'_> {
     ) {
     }
 
+    fn should_cancel(&self) -> Result<(), Stopped> {
+        match self.cancel.is_cancelled() {
+            true => Err(Stopped),
+            false => Ok(()),
+        }
+    }
+
     fn choose_version(
         &self,
         package: &Pkg,
         range: &Ranges<Version>,
-    ) -> Result<Option<Version>, Infallible> {
+    ) -> Result<Option<Version>, Stopped> {
         let Pkg::Named(key) = package else {
             return Ok(Some(root_version()));
         };
@@ -249,7 +313,7 @@ impl DependencyProvider for Provider<'_> {
         &self,
         package: &Pkg,
         version: &Version,
-    ) -> Result<Dependencies<Pkg, Ranges<Version>, Gated>, Infallible> {
+    ) -> Result<Dependencies<Pkg, Ranges<Version>, Gated>, Stopped> {
         let Pkg::Named(key) = package else {
             return Ok(Dependencies::Available(
                 self.direct
@@ -270,6 +334,7 @@ impl DependencyProvider for Provider<'_> {
             entry
                 .requires
                 .iter()
+                .filter(|requirement| !self.is_unlisted(&requirement.name))
                 .map(|requirement| {
                     (
                         Pkg::Named(self::key(&requirement.name)),
@@ -279,6 +344,210 @@ impl DependencyProvider for Provider<'_> {
                 .collect(),
         ))
     }
+}
+
+// ---- the conflict report ----
+//
+// PubGrub explains a failure as a tree of derived statements. A reader needs
+// the facts at its leaves: what the manifest asked for, what each package
+// requires, what no source lists. They are kept as data, in the manifest's own
+// spelling of each name, and `Display` is the only place they become prose.
+
+/// No set of versions satisfies the constraints: the facts that rule it out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Conflict {
+    pub facts: Vec<Fact>,
+}
+
+/// One fact a conflict rests on. `wanted` and `versions` are version sets as
+/// a constraint reads (`= 1.0`, `>= 2.0`, `*`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Fact {
+    /// `lvpm.toml` asks for `package` within `wanted`.
+    Manifest { package: String, wanted: String },
+    /// `package` at `versions` requires `needs` within `wanted`.
+    Requires {
+        package: String,
+        versions: String,
+        needs: String,
+        wanted: String,
+    },
+    /// `package` at `versions` needs a newer LabVIEW than the project's.
+    NeedsLabview {
+        package: String,
+        versions: String,
+        needs_year: u32,
+        project_year: u32,
+    },
+    /// No listed version of `package` is within `wanted`.
+    NoVersion { package: String, wanted: String },
+    /// No source lists `package` at all.
+    NotListed { package: String },
+}
+
+impl Fact {
+    /// Where the fact sits in a report: what was asked, then why it fails.
+    fn rank(&self) -> u8 {
+        match self {
+            Fact::Manifest { .. } => 0,
+            Fact::Requires { .. } => 1,
+            Fact::NeedsLabview { .. } => 2,
+            Fact::NoVersion { .. } => 3,
+            Fact::NotListed { .. } => 4,
+        }
+    }
+}
+
+impl fmt::Display for Fact {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Fact::Manifest { package, wanted } => {
+                write!(f, "lvpm.toml requires {package} {wanted}")
+            }
+            Fact::Requires {
+                package,
+                versions,
+                needs,
+                wanted,
+            } => write!(f, "{package} {versions} requires {needs} {wanted}"),
+            Fact::NeedsLabview {
+                package,
+                versions,
+                needs_year,
+                project_year,
+            } => write!(
+                f,
+                "{package} {versions} needs LabVIEW {needs_year}, and the project's is {project_year}"
+            ),
+            Fact::NoVersion { package, wanted } => {
+                write!(f, "no version of {package} {wanted} is available")
+            }
+            Fact::NotListed { package } => write!(f, "{package} is in no configured source"),
+        }
+    }
+}
+
+impl fmt::Display for Conflict {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("no set of versions satisfies the constraints:")?;
+        self.facts
+            .iter()
+            .try_for_each(|fact| write!(f, "\n  {fact}"))
+    }
+}
+
+/// How to spell a package: as the manifest does when it names it, else as the
+/// index does.
+struct Names<'a> {
+    catalog: &'a Catalog<'a>,
+    manifest: &'a [(String, Constraint)],
+}
+
+impl Names<'_> {
+    fn of(&self, package: &Pkg) -> String {
+        let Pkg::Named(key) = package else {
+            return package.to_string();
+        };
+        let in_manifest = self
+            .manifest
+            .iter()
+            .find(|(name, _)| self::key(name) == *key);
+        let in_index = self.catalog.versions(key).first();
+        match (in_manifest, in_index) {
+            (Some((name, _)), _) => name.clone(),
+            (None, Some(entry)) => entry.name.clone(),
+            (None, None) => key.clone(),
+        }
+    }
+}
+
+type Tree = DerivationTree<Pkg, Ranges<Version>, Gated>;
+
+impl Conflict {
+    fn explain(tree: &Tree, names: &Names) -> Conflict {
+        let mut facts = Vec::new();
+        collect_facts(tree, names, &mut facts);
+        facts.sort_by_key(Fact::rank);
+        Conflict { facts }
+    }
+}
+
+/// The external incompatibilities at the tree's leaves, once each.
+fn collect_facts(tree: &Tree, names: &Names, facts: &mut Vec<Fact>) {
+    let fact = match tree {
+        DerivationTree::Derived(derived) => {
+            collect_facts(&derived.cause1, names, facts);
+            collect_facts(&derived.cause2, names, facts);
+            return;
+        }
+        DerivationTree::External(External::NotRoot(..)) => return,
+        DerivationTree::External(External::NoVersions(package, wanted)) => match package {
+            Pkg::Named(key) if names.catalog.versions(key).is_empty() => Fact::NotListed {
+                package: names.of(package),
+            },
+            _ => Fact::NoVersion {
+                package: names.of(package),
+                wanted: describe(wanted),
+            },
+        },
+        DerivationTree::External(External::FromDependencyOf(package, versions, needs, wanted)) => {
+            match package {
+                Pkg::Root => Fact::Manifest {
+                    package: names.of(needs),
+                    wanted: describe(wanted),
+                },
+                Pkg::Named(_) => Fact::Requires {
+                    package: names.of(package),
+                    versions: subject(versions),
+                    needs: names.of(needs),
+                    wanted: describe(wanted),
+                },
+            }
+        }
+        DerivationTree::External(External::Custom(package, versions, gated)) => {
+            Fact::NeedsLabview {
+                package: names.of(package),
+                versions: subject(versions),
+                needs_year: gated.needs_year,
+                project_year: gated.project_year,
+            }
+        }
+    };
+    if !facts.contains(&fact) {
+        facts.push(fact);
+    }
+}
+
+/// A version set as a constraint reads: `*`, `= 1.0`, `>= 2.0`, `>= 1.0, < 2.0`,
+/// and `or` between the pieces of a set that has gaps.
+fn describe(set: &Ranges<Version>) -> String {
+    let piece = |(lower, upper): (&Bound<Version>, &Bound<Version>)| match (lower, upper) {
+        (Bound::Included(a), Bound::Included(b)) if a == b => format!("= {a}"),
+        (Bound::Unbounded, Bound::Unbounded) => "*".to_string(),
+        _ => [
+            match lower {
+                Bound::Included(v) => Some(format!(">= {v}")),
+                Bound::Excluded(v) => Some(format!("> {v}")),
+                Bound::Unbounded => None,
+            },
+            match upper {
+                Bound::Included(v) => Some(format!("<= {v}")),
+                Bound::Excluded(v) => Some(format!("< {v}")),
+                Bound::Unbounded => None,
+            },
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(", "),
+    };
+    set.iter().map(piece).collect::<Vec<_>>().join(" or ")
+}
+
+/// The versions a statement is about: `2.0` for one version, else a constraint.
+fn subject(set: &Ranges<Version>) -> String {
+    set.as_singleton()
+        .map_or_else(|| describe(set), ToString::to_string)
 }
 
 #[cfg(test)]
@@ -372,7 +641,7 @@ mod tests {
         let index = Index {
             entries: vec![entry("a", "1.0", &[]), entry("a", "1.0.0", &[])],
         };
-        let resolution = solve(&manifest(&[("a", "*")]), &index, &[], None).expect("solves");
+        let resolution = run(&[("a", "*")], &index, &[], None).expect("solves");
         assert_eq!(chosen(&resolution), [("a", "1.0")]);
     }
 
@@ -382,7 +651,163 @@ mod tests {
             entries: vec![entry("a", "1.0", &[]), entry("a", "2.0", &[])],
         };
         let prefs = [("A".to_string(), Version::parse("1.0"))];
-        let resolution = solve(&manifest(&[("a", ">=1.5")]), &index, &prefs, None).expect("solves");
+        let resolution = run(&[("a", ">=1.5")], &index, &prefs, None).expect("solves");
         assert_eq!(chosen(&resolution), [("a", "2.0")]);
+    }
+
+    #[test]
+    fn version_sets_read_as_constraints() {
+        let v = Version::parse;
+        assert_eq!(describe(&Ranges::full()), "*");
+        assert_eq!(describe(&Ranges::singleton(v("1.0"))), "= 1.0");
+        assert_eq!(describe(&Ranges::higher_than(v("2.0"))), ">= 2.0");
+        assert_eq!(describe(&Ranges::strictly_higher_than(v("2.0"))), "> 2.0");
+        assert_eq!(
+            describe(&Ranges::between(v("1.0"), v("2.0"))),
+            ">= 1.0, < 2.0"
+        );
+        assert_eq!(
+            describe(&Ranges::singleton(v("2.0")).complement()),
+            "< 2.0 or > 2.0"
+        );
+        assert_eq!(subject(&Ranges::singleton(v("2.0"))), "2.0");
+        assert_eq!(subject(&Ranges::higher_than(v("1.0"))), ">= 1.0");
+    }
+
+    #[test]
+    fn a_conflict_lists_what_the_manifest_asked_and_what_a_package_requires() {
+        let index = Index {
+            entries: vec![entry("A", "2.0", &[("C", "2.0")]), entry("C", "1.0", &[])],
+        };
+        let Err(SolveError::Conflict(conflict)) =
+            run(&[("A", "*"), ("C", "1.0")], &index, &[], None)
+        else {
+            panic!("expected a conflict");
+        };
+        assert!(conflict.facts.contains(&Fact::Manifest {
+            package: "A".into(),
+            wanted: "*".into()
+        }));
+        assert!(conflict.facts.contains(&Fact::Manifest {
+            package: "C".into(),
+            wanted: "= 1.0".into()
+        }));
+        assert!(conflict.facts.contains(&Fact::Requires {
+            package: "A".into(),
+            versions: "2.0".into(),
+            needs: "C".into(),
+            wanted: ">= 2.0".into()
+        }));
+        let report = conflict.to_string();
+        for line in ["lvpm.toml requires C = 1.0", "A 2.0 requires C >= 2.0"] {
+            assert!(report.contains(line), "{line:?} is not in:\n{report}");
+        }
+        // the manifest's lines come first, each fact once
+        assert!(matches!(conflict.facts[0], Fact::Manifest { .. }));
+        let mut once = conflict.facts.clone();
+        once.dedup();
+        assert_eq!(once, conflict.facts);
+    }
+
+    #[test]
+    fn a_gate_that_rules_out_every_version_is_named() {
+        let mut gated = entry("alpha", "2.0", &[]);
+        gated.lv_min = Some(26.0);
+        let index = Index {
+            entries: vec![gated],
+        };
+        let Err(SolveError::Conflict(conflict)) = run(&[("alpha", "*")], &index, &[], Some(24.0))
+        else {
+            panic!("expected a conflict");
+        };
+        assert!(conflict.facts.contains(&Fact::NeedsLabview {
+            package: "alpha".into(),
+            versions: "2.0".into(),
+            needs_year: 2026,
+            project_year: 2024
+        }));
+    }
+
+    #[test]
+    fn a_direct_dependency_no_source_lists_is_not_listed() {
+        let index = Index { entries: vec![] };
+        let Err(SolveError::Conflict(conflict)) = run(&[("Zeta", "*")], &index, &[], None) else {
+            panic!("expected a conflict");
+        };
+        assert!(conflict.facts.contains(&Fact::NotListed {
+            package: "Zeta".into()
+        }));
+        assert!(
+            conflict
+                .to_string()
+                .contains("Zeta is in no configured source")
+        );
+    }
+
+    #[test]
+    fn unlisted_requirements_are_reported_once_per_requirer_and_never_block() {
+        let index = Index {
+            entries: vec![
+                entry(
+                    "beta",
+                    "1.0",
+                    &[("Ni_Lib_Missing", "1.0"), ("other_missing", "1.0")],
+                ),
+                entry("gamma", "1.0", &[("ni_lib_missing", "2.0")]),
+            ],
+        };
+        let resolution = run(&[("beta", "*"), ("gamma", "*")], &index, &[], None).expect("solves");
+        assert_eq!(chosen(&resolution), [("beta", "1.0"), ("gamma", "1.0")]);
+        assert_eq!(
+            resolution.unresolved,
+            [
+                Unresolved {
+                    name: "Ni_Lib_Missing".into(),
+                    required_by: "beta".into()
+                },
+                Unresolved {
+                    name: "ni_lib_missing".into(),
+                    required_by: "gamma".into()
+                },
+                Unresolved {
+                    name: "other_missing".into(),
+                    required_by: "beta".into()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_requirement_of_a_version_that_was_not_chosen_is_not_reported() {
+        let index = Index {
+            entries: vec![
+                entry("a", "2.0", &[("gone", "1.0"), ("c", "2.0")]),
+                entry("a", "1.0", &[]),
+                entry("c", "1.0", &[]),
+            ],
+        };
+        let resolution = run(&[("a", "*"), ("c", "1.0")], &index, &[], None).expect("solves");
+        assert_eq!(chosen(&resolution), [("a", "1.0"), ("c", "1.0")]);
+        assert!(resolution.unresolved.is_empty());
+    }
+
+    #[test]
+    fn a_cancelled_token_stops_the_solver() {
+        let index = Index {
+            entries: vec![entry("a", "1.0", &[])],
+        };
+        let token = CancelToken::new();
+        token.cancel();
+        let result = solve(&manifest(&[("a", "*")]), &index, &[], None, &token);
+        assert!(matches!(result, Err(SolveError::Cancelled)));
+    }
+
+    fn run(
+        lines: &[(&str, &str)],
+        index: &Index,
+        prefs: &[(String, Version)],
+        lv_gate: Option<f64>,
+    ) -> Result<Resolution, SolveError> {
+        solve(&manifest(lines), index, prefs, lv_gate, &CancelToken::new())
     }
 }

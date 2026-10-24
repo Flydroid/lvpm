@@ -4,9 +4,10 @@
 
 use crate::CliWorld;
 use cucumber::{given, then, when};
+use lvpm_core::cancel::CancelToken;
 use lvpm_core::index::{Entry, Index, Requirement};
 use lvpm_core::project::Constraint;
-use lvpm_core::solve::{self, Conflict, Resolution};
+use lvpm_core::solve::{self, Conflict, Fact, Resolution, SolveError, Unresolved};
 use lvpm_core::version::Version;
 use regex::Regex;
 use std::sync::LazyLock;
@@ -17,14 +18,22 @@ pub struct SolverState {
     entries: Vec<Entry>,
     constraints: Vec<(String, Constraint)>,
     prefs: Vec<(String, Version)>,
-    outcome: Option<Result<Resolution, Conflict>>,
+    cancel: CancelToken,
+    outcome: Option<Result<Resolution, SolveError>>,
 }
 
 impl SolverState {
     fn resolution(&self) -> &Resolution {
         match self.outcome.as_ref().expect("the solver ran") {
             Ok(resolution) => resolution,
-            Err(conflict) => panic!("expected a resolution, got a conflict: {conflict:?}"),
+            Err(why) => panic!("expected a resolution, got: {why:?}"),
+        }
+    }
+
+    fn conflict(&self) -> &Conflict {
+        match self.outcome.as_ref().expect("the solver ran") {
+            Err(SolveError::Conflict(conflict)) => conflict,
+            other => panic!("expected a conflict, got: {other:?}"),
         }
     }
 
@@ -52,6 +61,7 @@ static MORE_VERSIONS: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"and (\d[\w.\-]*)").expect("the pattern"));
 static CONSTRAINT: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#""([^"]+)" "([^"]*)""#).expect("the pattern"));
+static QUOTED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#""([^"]+)""#).expect("the pattern"));
 static PREFERENCE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"the preference is "([^"]+)" (\d[\w.\-]*)"#).expect("the pattern")
 });
@@ -134,7 +144,13 @@ async fn the_solver_runs(world: &mut CliWorld, year: String) {
         &index,
         &state.prefs,
         lv_gate,
+        &state.cancel,
     ));
+}
+
+#[given("a cancelled token")]
+async fn a_cancelled_token(world: &mut CliWorld) {
+    assert!(world.solver.cancel.cancel(), "the token refused to cancel");
 }
 
 #[then(regex = r#"^the resolution is exactly "([^"]+)" (\S+) and "([^"]+)" (\S+)$"#)]
@@ -173,4 +189,49 @@ async fn the_resolution_holds_one_entry_each(world: &mut CliWorld, first: String
     let mut expected = vec![first.to_lowercase(), second.to_lowercase()];
     expected.sort();
     assert_eq!(keys, expected);
+}
+
+#[then(regex = r#"^the result is a conflict whose report contains (.+)$"#)]
+async fn the_conflict_report_contains(world: &mut CliWorld, quoted: String) {
+    let report = world.solver.conflict().to_string();
+    let wanted: Vec<&str> = QUOTED
+        .captures_iter(&quoted)
+        .map(|found| found.get(1).expect("a quoted text").as_str())
+        .collect();
+    assert!(!wanted.is_empty(), "no quoted text in: {quoted}");
+    for text in wanted {
+        assert!(
+            report.contains(text),
+            "{text:?} is not in the report:\n{report}"
+        );
+    }
+}
+
+#[then(regex = r#"^the result is a conflict naming "([^"]+)" as not found$"#)]
+async fn the_conflict_names_a_package_as_not_found(world: &mut CliWorld, package: String) {
+    let conflict = world.solver.conflict();
+    assert!(
+        conflict.facts.contains(&Fact::NotListed {
+            package: package.clone()
+        }),
+        "{package} is not reported as not found in:\n{conflict}"
+    );
+}
+
+#[then(regex = r#"^"([^"]+)" is reported unresolved, required by "([^"]+)"$"#)]
+async fn a_requirement_is_unresolved(world: &mut CliWorld, name: String, required_by: String) {
+    let unresolved = &world.solver.resolution().unresolved;
+    assert!(
+        unresolved.contains(&Unresolved { name, required_by }),
+        "not in {unresolved:?}"
+    );
+}
+
+#[then(regex = r#"^the result is "cancelled"$"#)]
+async fn the_result_is_cancelled(world: &mut CliWorld) {
+    assert!(
+        matches!(world.solver.outcome, Some(Err(SolveError::Cancelled))),
+        "expected cancelled, got {:?}",
+        world.solver.outcome
+    );
 }

@@ -32,6 +32,7 @@ const FEATURE_FILES: &[&str] = &[
     "tests/features/lvpm-lockfile/slice-1-characterization-harness-and-recorded-cli-output.feature",
     "tests/features/lvpm-lockfile/slice-3-event-sink-replaces-printing-in-the-moved-modules.feature",
     "tests/features/lvpm-lockfile/slice-4-manifest-editing-and-dev-dependencies.feature",
+    "tests/features/lvpm-lockfile/slice-5-pubgrub-solver.feature",
 ];
 const LABVIEW_TAG: &str = "labview";
 const TEST_LABVIEW_ENV_VAR: &str = "LVPM_TEST_LABVIEW";
