@@ -4,10 +4,11 @@
 //! flag. A front end words the hint that follows, because only it knows what
 //! the user can type.
 
+use crate::lockfile::StaleReason;
 use crate::solve::Conflict;
 use std::path::PathBuf;
 
-/// Why `lock` wrote no lock.
+/// Why `lock` wrote no lock, or `check` did not find one that fits.
 #[derive(Debug, thiserror::Error)]
 pub enum LockError {
     /// There is no `lvpm.toml` at or above `searched_from`.
@@ -26,6 +27,16 @@ pub enum LockError {
     /// them: one run reports every one it could not get.
     #[error("{} archive(s) could not be fetched", .0.len())]
     ArchivesUnavailable(Vec<ArchiveFailure>),
+    /// There is no lock where it should be.
+    #[error("there is no lvpm.lock at {}", .path.display())]
+    NoLock { path: PathBuf },
+    /// The lock is there but is not a lock: `reason` is the cause, in its own
+    /// words.
+    #[error("{} cannot be read: {reason}", .path.display())]
+    UnreadableLock { path: PathBuf, reason: String },
+    /// The lock no longer represents the manifest.
+    #[error("lvpm.lock is out of date")]
+    Stale(StaleReason),
     /// The operation's token was cancelled; nothing was written.
     #[error("locking was cancelled")]
     Cancelled,

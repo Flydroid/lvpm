@@ -36,6 +36,7 @@ const FEATURE_FILES: &[&str] = &[
     "tests/features/lvpm-lockfile/slice-6-openv-and-query-operations-in-core.feature",
     "tests/features/lvpm-lockfile/slice-7-install-and-uninstall-in-core-with-reusable-seams.feature",
     "tests/features/lvpm-lockfile/slice-8-lvpm-lock.feature",
+    "tests/features/lvpm-lockfile/slice-9-staleness-and-lvpm-lock-check.feature",
 ];
 const LABVIEW_TAG: &str = "labview";
 const TEST_LABVIEW_ENV_VAR: &str = "LVPM_TEST_LABVIEW";
@@ -66,6 +67,8 @@ pub struct CliWorld {
     pub install: steps::install::InstallState,
     /// What a `lvpm lock` scenario has set up and seen.
     pub lock: steps::lock::LockState,
+    /// What a staleness scenario has changed and found.
+    pub staleness: steps::staleness::StalenessState,
 }
 
 impl CliWorld {
@@ -83,6 +86,7 @@ impl CliWorld {
             destination: Default::default(),
             install: Default::default(),
             lock: Default::default(),
+            staleness: Default::default(),
         }
     }
 

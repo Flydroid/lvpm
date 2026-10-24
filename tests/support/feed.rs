@@ -80,6 +80,8 @@ pub struct Feed {
     stop: Arc<AtomicBool>,
     /// While set, every archive answers 503 and the listings still answer.
     archives_refused: Arc<AtomicBool>,
+    /// Once set, nothing is answered: each connection is closed unread.
+    down: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -92,15 +94,18 @@ impl Feed {
         let hits = Hits::default();
         let stop = Arc::new(AtomicBool::new(false));
         let archives_refused = Arc::new(AtomicBool::new(false));
+        let down = Arc::new(AtomicBool::new(false));
         let thread = {
-            let (hits, stop, refused) = (hits.clone(), stop.clone(), archives_refused.clone());
-            std::thread::spawn(move || serve(listener, &routes, &hits, &stop, &refused))
+            let (hits, stop) = (hits.clone(), stop.clone());
+            let (refused, down) = (archives_refused.clone(), down.clone());
+            std::thread::spawn(move || serve(listener, &routes, &hits, &stop, &refused, &down))
         };
         Feed {
             addr,
             hits,
             stop,
             archives_refused,
+            down,
             thread: Some(thread),
         }
     }
@@ -129,6 +134,13 @@ impl Feed {
     /// source whose archives have gone away does.
     pub fn refuse_archives(&self) {
         self.archives_refused.store(true, Ordering::SeqCst);
+    }
+
+    /// From now on the feed answers nothing, listings and archives alike, as
+    /// one that has stopped does: every connection is closed unanswered, and
+    /// none counts as a request.
+    pub fn go_down(&self) {
+        self.down.store(true, Ordering::SeqCst);
     }
 
     /// How many requests this path has received, including `304`s.
@@ -254,10 +266,14 @@ fn serve(
     hits: &Hits,
     stop: &AtomicBool,
     archives_refused: &AtomicBool,
+    down: &AtomicBool,
 ) {
     for stream in listener.incoming() {
         if stop.load(Ordering::SeqCst) {
             break;
+        }
+        if down.load(Ordering::SeqCst) {
+            continue;
         }
         if let Ok(stream) = stream {
             // One bad connection must not take the server down for the rest.
@@ -400,6 +416,24 @@ mod tests {
 
     fn beta() -> &'static FixturePackage {
         PACKAGES.iter().find(|p| p.name == "beta").unwrap()
+    }
+
+    #[test]
+    fn a_feed_that_went_down_answers_nothing_and_counts_nothing() {
+        let feed = Feed::start(PACKAGES);
+        feed.go_down();
+        let mut stream = TcpStream::connect(feed.addr).unwrap();
+        stream.set_read_timeout(Some(SOCKET_TIMEOUT)).unwrap();
+        write!(
+            stream,
+            "GET /feed/index.vipr HTTP/1.1\r\nHost: test\r\n\r\n"
+        )
+        .ok();
+        let mut raw = Vec::new();
+        // Closed unanswered: the read ends empty, or is reset.
+        stream.read_to_end(&mut raw).ok();
+        assert!(raw.is_empty(), "{}", String::from_utf8_lossy(&raw));
+        assert_eq!(feed.hits("/feed/index.vipr"), 0);
     }
 
     #[test]

@@ -12,4 +12,5 @@ pub mod recording;
 pub mod run;
 pub mod setup;
 pub mod solver;
+pub mod staleness;
 pub mod venv;

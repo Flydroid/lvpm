@@ -18,17 +18,13 @@ use crate::solve::{self, Resolution, SolveError};
 use crate::version::Version;
 use anyhow::Context;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Resolve the project's manifest and write `lvpm.lock` beside it. The lock
 /// comes back as it was written. A lock that still represents the manifest is
 /// left as it is: nothing is resolved, fetched or written.
 pub fn lock(env: &OpEnv) -> Result<Lockfile, LockError> {
-    let found = env
-        .manifest_for(None, None)?
-        .ok_or_else(|| LockError::NoManifest {
-            searched_from: env.cwd.clone(),
-        })?;
+    let found = find_manifest(env)?;
     let (manifest_path, project) = &found;
     let labview = project.labview.as_deref().ok_or(LockError::NoLabview)?;
     let gate = lv_gate(labview)?;
@@ -65,6 +61,44 @@ pub fn lock(env: &OpEnv) -> Result<Lockfile, LockError> {
         packages: lock.packages.len(),
     });
     Ok(lock)
+}
+
+/// Whether `lvpm.lock` exists and still represents the manifest; the error
+/// says which it is not, and why. It reads the manifest and the lock and
+/// nothing else: no source, no cache, no network, and it writes nothing.
+pub fn check(env: &OpEnv) -> Result<(), LockError> {
+    let (manifest_path, project) = find_manifest(env)?;
+    let lock = read_lock(&manifest_path.with_file_name(lockfile::FILE_NAME))?;
+    match lock.staleness(&project) {
+        Some(reason) => Err(LockError::Stale(reason)),
+        None => Ok(()),
+    }
+}
+
+/// The manifest of the project the command runs in.
+fn find_manifest(env: &OpEnv) -> Result<(PathBuf, Project), LockError> {
+    env.manifest_for(None, None)?
+        .ok_or_else(|| LockError::NoManifest {
+            searched_from: env.cwd.clone(),
+        })
+}
+
+/// The lock at `path`, told apart as missing or unreadable.
+fn read_lock(path: &Path) -> Result<Lockfile, LockError> {
+    Lockfile::read(path).map_err(|why| {
+        let missing = why
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound);
+        match missing {
+            true => LockError::NoLock {
+                path: path.to_path_buf(),
+            },
+            false => LockError::UnreadableLock {
+                path: path.to_path_buf(),
+                reason: format!("{why:#}"),
+            },
+        }
+    })
 }
 
 /// The project's LabVIEW in the units of an index's `lv_min`: 24.0 for 2024.
@@ -275,7 +309,7 @@ mod tests {
     use crate::config::Config;
     use crate::events::EventSink;
     use crate::index::Requirement;
-    use crate::lockfile::LOCAL_SOURCE;
+    use crate::lockfile::{LOCAL_SOURCE, StaleReason};
     use crate::solve::Unresolved;
     use std::io::Write;
     use std::path::PathBuf;
@@ -785,6 +819,91 @@ mod tests {
             std::fs::read_to_string(project.lock_path()).unwrap(),
             older.replace("version = 0\n", "version = 1\n")
         );
+    }
+
+    // ---- check ----
+
+    #[test]
+    fn check_passes_a_current_lock_without_any_source_and_says_nothing() {
+        let project = ProjectDir::new("check-ok", MANIFEST, &[("gamma", "1.0", "23.0", "")]);
+        lock(&project.env(&Recorder::default())).unwrap();
+        std::fs::remove_dir_all(project.root.join("packages")).unwrap();
+        std::fs::remove_dir_all(project.root.join("cache")).unwrap();
+
+        let sink = Recorder::default();
+        check(&project.env(&sink)).unwrap();
+        assert!(sink.events().is_empty(), "{:?}", sink.events());
+    }
+
+    #[test]
+    fn check_names_why_a_stale_lock_is_stale_and_changes_nothing() {
+        let project = ProjectDir::new("check-stale", MANIFEST, &[("gamma", "1.0", "23.0", "")]);
+        lock(&project.env(&Recorder::default())).unwrap();
+        let before = std::fs::read(project.lock_path()).unwrap();
+        std::fs::write(
+            project.root.join(crate::project::FILE_NAME),
+            MANIFEST.replace("gamma = \"*\"", "gamma = \"2.0\""),
+        )
+        .unwrap();
+
+        let sink = Recorder::default();
+        let why = check(&project.env(&sink)).unwrap_err();
+        assert!(
+            matches!(
+                &why,
+                LockError::Stale(StaleReason::ConstraintExcludesLocked { name, locked, .. })
+                    if name == "gamma" && locked == "1.0"
+            ),
+            "{why:?}"
+        );
+        assert!(sink.events().is_empty(), "{:?}", sink.events());
+        assert_eq!(std::fs::read(project.lock_path()).unwrap(), before);
+    }
+
+    #[test]
+    fn check_tells_a_missing_lock_from_one_that_is_not_a_lock() {
+        let project = ProjectDir::new("check-lock", MANIFEST, &[]);
+        let sink = Recorder::default();
+        let why = check(&project.env(&sink)).unwrap_err();
+        assert!(
+            matches!(&why, LockError::NoLock { path } if *path == project.lock_path()),
+            "{why:?}"
+        );
+
+        std::fs::write(project.lock_path(), "this = is [not a lock").unwrap();
+        let why = check(&project.env(&sink)).unwrap_err();
+        assert!(
+            matches!(&why, LockError::UnreadableLock { path, reason }
+                if *path == project.lock_path() && reason.contains("lvpm.lock")),
+            "{why:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(project.lock_path()).unwrap(),
+            "this = is [not a lock",
+            "an unreadable lock is reported, not replaced"
+        );
+    }
+
+    #[test]
+    fn check_needs_a_project() {
+        let bare =
+            std::env::temp_dir().join(format!("lvpm-check-test-bare-{}", std::process::id()));
+        std::fs::create_dir_all(&bare).unwrap();
+        let sink = Recorder::default();
+        let env = OpEnv::new(
+            &sink,
+            Config {
+                cache: bare.join("cache"),
+                local_sources: Vec::new(),
+                venv_dir: PathBuf::from(".lv-venv"),
+            },
+            Vec::new(),
+            bare.clone(),
+        );
+        assert!(
+            matches!(check(&env), Err(LockError::NoManifest { searched_from }) if searched_from == bare)
+        );
+        std::fs::remove_dir_all(&bare).ok();
     }
 
     #[test]

@@ -28,9 +28,9 @@ const LOCK_FILE: &str = "lvpm.lock";
 pub struct LockState {
     /// The fixture packages published so far. A later one of the same name
     /// and version replaces an earlier one.
-    published: Vec<&'static FixturePackage>,
+    pub(super) published: Vec<&'static FixturePackage>,
     /// `lvpm.lock` as a `Given` found it.
-    before: Option<Vec<u8>>,
+    pub(super) before: Option<Vec<u8>>,
     /// The second world of a scenario that compares two.
     other: Option<OtherWorld>,
 }
@@ -45,7 +45,7 @@ struct OtherWorld {
 static NAME_AND_VERSION: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#""([^"]+)" (\d[\w.\-]*)"#).expect("the pattern"));
 
-fn name_and_version_pairs(text: &str) -> Vec<(String, String)> {
+pub(super) fn name_and_version_pairs(text: &str) -> Vec<(String, String)> {
     let pairs: Vec<(String, String)> = NAME_AND_VERSION
         .captures_iter(text)
         .map(|pair| (pair[1].to_string(), pair[2].to_string()))
@@ -79,7 +79,7 @@ fn put_local(sandbox: &Sandbox, packages: &[&'static FixturePackage]) {
 }
 
 impl CliWorld {
-    fn publish(&mut self, packages: &[&'static FixturePackage]) {
+    pub(super) fn publish(&mut self, packages: &[&'static FixturePackage]) {
         put_local(&self.sandbox, packages);
         for package in packages {
             self.lock
@@ -89,12 +89,12 @@ impl CliWorld {
         }
     }
 
-    fn depend(&self, table: DependencyTable, name: &str, constraint: &str) {
+    pub(super) fn depend(&self, table: DependencyTable, name: &str, constraint: &str) {
         add_dependency(&self.sandbox, table, name, constraint);
     }
 
     /// The project reads a loopback feed of the lock fixtures, and no folder.
-    fn use_hosted_fixtures(&mut self) {
+    pub(super) fn use_hosted_fixtures(&mut self) {
         self.sandbox.clear_local_packages();
         self.sandbox.serve_feed(LOCK_PACKAGES);
         self.sandbox
@@ -102,11 +102,11 @@ impl CliWorld {
         self.lock.published = LOCK_PACKAGES.iter().collect();
     }
 
-    fn lock_path(&self) -> PathBuf {
+    pub(super) fn lock_path(&self) -> PathBuf {
         self.sandbox.work_dir().join(LOCK_FILE)
     }
 
-    fn lock_bytes(&self) -> Option<Vec<u8>> {
+    pub(super) fn lock_bytes(&self) -> Option<Vec<u8>> {
         std::fs::read(self.lock_path()).ok()
     }
 
@@ -136,7 +136,7 @@ impl CliWorld {
     }
 
     /// (name, version) of every locked package.
-    fn locked_versions(&self) -> Vec<(String, String)> {
+    pub(super) fn locked_versions(&self) -> Vec<(String, String)> {
         self.locked_packages()
             .iter()
             .map(|package| {
@@ -148,17 +148,17 @@ impl CliWorld {
             .collect()
     }
 
-    fn output(&self) -> &Output {
+    pub(super) fn output(&self) -> &Output {
         self.last_output.as_ref().expect("a command was run")
     }
 
     /// Everything the last command printed, on either stream.
-    fn printed(&self) -> String {
+    pub(super) fn printed(&self) -> String {
         let output = self.output();
         format!("{}\n{}", output.stdout, output.stderr)
     }
 
-    fn assert_failed(&self) {
+    pub(super) fn assert_failed(&self) {
         assert_ne!(
             self.output().exit_code,
             0,

@@ -144,6 +144,10 @@ pub const LOCK_PACKAGES: &[FixturePackage] = &[
     text_package("caraya", "1.0", &[], "20.0"),
 ];
 
+/// Releases a scenario publishes after a project was locked.
+pub const LATER_RELEASES: &[FixturePackage] =
+    &[text_package("beta", "3.0", &[("alpha", "1.0")], "20.0")];
+
 /// The same beta 1.0, also requiring a package that no source lists.
 pub const BETA_NEEDING_A_MISSING_PACKAGE: FixturePackage = text_package(
     "beta",

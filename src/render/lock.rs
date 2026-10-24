@@ -5,6 +5,7 @@
 use super::{Renderer, Stream};
 use lvpm_core::errors::{ArchiveFailure, LockError};
 use lvpm_core::events::{Event, LockChange};
+use lvpm_core::lockfile::StaleReason;
 use lvpm_core::solve::{Conflict, Fact};
 
 pub(super) fn render(r: &mut Renderer, event: &Event) {
@@ -45,6 +46,32 @@ pub(super) fn render(r: &mut Renderer, event: &Event) {
     }
 }
 
+/// Why a lock is out of date, as the clause that follows "lvpm.lock is out of
+/// date:". It names the manifest line at fault.
+pub fn stale_reason(reason: &StaleReason) -> String {
+    let dependency = |dev: bool| if dev { "dev dependency" } else { "dependency" };
+    match reason {
+        StaleReason::FormatOutdated => "the lock format is outdated".to_string(),
+        StaleReason::LabviewChanged => "labview changed".to_string(),
+        StaleReason::SourcesChanged => "sources changed".to_string(),
+        StaleReason::DependencyAdded { name, dev } => {
+            format!("{} \"{name}\" was added", dependency(*dev))
+        }
+        StaleReason::DependencyRemoved { name, dev } => {
+            format!("{} \"{name}\" was removed", dependency(*dev))
+        }
+        StaleReason::ConstraintExcludesLocked {
+            name,
+            constraint,
+            locked,
+            dev,
+        } => {
+            let prefix = if *dev { "dev dependency " } else { "" };
+            format!("{prefix}\"{name}\" \"{constraint}\" excludes locked {locked}")
+        }
+    }
+}
+
 fn change_line(change: &LockChange) -> String {
     match change {
         LockChange::Added { name, version } => format!("+ {name} {version}"),
@@ -72,6 +99,18 @@ pub fn error(error: &LockError) -> String {
         ),
         LockError::Conflict(conflict) => conflict_text(conflict),
         LockError::ArchivesUnavailable(failures) => archives_text(failures),
+        // `lvpm lock --check` fails with one line: a script reads it.
+        LockError::NoLock { .. } => {
+            "there is no lvpm.lock; run `lvpm lock` to create it".to_string()
+        }
+        LockError::UnreadableLock { reason, .. } => format!(
+            "lvpm.lock cannot be read ({}); run `lvpm lock` to regenerate it",
+            reason.lines().next().unwrap_or_default()
+        ),
+        LockError::Stale(reason) => format!(
+            "lvpm.lock is out of date: {}; run `lvpm lock` to update it",
+            stale_reason(reason)
+        ),
         LockError::Cancelled => {
             format!("{error}; lvpm.lock is unchanged\nnext: run `lvpm lock` again")
         }
@@ -218,6 +257,87 @@ mod tests {
         });
         assert_eq!(out.text(), "lvpm.lock is up to date\n");
         assert_eq!(err.text(), "");
+    }
+
+    #[test]
+    fn every_stale_reason_names_the_line_at_fault() {
+        let named = |name: &str| name.to_string();
+        let excludes = |dev| StaleReason::ConstraintExcludesLocked {
+            name: named("beta"),
+            constraint: named("2.0"),
+            locked: named("1.0"),
+            dev,
+        };
+        for (reason, text) in [
+            (
+                StaleReason::DependencyAdded {
+                    name: named("gamma"),
+                    dev: false,
+                },
+                "dependency \"gamma\" was added",
+            ),
+            (
+                StaleReason::DependencyRemoved {
+                    name: named("beta"),
+                    dev: false,
+                },
+                "dependency \"beta\" was removed",
+            ),
+            (
+                StaleReason::DependencyAdded {
+                    name: named("caraya"),
+                    dev: true,
+                },
+                "dev dependency \"caraya\" was added",
+            ),
+            (
+                StaleReason::DependencyRemoved {
+                    name: named("caraya"),
+                    dev: true,
+                },
+                "dev dependency \"caraya\" was removed",
+            ),
+            (excludes(false), "\"beta\" \"2.0\" excludes locked 1.0"),
+            (
+                excludes(true),
+                "dev dependency \"beta\" \"2.0\" excludes locked 1.0",
+            ),
+            (StaleReason::LabviewChanged, "labview changed"),
+            (StaleReason::SourcesChanged, "sources changed"),
+            (StaleReason::FormatOutdated, "the lock format is outdated"),
+        ] {
+            assert_eq!(stale_reason(&reason), text, "{reason:?}");
+        }
+    }
+
+    #[test]
+    fn a_failed_check_is_one_line_that_ends_with_the_command_to_run() {
+        let path = PathBuf::from("work/lvpm.lock");
+        for (error, expected) in [
+            (
+                LockError::Stale(StaleReason::DependencyAdded {
+                    name: "gamma".into(),
+                    dev: false,
+                }),
+                "lvpm.lock is out of date: dependency \"gamma\" was added; \
+                 run `lvpm lock` to update it",
+            ),
+            (
+                LockError::NoLock { path: path.clone() },
+                "there is no lvpm.lock; run `lvpm lock` to create it",
+            ),
+            (
+                LockError::UnreadableLock {
+                    path,
+                    reason: "parsing lvpm.lock: TOML parse error at line 1\n  |\n1 | not toml"
+                        .into(),
+                },
+                "lvpm.lock cannot be read (parsing lvpm.lock: TOML parse error at line 1); \
+                 run `lvpm lock` to regenerate it",
+            ),
+        ] {
+            assert_eq!(super::error(&error), expected);
+        }
     }
 
     fn manifest(package: &str, wanted: &str) -> Fact {

@@ -240,8 +240,14 @@ enum Cmd {
     /// or transitive, with its exact version, SHA-256 and source.
     ///
     /// Commit lvpm.lock with the project. Locking reads the manifest and the
-    /// sources only, never what is installed.
-    Lock,
+    /// sources only, never what is installed. A lock that still represents
+    /// the manifest is left as it is.
+    Lock {
+        /// Write nothing: exit 0 if lvpm.lock exists and is not out of date,
+        /// otherwise exit non-zero and say why on one line. Reads no source.
+        #[arg(long)]
+        check: bool,
+    },
     /// Show what lvpm has installed into the selected target.
     List,
     /// Search the indexes.
@@ -388,9 +394,11 @@ fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Launch { lvproj } => cmd_launch(&env, lvproj.as_deref()),
-        Cmd::Lock => ops::lock::lock(&env)
-            .map(drop)
-            .map_err(|why| anyhow!(render::lock::error(&why))),
+        Cmd::Lock { check } => match check {
+            true => ops::lock::check(&env),
+            false => ops::lock::lock(&env).map(drop),
+        }
+        .map_err(|why| anyhow!(render::lock::error(&why))),
         Cmd::List => {
             print!("{}", render::query::list(&ops::query::list(&env)?));
             Ok(())
