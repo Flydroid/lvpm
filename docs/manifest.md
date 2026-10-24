@@ -6,8 +6,10 @@ the public ones. It is the file you commit; the venv (`.lv-venv/` by default)
 and the shared package cache are derived from it and are not.
 
 This document is the reference for the format as implemented in
-[`src/project.rs`](../src/project.rs), how commands find and use it, and how it
-relates to VIPM's `vipm.toml`. Planned extensions are listed at the end and in
+[`src/project.rs`](../src/project.rs) (and, for `vipm.toml`,
+[`src/vipm_interop.rs`](../src/vipm_interop.rs)), how commands find and use
+it, and how it relates to VIPM's `vipm.toml`. Planned extensions are listed
+at the end and in
 [roadmap.md](roadmap.md#the-manifest-and-the-lockfile---wip).
 
 ## A complete example
@@ -57,6 +59,12 @@ manifest-driven install.
 Only the file name `lvpm.toml` is discovered. A `vipm.toml` is read only
 when named with `--manifest`, and is converted first (see
 [Compatibility with `vipm.toml`](#compatibility-with-vipmtoml)).
+
+`--manifest` chooses *what* to install, not *where*. The venv an `install`
+writes into is still the nearest one at or above the working directory (or
+`--project`'s), wherever the named manifest lives; `venv create --manifest`
+puts the venv beside the manifest, so running from that folder lines the two
+up.
 
 ## `[project]`
 
@@ -114,7 +122,7 @@ Rules:
   accepted as written.
 - Other operators (`<`, `=`, `~`, `^`, ranges) are rejected with an error
   naming the dependency, rather than misread.
-- File order is kept: the install plan lists roots in the order written.
+- The install plan lists dependencies before the packages that need them.
 
 ### How the manifest resolves
 
@@ -210,7 +218,10 @@ Keys and tables lvpm does not know are ignored, not rejected. This keeps a
 manifest readable by older lvpm builds as the format grows, and lets one file
 carry another tool's sections (see below). The flip side is that a misspelt
 key such as `labveiw` is silently ignored; check the install banner, which
-echoes the manifest path, project name and `labview` minimum it read.
+echoes the manifest path, project name, groups and `labview` minimum it read.
+This includes `[dev-dependencies]` in an `lvpm.toml`: only a converted
+`vipm.toml` reads that table; an `lvpm.toml` writes
+`[dependency-groups.dev]`.
 
 ## Compatibility with `vipm.toml`
 
@@ -250,7 +261,7 @@ written only when `venv create` has no manifest to read.
 | `[project] labview-version = "2024"`                 | Read as `labview`: VIPM's pinned year becomes lvpm's minimum.                                   |
 | `[project] labview-bitness`                          | Not used. lvpm takes bitness from the selected LabVIEW installation.                            |
 | `[project] description`, `authors`, `license`, ...   | Not used.                                                                                        |
-| `[dependencies] name = "1.2.3.4"`                    | Read as an exact pin. Empty versions and operators (`>=`, `*`, ...) are rejected, as VIPM does. |
+| `[dependencies] name = "1.2.3.4"`                    | Read as an exact pin. Empty versions and operators (`>=`, `*`, ...) are rejected: VIPM documents exact versions only. |
 | `[dev-dependencies]`                                 | Read as the dependency group `dev`, exact pins; installed with `--with dev`.                   |
 | `[nipm.dependencies]` (string or `{ version, feed }`) | Names reported, not installed.                                                                   |
 | `[nipm.dev-dependencies]`, `[nipm.feeds]`            | Not used.                                                                                        |
@@ -264,6 +275,7 @@ written only when `venv create` has no manifest to read.
 | `"=x"`, `"^x"`, `"~x"`                 | Planned in lvpm; not documented for VIPM, which expects a plain version. Likely rejected. |
 | `">=x.y"`, `"*"`, `""`                 | Not compatible: VIPM requires an exact version and rejects empty strings when loading.     |
 | `[project] labview`                    | Not read: VIPM's key is `labview-version`, and it is a pin rather than a minimum.         |
+| `[dependency-groups.*]`                | Not documented for `vipm.toml`; VIPM's only extra table is `[dev-dependencies]`. Unknown. |
 | `[sources]`                            | Not documented for `vipm.toml`; VIPM configures repositories in the application. Unknown. |
 | `[nipm.dependencies]` strings          | Compatible.                                                                                 |
 
@@ -278,8 +290,12 @@ written only when `venv create` has no manifest to read.
   "latest" at `vipm add` time. lvpm lets the manifest carry floors and `*`
   and resolves them at install time; reproducibility is the job of the
   planned `lvpm.lock`, as `vipm.lock` is for VIPM. With the planned Cargo
-  grammar a bare version is a caret in lvpm but exact in VIPM, so the
-  compatibility layer rewrites VIPM's bare versions as `=x`.
+  grammar a bare version would be a caret in lvpm but exact in VIPM; the
+  compatibility layer already turns VIPM's bare versions into exact pins, so
+  it keeps VIPM's meaning either way.
+- **Dev dependencies.** VIPM installs `[dev-dependencies]` with
+  `vipm install --dev`; lvpm installs the converted group with
+  `--with dev`. Neither installs them by default.
 - **Installation target.** VIPM installs into the LabVIEW installation. lvpm
   installs into the project's venv by default, and refuses to install into
   the machine from inside a project without a venv (except headless).
@@ -288,7 +304,14 @@ written only when `venv create` has no manifest to read.
 
 ### One file for both tools
 
-A manifest that both tools read the same way today keeps to the
+Keep the file as `vipm.toml` and point lvpm at it with `--manifest`: the
+conversion reads `labview-version`, `[dependencies]` and
+`[dev-dependencies]` with VIPM's meaning, so nothing needs duplicating.
+lvpm-only settings cannot go in it: the conversion rejects floors and `*`,
+reports `[sources]` and `[dependency-groups]` as not used, and VIPM's
+handling of them is undocumented.
+
+The reverse, an `lvpm.toml` that VIPM also reads, works only within the
 intersection, with both LabVIEW keys:
 
 ```toml
@@ -306,15 +329,15 @@ oglib_error = "6.0.1.20"
 ni-daqmx-labview-support = "26.0"
 ```
 
-That file must be named for the tool that should discover it; the other is
-pointed at it explicitly (`lvpm install --manifest vipm.toml`, or
-`vipm install ./path/to/lvpm.toml`, which VIPM's CLI accepts as a path but
-whose handling of the `lvpm.toml` name is undocumented).
+VIPM would have to be pointed at it as a path (`vipm install
+./path/to/lvpm.toml`); VIPM's CLI accepts a manifest path, but its handling
+of the `lvpm.toml` name is undocumented. Dev dependencies cannot be shared
+this way: VIPM reads `[dev-dependencies]`, an `lvpm.toml` reads
+`[dependency-groups.dev]`.
 
 This stops working once bare versions become carets in lvpm: the same line
-would pin in VIPM and float in lvpm. From then on, keep the file as
-`vipm.toml` and let lvpm read it through the compatibility layer, which
-keeps VIPM's exact meaning.
+would pin in VIPM and float in lvpm. The `vipm.toml` route above is
+unaffected.
 
 ## To do
 
@@ -384,3 +407,6 @@ Tracked in [roadmap.md](roadmap.md#the-manifest-and-the-lockfile---wip):
     `vipm.toml` is being ignored?
   - VIPM's `labview-version` is a pin; lvpm reads it as a minimum. Should a
     converted project refuse a newer LabVIEW instead?
+  - Should `install --manifest <FILE>` look for the venv from the manifest's
+    folder instead of the working directory, so *what* and *where* always
+    agree? (See [Finding the manifest](#finding-the-manifest).)
