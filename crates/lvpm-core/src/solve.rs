@@ -82,7 +82,7 @@ pub fn solve(
             let packages: BTreeMap<String, Entry> = selected
                 .into_iter()
                 .filter_map(|(package, version)| match package {
-                    Pkg::Root => None,
+                    Pkg::Root | Pkg::Extra(_) => None,
                     Pkg::Named(key) => provider
                         .catalog
                         .entry(&key, &version)
@@ -148,16 +148,25 @@ fn floor_range(floor: Option<&Floor>) -> Ranges<Version> {
 
 /// A package PubGrub reasons about. The manifest is the root: it depends on
 /// the direct dependencies and is not itself a package.
+///
+/// A package the manifest names twice (in `[dependencies]` and in
+/// `[dev-dependencies]`) gets every constraint, not just the last one. The root
+/// depends on the package for the first, and on a stand-in for each later one:
+/// `Extra(n)`, the `n`th manifest line, which asks for that package with its
+/// own constraint. Both lines then stay separate facts if they cannot hold
+/// together.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Pkg {
     Root,
+    /// The manifest's `n`th constraint, standing in for the root.
+    Extra(usize),
     Named(String),
 }
 
 impl fmt::Display for Pkg {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Pkg::Root => f.write_str("lvpm.toml"),
+            Pkg::Root | Pkg::Extra(_) => f.write_str("lvpm.toml"),
             Pkg::Named(key) => f.write_str(key),
         }
     }
@@ -222,7 +231,7 @@ struct Stopped;
 
 struct Provider<'a> {
     catalog: Catalog<'a>,
-    /// The manifest's constraints, by lowercased name.
+    /// The manifest's constraints, by lowercased name, in file order.
     direct: Vec<(String, Ranges<Version>)>,
     prefs: HashMap<String, Version>,
     lv_gate: Option<f64>,
@@ -301,7 +310,9 @@ impl DependencyProvider for Provider<'_> {
         range: &Ranges<Version>,
     ) -> Result<Option<Version>, Stopped> {
         let Pkg::Named(key) = package else {
-            return Ok(Some(root_version()));
+            // The root and its stand-ins have one version. Once a conflict
+            // rules it out there is none left to choose.
+            return Ok(range.contains(&root_version()).then(root_version));
         };
         let preferred = self
             .prefs
@@ -323,13 +334,29 @@ impl DependencyProvider for Provider<'_> {
         package: &Pkg,
         version: &Version,
     ) -> Result<Dependencies<Pkg, Ranges<Version>, Gated>, Stopped> {
-        let Pkg::Named(key) = package else {
-            return Ok(Dependencies::Available(
-                self.direct
-                    .iter()
-                    .map(|(key, range)| (Pkg::Named(key.clone()), range.clone()))
-                    .collect(),
-            ));
+        let key = match package {
+            Pkg::Named(key) => key,
+            Pkg::Root => {
+                let mut named = HashSet::new();
+                return Ok(Dependencies::Available(
+                    self.direct
+                        .iter()
+                        .enumerate()
+                        .map(|(line, (key, range))| match named.insert(key) {
+                            true => (Pkg::Named(key.clone()), range.clone()),
+                            false => (Pkg::Extra(line), Ranges::full()),
+                        })
+                        .collect(),
+                ));
+            }
+            Pkg::Extra(line) => {
+                let (key, range) = &self.direct[*line];
+                return Ok(Dependencies::Available(
+                    [(Pkg::Named(key.clone()), range.clone())]
+                        .into_iter()
+                        .collect(),
+                ));
+            }
         };
         // Pubgrub only asks about versions `choose_version` returned, so the
         // entry is there; a missing one is a package with no requirements.
@@ -495,6 +522,8 @@ fn collect_facts(tree: &Tree, names: &Names, walked: &mut HashSet<usize>, facts:
             return;
         }
         DerivationTree::External(External::NotRoot(..)) => return,
+        // The manifest and its stand-ins are not packages anyone can lack.
+        DerivationTree::External(External::NoVersions(Pkg::Root | Pkg::Extra(_), _)) => return,
         DerivationTree::External(External::NoVersions(package, wanted)) => match package {
             Pkg::Named(key) if names.catalog.versions(key).is_empty() => Fact::NotListed {
                 package: names.of(package),
@@ -504,9 +533,12 @@ fn collect_facts(tree: &Tree, names: &Names, walked: &mut HashSet<usize>, facts:
                 wanted: describe(wanted),
             },
         },
+        // The root's hand-off to a stand-in says nothing the stand-in's own
+        // line does not.
+        DerivationTree::External(External::FromDependencyOf(_, _, Pkg::Extra(_), _)) => return,
         DerivationTree::External(External::FromDependencyOf(package, versions, needs, wanted)) => {
             match package {
-                Pkg::Root => Fact::Manifest {
+                Pkg::Root | Pkg::Extra(_) => Fact::Manifest {
                     package: names.of(needs),
                     wanted: describe(wanted),
                 },
@@ -937,6 +969,49 @@ mod tests {
         token.cancel();
         let result = solve(&manifest(&[("a", "*")]), &index, &[], None, &token);
         assert!(matches!(result, Err(SolveError::Cancelled)));
+    }
+
+    #[test]
+    fn a_package_the_manifest_names_twice_must_satisfy_both_lines() {
+        let index = Index {
+            entries: vec![
+                entry("gamma", "1.0", &[]),
+                entry("gamma", "1.5", &[]),
+                entry("gamma", "2.0", &[]),
+            ],
+        };
+        // Neither line overwrites the other, whichever comes last, and
+        // however the name is spelled.
+        for lines in [
+            [("gamma", ">=1.0"), ("gamma", "1.5")],
+            [("gamma", "1.5"), ("gamma", ">=1.0")],
+            [("Gamma", "1.5"), ("gamma", "*")],
+        ] {
+            let resolution = run(&lines, &index, &[], None).expect("solves");
+            assert_eq!(chosen(&resolution), [("gamma", "1.5")], "{lines:?}");
+        }
+    }
+
+    #[test]
+    fn two_lines_for_one_package_that_cannot_both_hold_are_both_in_the_conflict() {
+        let index = Index {
+            entries: vec![entry("gamma", "1.0", &[]), entry("gamma", "1.5", &[])],
+        };
+        let Err(SolveError::Conflict(conflict)) =
+            run(&[("gamma", "1.0"), ("gamma", "1.5")], &index, &[], None)
+        else {
+            panic!("expected a conflict");
+        };
+        for wanted in ["= 1.0", "= 1.5"] {
+            assert!(
+                conflict.facts.contains(&Fact::Manifest {
+                    package: "gamma".into(),
+                    wanted: wanted.into()
+                }),
+                "{wanted} is not in:\n{conflict}"
+            );
+        }
+        assert_eq!(conflict.facts.len(), 2, "{conflict}");
     }
 
     fn run(

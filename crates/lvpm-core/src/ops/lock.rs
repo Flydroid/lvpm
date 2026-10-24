@@ -638,6 +638,75 @@ mod tests {
         }
     }
 
+    const BOTH_TABLES: &str = "[project]\nlabview = \"2023\"\n\n[sources]\ndefaults = false\n\n\
+                               [dependencies]\ngamma = \">=1.0\"\n\n\
+                               [dev-dependencies]\ncaraya = \"*\"\ngamma = \"1.5\"\n";
+    const GAMMAS: &[Fixture<'static>] = &[
+        ("gamma", "1.0", "23.0", ""),
+        ("gamma", "1.5", "23.0", "helper>=1.0"),
+        ("gamma", "2.0", "23.0", "helper>=1.0"),
+        ("helper", "1.0", "23.0", ""),
+        ("caraya", "1.0", "23.0", "helper>=1.0"),
+    ];
+
+    #[test]
+    fn a_package_in_both_tables_is_locked_once_at_a_version_both_admit() {
+        let project = ProjectDir::new("both", BOTH_TABLES, GAMMAS);
+        let lock = lock(&project.env(&Recorder::default())).unwrap();
+        let locked: Vec<(&str, &str)> = lock
+            .packages
+            .iter()
+            .map(|package| (package.name.as_str(), package.version.as_str()))
+            .collect();
+        // `>=1.0` alone would take 2.0, and the dev line alone allows 1.5 only.
+        assert_eq!(
+            locked,
+            [("caraya", "1.0"), ("gamma", "1.5"), ("helper", "1.0")]
+        );
+        // Both lines are recorded as the manifest has them.
+        assert_eq!(lock.inputs.dependencies["gamma"], ">=1.0");
+        assert_eq!(lock.inputs.dev_dependencies["gamma"], "1.5");
+    }
+
+    #[test]
+    fn a_package_in_both_tables_and_what_only_it_needs_are_not_dev() {
+        let project = ProjectDir::new("both-dev", BOTH_TABLES, GAMMAS);
+        let lock = lock(&project.env(&Recorder::default())).unwrap();
+        let dev: Vec<(&str, bool)> = lock
+            .packages
+            .iter()
+            .map(|package| (package.name.as_str(), package.dev))
+            .collect();
+        // helper is needed by gamma (normal) as well as by caraya (dev).
+        assert_eq!(dev, [("caraya", true), ("gamma", false), ("helper", false)]);
+        let text = lock.to_toml().unwrap();
+        assert_eq!(text.matches("dev = true").count(), 1, "{text}");
+    }
+
+    #[test]
+    fn a_package_in_both_tables_with_lines_that_cannot_both_hold_is_a_conflict_naming_both() {
+        let project = ProjectDir::new(
+            "both-conflict",
+            &BOTH_TABLES.replace(">=1.0", "1.0"),
+            GAMMAS,
+        );
+        let why = lock(&project.env(&Recorder::default())).unwrap_err();
+        let LockError::Conflict(conflict) = why else {
+            panic!("expected a conflict, got {why:?}");
+        };
+        for wanted in ["= 1.0", "= 1.5"] {
+            assert!(
+                conflict.facts.contains(&crate::solve::Fact::Manifest {
+                    package: "gamma".into(),
+                    wanted: wanted.into()
+                }),
+                "{wanted} is not in:\n{conflict}"
+            );
+        }
+        assert_eq!(conflict.facts.len(), 2, "{conflict}");
+        assert!(!project.lock_path().exists());
+    }
+
     #[test]
     fn a_cancelled_token_stops_locking_before_anything_is_written() {
         let project = ProjectDir::new("cancel", MANIFEST, &[("gamma", "1.0", "23.0", "")]);
