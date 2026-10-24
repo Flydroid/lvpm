@@ -57,7 +57,11 @@ fn resolve(file: &FileConfig, env: impl Fn(&str) -> Option<String>) -> Result<Co
     let venv_dir = env_value(&env, "venv.dir")
         .or_else(|| file.venv.dir.clone().filter(|v| !v.is_empty()))
         .unwrap_or_else(|| DEFAULT_VENV_DIR.to_string());
-    Ok(Config { cache, local_sources, venv_dir: PathBuf::from(venv_dir) })
+    Ok(Config {
+        cache,
+        local_sources,
+        venv_dir: PathBuf::from(venv_dir),
+    })
 }
 
 pub fn set(key: &str, values: &[String]) -> Result<()> {
@@ -91,7 +95,11 @@ pub fn get(key: &str) -> Result<Vec<String>> {
     let cfg = load()?;
     match key {
         "cache" => Ok(vec![cfg.cache.to_string_lossy().into_owned()]),
-        "sources.local" => Ok(cfg.local_sources.iter().map(|p| p.to_string_lossy().into_owned()).collect()),
+        "sources.local" => Ok(cfg
+            .local_sources
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect()),
         "venv.dir" => Ok(vec![cfg.venv_dir.to_string_lossy().into_owned()]),
         _ => bail!("unknown config key {key:?}; supported keys: cache, sources.local, venv.dir"),
     }
@@ -100,7 +108,9 @@ pub fn get(key: &str) -> Result<Vec<String>> {
 fn read_file() -> Result<FileConfig> {
     let path = config_file();
     match std::fs::read_to_string(&path) {
-        Ok(text) => toml::from_str(&text).with_context(|| format!("parsing config {}", path.display())),
+        Ok(text) => {
+            toml::from_str(&text).with_context(|| format!("parsing config {}", path.display()))
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(FileConfig::default()),
         Err(e) => Err(e).with_context(|| format!("reading config {}", path.display())),
     }
@@ -126,7 +136,9 @@ fn config_file() -> PathBuf {
 fn env_value(env: &impl Fn(&str) -> Option<String>, key: &str) -> Option<String> {
     let upper = format!("LVPM_CONFIG_{}", key.replace('.', "_").to_uppercase());
     let lower = format!("lvpm_config_{}", key.replace('.', "_").to_lowercase());
-    env(&upper).or_else(|| env(&lower)).filter(|v| !v.is_empty())
+    env(&upper)
+        .or_else(|| env(&lower))
+        .filter(|v| !v.is_empty())
 }
 
 /// Per-user, not per-target — the feeds are the same for every LabVIEW.
@@ -176,15 +188,22 @@ mod tests {
         );
 
         let empty = |k: &str| (k == "LVPM_CONFIG_CACHE").then(String::new);
-        assert_eq!(resolve(&FileConfig::default(), empty).unwrap().cache, default_cache());
+        assert_eq!(
+            resolve(&FileConfig::default(), empty).unwrap().cache,
+            default_cache()
+        );
     }
 
     #[test]
     fn file_settings_are_overridden_by_environment_values() {
         let file = FileConfig {
             cache: Some("from-file".into()),
-            sources: SourcesConfig { local: vec!["packages-a".into()] },
-            venv: VenvConfig { dir: Some(".from-file".into()) },
+            sources: SourcesConfig {
+                local: vec!["packages-a".into()],
+            },
+            venv: VenvConfig {
+                dir: Some(".from-file".into()),
+            },
         };
         let from_file = resolve(&file, |_| None).unwrap();
         assert_eq!(from_file.venv_dir, PathBuf::from(".from-file"));
@@ -196,7 +215,10 @@ mod tests {
         })
         .unwrap();
         assert_eq!(cfg.cache, std::path::absolute("from-env").unwrap());
-        assert_eq!(cfg.local_sources, std::env::split_paths("packages-b").collect::<Vec<_>>());
+        assert_eq!(
+            cfg.local_sources,
+            std::env::split_paths("packages-b").collect::<Vec<_>>()
+        );
         assert_eq!(cfg.venv_dir, PathBuf::from(".custom-venv"));
     }
 
@@ -204,7 +226,9 @@ mod tests {
     fn config_serializes_local_sources_as_a_list() {
         let file = FileConfig {
             cache: None,
-            sources: SourcesConfig { local: vec!["one".into(), "two".into()] },
+            sources: SourcesConfig {
+                local: vec!["one".into(), "two".into()],
+            },
             venv: VenvConfig::default(),
         };
         let encoded = toml::to_string_pretty(&file).unwrap();

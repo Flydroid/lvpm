@@ -60,7 +60,11 @@ const SHOWN_SAVES: usize = 6;
 /// that grows a different report keeps being heard.
 pub fn summarize_log(log: &str, folder: &Path) -> Vec<String> {
     let Ok(saved) = serde_json::from_str::<Vec<String>>(log.trim()) else {
-        return log.lines().filter(|l| !l.trim().is_empty()).map(str::to_string).collect();
+        return log
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(str::to_string)
+            .collect();
     };
     if saved.is_empty() {
         return vec!["saved nothing".to_string()];
@@ -80,8 +84,9 @@ pub fn summarize_log(log: &str, folder: &Path) -> Vec<String> {
 
 /// Extensions worth relinking. Anything else a package ships — documentation,
 /// palettes, DLLs — has no linker tables to fix.
-const LV_EXTENSIONS: &[&str] =
-    &["vi", "vit", "vim", "ctl", "ctt", "xctl", "llb", "lvlib", "lvclass", "lvproj"];
+const LV_EXTENSIONS: &[&str] = &[
+    "vi", "vit", "vim", "ctl", "ctt", "xctl", "llb", "lvlib", "lvclass", "lvproj",
+];
 
 fn is_lv_item(p: &Path) -> bool {
     p.extension()
@@ -181,8 +186,11 @@ pub fn folders_for_spec(roots: &Roots, spec: &Spec) -> Result<Vec<PathBuf>> {
     let mut dirs: Vec<PathBuf> = Vec::new();
 
     for group in &spec.file_groups {
-        let lv_files: Vec<&String> =
-            group.files.iter().filter(|f| is_lv_item(Path::new(f.as_str()))).collect();
+        let lv_files: Vec<&String> = group
+            .files
+            .iter()
+            .filter(|f| is_lv_item(Path::new(f.as_str())))
+            .collect();
         if lv_files.is_empty() {
             continue;
         }
@@ -300,10 +308,13 @@ impl Relinker {
     /// gap where a poll could still read the previous folder's `true`.
     /// Point the VI at one folder and set it going.
     fn start(&mut self, folder: &Path) -> Result<()> {
-        self.conn.ctrl_val_set(self.vi_ref, FOLDER_CONTROL, LvValue::Str(lv_folder(folder)))?;
+        self.conn
+            .ctrl_val_set(self.vi_ref, FOLDER_CONTROL, LvValue::Str(lv_folder(folder)))?;
 
         if self.can_reset_done
-            && let Err(e) = self.conn.ctrl_val_set(self.vi_ref, DONE_INDICATOR, LvValue::Bool(false))
+            && let Err(e) =
+                self.conn
+                    .ctrl_val_set(self.vi_ref, DONE_INDICATOR, LvValue::Bool(false))
         {
             eprintln!(
                 "      note: cannot clear {DONE_INDICATOR} ({e}) — relying on the VI to clear it"
@@ -385,7 +396,10 @@ impl Relinker {
 
             match self.conn.ctrl_val_get(self.vi_ref, DONE_INDICATOR)? {
                 LvValue::Bool(true) => {
-                    return Ok(Outcome { took: started.elapsed(), log: self.read_log() });
+                    return Ok(Outcome {
+                        took: started.elapsed(),
+                        log: self.read_log(),
+                    });
                 }
                 LvValue::Bool(false) => {}
                 other => bail!("{DONE_INDICATOR} read back as {other}, not a boolean"),
@@ -408,7 +422,9 @@ impl Relinker {
     /// The name is dropped after the first failure so 44 packages do not
     /// produce 44 identical notes.
     fn read_log(&mut self) -> String {
-        let Some(name) = self.log.clone() else { return String::new() };
+        let Some(name) = self.log.clone() else {
+            return String::new();
+        };
         match self.conn.ctrl_val_get(self.vi_ref, &name) {
             Ok(LvValue::Str(s)) => s,
             Ok(other) => other.to_string(),
@@ -449,7 +465,10 @@ mod tests {
 
         assert_eq!(summarize_log("[]", folder), vec!["saved nothing"]);
         // Not the array we know: pass the text through, blank lines dropped.
-        assert_eq!(summarize_log("walked 3\n\nsaved 0\n", folder), vec!["walked 3", "saved 0"]);
+        assert_eq!(
+            summarize_log("walked 3\n\nsaved 0\n", folder),
+            vec!["walked 3", "saved 0"]
+        );
         assert!(summarize_log("", folder).is_empty());
     }
 
@@ -460,10 +479,22 @@ mod tests {
     #[test]
     fn collapse_work_merges_overlapping_packages() {
         let work = vec![
-            ("caraya".to_string(), vec![PathBuf::from(r"C:\lv\vi.lib\addons\Caraya")]),
-            ("h5".to_string(), vec![PathBuf::from(r"C:\lv\vi.lib\addons")]),
-            ("caraya_cli".to_string(), vec![PathBuf::from(r"C:\lv\vi.lib\addons\Caraya")]),
-            ("dqmh".to_string(), vec![PathBuf::from(r"C:\lv\project\DQMH")]),
+            (
+                "caraya".to_string(),
+                vec![PathBuf::from(r"C:\lv\vi.lib\addons\Caraya")],
+            ),
+            (
+                "h5".to_string(),
+                vec![PathBuf::from(r"C:\lv\vi.lib\addons")],
+            ),
+            (
+                "caraya_cli".to_string(),
+                vec![PathBuf::from(r"C:\lv\vi.lib\addons\Caraya")],
+            ),
+            (
+                "dqmh".to_string(),
+                vec![PathBuf::from(r"C:\lv\project\DQMH")],
+            ),
         ];
         let plan = collapse_work(&work);
         assert_eq!(plan.len(), 2);
@@ -522,7 +553,11 @@ mod tests {
         let got = folders_for_spec(
             &roots,
             &spec(vec![
-                group(1, "<vi.lib>/addons/Thing", &["sub/Deep.vi", "sub/other/More.vi"]),
+                group(
+                    1,
+                    "<vi.lib>/addons/Thing",
+                    &["sub/Deep.vi", "sub/other/More.vi"],
+                ),
                 // Palettes have nothing to relink.
                 group(2, "<menus>/Categories/Thing", &["thing.mnu", "dir.mnu"]),
             ]),
@@ -538,7 +573,11 @@ mod tests {
         let roots = Roots::scratch(Path::new("/box"));
         let got = folders_for_spec(
             &roots,
-            &spec(vec![group(1, "<user.lib>", &["Thing/A.vi", "Thing/nested/B.vi"])]),
+            &spec(vec![group(
+                1,
+                "<user.lib>",
+                &["Thing/A.vi", "Thing/nested/B.vi"],
+            )]),
         )
         .unwrap();
         assert_eq!(got, vec![PathBuf::from("/box/LabVIEW/user.lib/Thing")]);
@@ -554,7 +593,10 @@ mod tests {
         ]));
         assert_eq!(
             got,
-            vec![PathBuf::from("C:/LV/user.lib/bar"), PathBuf::from("C:/LV/vi.lib/addons/foo")]
+            vec![
+                PathBuf::from("C:/LV/user.lib/bar"),
+                PathBuf::from("C:/LV/vi.lib/addons/foo")
+            ]
         );
     }
 
@@ -577,11 +619,13 @@ mod tests {
 
     #[test]
     fn ignores_files_with_no_linker_tables() {
-        assert!(folders_for(&f(&[
-            "C:/LV/menus/Categories/foo.mnu",
-            "C:/LV/vi.lib/addons/foo/readme.html",
-            "C:/LV/resource/foo.dll",
-        ]))
-        .is_empty());
+        assert!(
+            folders_for(&f(&[
+                "C:/LV/menus/Categories/foo.mnu",
+                "C:/LV/vi.lib/addons/foo/readme.html",
+                "C:/LV/resource/foo.dll",
+            ]))
+            .is_empty()
+        );
     }
 }

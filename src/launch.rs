@@ -35,7 +35,9 @@ pub fn override_keys(text: &str, keys: &[(&str, &str)]) -> String {
     for line in text.lines() {
         let trimmed = line.trim_start();
         let hit = keys.iter().position(|(k, _)| {
-            trimmed.strip_prefix(*k).is_some_and(|rest| rest.trim_start().starts_with('='))
+            trimmed
+                .strip_prefix(*k)
+                .is_some_and(|rest| rest.trim_start().starts_with('='))
         });
         match hit {
             Some(i) if !seen[i] => {
@@ -67,12 +69,17 @@ pub fn override_keys(text: &str, keys: &[(&str, &str)]) -> String {
 /// time, so the target's current settings are always what is inherited.
 pub fn write_ini(v: &Venv) -> Result<PathBuf> {
     let src = v.target.path.join("LabVIEW.ini");
-    let text = std::fs::read_to_string(&src).with_context(|| format!("reading {}", src.display()))?;
+    let text =
+        std::fs::read_to_string(&src).with_context(|| format!("reading {}", src.display()))?;
 
     // Verified unquoted; LabVIEW itself quotes path values that carry spaces,
     // so follow it exactly there and nowhere else.
     let raw = v.dir.to_string_lossy().replace('/', "\\");
-    let location = if raw.contains(' ') { format!("\"{raw}\"") } else { raw };
+    let location = if raw.contains(' ') {
+        format!("\"{raw}\"")
+    } else {
+        raw
+    };
     let port = v.port.to_string();
     let out = override_keys(
         &text,
@@ -97,7 +104,11 @@ pub fn write_ini(v: &Venv) -> Result<PathBuf> {
 /// Detached: LabVIEW outlives lvpm by design.
 pub fn spawn(v: &Venv, ini: &Path, lvproj: Option<&Path>) -> Result<Child> {
     let exe = v.target.path.join("LabVIEW.exe");
-    ensure!(exe.is_file(), "no LabVIEW.exe in {}", v.target.path.display());
+    ensure!(
+        exe.is_file(),
+        "no LabVIEW.exe in {}",
+        v.target.path.display()
+    );
     let mut cmd = Command::new(&exe);
     cmd.arg("-pref").arg(ini);
     if let Some(p) = lvproj {
@@ -115,7 +126,9 @@ pub fn spawn(v: &Venv, ini: &Path, lvproj: Option<&Path>) -> Result<Child> {
 /// runs, and `lvpm launch | tail` never returns. So our std handles are made
 /// non-inheritable for the duration of the spawn, and restored afterwards.
 pub fn spawn_detached(cmd: &mut Command) -> std::io::Result<Child> {
-    cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     #[cfg(windows)]
     let _keep_our_pipes = win::NoInherit::new();
     cmd.spawn()
@@ -226,7 +239,10 @@ pub fn ensure_instance(v: &Venv, fresh: bool, wait: Duration) -> Result<Instance
                 v.port
             );
         }
-        return Ok(Instance { port: v.port, child: None });
+        return Ok(Instance {
+            port: v.port,
+            child: None,
+        });
     }
     let ini = write_ini(v)?;
     eprintln!(
@@ -236,7 +252,10 @@ pub fn ensure_instance(v: &Venv, fresh: bool, wait: Duration) -> Result<Instance
     );
     let child = spawn(v, &ini, None)?;
     wait_ready(v.port, wait)?;
-    Ok(Instance { port: v.port, child: Some(child) })
+    Ok(Instance {
+        port: v.port,
+        child: Some(child),
+    })
 }
 
 impl Instance {
@@ -256,10 +275,14 @@ mod tests {
 
     #[test]
     fn override_replaces_in_place_appends_missing_and_never_duplicates() {
-        let ini = "[LabVIEW]\r\nserver.tcp.port=3364\r\nserver.tcp.acl=\"+*\"\r\nserver.tcp.port = 9\r\n";
+        let ini =
+            "[LabVIEW]\r\nserver.tcp.port=3364\r\nserver.tcp.acl=\"+*\"\r\nserver.tcp.port = 9\r\n";
         let out = override_keys(
             ini,
-            &[("server.tcp.port", "3400"), ("LVAddons.AdditionalLocations", "C:\\r\\.lv-venv")],
+            &[
+                ("server.tcp.port", "3400"),
+                ("LVAddons.AdditionalLocations", "C:\\r\\.lv-venv"),
+            ],
         );
         assert_eq!(
             out,

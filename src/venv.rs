@@ -57,9 +57,12 @@ fn binding_path(dir: &Path) -> PathBuf {
 impl Venv {
     /// Roots for installing one package: its own addon under the venv.
     pub fn roots_for_pkg(&self, pkg: &str) -> Result<Roots> {
-        // The name becomes a directory LabVIEW enumerates; 
+        // The name becomes a directory LabVIEW enumerates;
         ensure!(
-            !pkg.is_empty() && pkg.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)),
+            !pkg.is_empty()
+                && pkg
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)),
             "package name {pkg:?} cannot be an addon folder name"
         );
         Ok(Roots::project(&self.dir, &self.target, pkg))
@@ -147,9 +150,14 @@ pub fn load(repo: &Path) -> Result<Venv> {
     let repo = std::path::absolute(repo)?;
     let dir = repo.join(config::load()?.venv_dir);
     let bp = binding_path(&dir);
-    let text = std::fs::read_to_string(&bp)
-        .with_context(|| format!("no venv in {} — `lvpm venv create` makes one", repo.display()))?;
-    let b: Binding = serde_json::from_str(&text).with_context(|| format!("reading {}", bp.display()))?;
+    let text = std::fs::read_to_string(&bp).with_context(|| {
+        format!(
+            "no venv in {} — `lvpm venv create` makes one",
+            repo.display()
+        )
+    })?;
+    let b: Binding =
+        serde_json::from_str(&text).with_context(|| format!("reading {}", bp.display()))?;
 
     let target = target::detect()?
         .into_iter()
@@ -162,7 +170,12 @@ pub fn load(repo: &Path) -> Result<Venv> {
                 b.target_path
             )
         })?;
-    Ok(Venv { repo, dir, target, port: b.port })
+    Ok(Venv {
+        repo,
+        dir,
+        target,
+        port: b.port,
+    })
 }
 
 /// Create the configured venv directory for the project at or above `start` (or at `start`
@@ -225,13 +238,17 @@ pub fn create(start: &Path, labview_version: Option<&str>) -> Result<Venv> {
             .unwrap_or_else(|| "project".to_string());
         std::fs::write(
             &manifest_path,
-            format!("[project]\nname = \"{name}\"\nlabview = \"{}\"\n\n[dependencies]\n", target.year()),
+            format!(
+                "[project]\nname = \"{name}\"\nlabview = \"{}\"\n\n[dependencies]\n",
+                target.year()
+            ),
         )
         .with_context(|| format!("writing {}", manifest_path.display()))?;
         eprintln!("wrote {}", manifest_path.display());
     }
 
-    std::fs::create_dir_all(dir.join(".lvpm")).with_context(|| format!("creating {}", dir.display()))?;
+    std::fs::create_dir_all(dir.join(".lvpm"))
+        .with_context(|| format!("creating {}", dir.display()))?;
     // The payload is disposable and machine-bound: the manifests inside hold
     // absolute paths. Self-ignoring, the way cargo's `target/` is.
     std::fs::write(dir.join(".gitignore"), "*\n")?;
@@ -248,13 +265,21 @@ pub fn create(start: &Path, labview_version: Option<&str>) -> Result<Venv> {
             .unwrap_or(0),
     };
     std::fs::write(binding_path(&dir), serde_json::to_string_pretty(&b)?)?;
-    Ok(Venv { repo, dir, target, port })
+    Ok(Venv {
+        repo,
+        dir,
+        target,
+        port,
+    })
 }
 
 /// Delete the venv — payload, store, binding, all of it.
 pub fn remove(v: &Venv, yes: bool) -> Result<()> {
     if !yes {
-        eprint!("delete {} and everything installed in it? [y/N] ", v.dir.display());
+        eprint!(
+            "delete {} and everything installed in it? [y/N] ",
+            v.dir.display()
+        );
         let mut line = String::new();
         std::io::stdin().read_line(&mut line)?;
         if !line.trim().eq_ignore_ascii_case("y") {
@@ -264,7 +289,9 @@ pub fn remove(v: &Venv, yes: bool) -> Result<()> {
     std::fs::remove_dir_all(&v.dir).with_context(|| {
         let mut why = format!("removing {}", v.dir.display());
         if crate::launch::is_listening(v.port) {
-            why.push_str(" — a LabVIEW is running on this venv and holds files open; close it first");
+            why.push_str(
+                " — a LabVIEW is running on this venv and holds files open; close it first",
+            );
         }
         why
     })?;

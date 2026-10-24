@@ -88,7 +88,9 @@ pub fn parse(text: &str) -> Result<Spec> {
 
     let mut file_groups = Vec::new();
     for i in 0.. {
-        let Some(g) = sections.get(&format!("File Group {i}")) else { break };
+        let Some(g) = sections.get(&format!("File Group {i}")) else {
+            break;
+        };
         let files = match g.get("Num Files").and_then(|n| n.parse::<usize>().ok()) {
             Some(n) => (0..n)
                 .filter_map(|j| g.get(&format!("File {j}")).cloned())
@@ -98,7 +100,10 @@ pub fn parse(text: &str) -> Result<Spec> {
                 let mut v: Vec<(usize, String)> = g
                     .iter()
                     .filter_map(|(k, val)| {
-                        k.strip_prefix("File ")?.parse::<usize>().ok().map(|n| (n, val.clone()))
+                        k.strip_prefix("File ")?
+                            .parse::<usize>()
+                            .ok()
+                            .map(|n| (n, val.clone()))
                     })
                     .collect();
                 v.sort_by_key(|(n, _)| *n);
@@ -108,7 +113,10 @@ pub fn parse(text: &str) -> Result<Spec> {
         file_groups.push(FileGroup {
             index: i,
             target_dir: g.get("Target Dir").cloned().unwrap_or_default(),
-            replace_mode: g.get("Replace Mode").cloned().unwrap_or_else(|| "Always".into()),
+            replace_mode: g
+                .get("Replace Mode")
+                .cloned()
+                .unwrap_or_else(|| "Always".into()),
             files,
         });
     }
@@ -127,13 +135,26 @@ pub fn parse(text: &str) -> Result<Spec> {
         .unwrap_or_default();
 
     let non_empty = |s: &HashMap<String, String>, k: &str| {
-        s.get(k).map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
+        s.get(k)
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
     };
-    let requires = sections.get("Dependencies").and_then(|s| non_empty(s, "Requires"));
-    let lv_gate =
-        sections.get("Platform").and_then(|s| non_empty(s, "Exclusive_LabVIEW_Version"));
+    let requires = sections
+        .get("Dependencies")
+        .and_then(|s| non_empty(s, "Requires"));
+    let lv_gate = sections
+        .get("Platform")
+        .and_then(|s| non_empty(s, "Exclusive_LabVIEW_Version"));
 
-    Ok(Spec { name, version, display_name, file_groups, script_vis, requires, lv_gate })
+    Ok(Spec {
+        name,
+        version,
+        display_name,
+        file_groups,
+        script_vis,
+        requires,
+        lv_gate,
+    })
 }
 
 #[cfg(test)]
@@ -215,6 +236,9 @@ File 0="JKI Toolkits.mnu"
     fn reports_non_empty_hooks() {
         let text = SAMPLE.replace(r#"PostInstall="""#, r#"PostInstall="setup.vi""#);
         let s = parse(&text).unwrap();
-        assert_eq!(s.script_vis, vec![("PostInstall".into(), "setup.vi".into())]);
+        assert_eq!(
+            s.script_vis,
+            vec![("PostInstall".into(), "setup.vi".into())]
+        );
     }
 }

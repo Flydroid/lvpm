@@ -111,36 +111,57 @@ impl Cache {
         // WAL so a search and an install can read the cache concurrently.
         db.pragma_update(None, "journal_mode", "WAL")?;
         db.execute_batch(SCHEMA)?;
-        let has_sha256 = db.prepare("PRAGMA table_info(local_files)")?
+        let has_sha256 = db
+            .prepare("PRAGMA table_info(local_files)")?
             .query_map([], |row| row.get::<_, String>(1))?
             .collect::<rusqlite::Result<Vec<_>>>()?
-            .iter().any(|name| name == "sha256");
+            .iter()
+            .any(|name| name == "sha256");
         if !has_sha256 {
             db.execute_batch("ALTER TABLE local_files ADD COLUMN sha256 TEXT")?;
         }
         if version < CACHE_SCHEMA_VERSION {
             db.pragma_update(None, "user_version", CACHE_SCHEMA_VERSION)?;
         }
-        Ok(Cache { db, root: root.to_path_buf() })
+        Ok(Cache {
+            db,
+            root: root.to_path_buf(),
+        })
     }
 
     /// Reuse metadata only when the absolute path, size, and modification time match.
     /// Unavailable timestamps or invalid JSON are misses; stats are not integrity
     /// checks and cannot detect replacements preserving both size and timestamp.
-    pub fn local_entry(&self, path: &Path, metadata: &std::fs::Metadata) -> Result<Option<LocalEntry>> {
-        let Some(modified) = file_modified(metadata) else { return Ok(None) };
-        let entry: Option<String> = self.db.query_row(
-            "SELECT entry FROM local_files WHERE path = ?1 AND size = ?2 AND modified = ?3",
-            params![path.to_string_lossy(), metadata.len().to_string(), modified],
-            |row| row.get(0),
-        ).optional()?;
+    pub fn local_entry(
+        &self,
+        path: &Path,
+        metadata: &std::fs::Metadata,
+    ) -> Result<Option<LocalEntry>> {
+        let Some(modified) = file_modified(metadata) else {
+            return Ok(None);
+        };
+        let entry: Option<String> = self
+            .db
+            .query_row(
+                "SELECT entry FROM local_files WHERE path = ?1 AND size = ?2 AND modified = ?3",
+                params![path.to_string_lossy(), metadata.len().to_string(), modified],
+                |row| row.get(0),
+            )
+            .optional()?;
         Ok(entry.and_then(|entry| serde_json::from_str(&entry).ok()))
     }
 
     /// Replace parsed metadata and clear its import shortcut without deleting packages.
     /// No record is written when a usable modification time is unavailable.
-    pub fn record_local(&self, path: &Path, metadata: &std::fs::Metadata, entry: &LocalEntry) -> Result<()> {
-        let Some(modified) = file_modified(metadata) else { return Ok(()) };
+    pub fn record_local(
+        &self,
+        path: &Path,
+        metadata: &std::fs::Metadata,
+        entry: &LocalEntry,
+    ) -> Result<()> {
+        let Some(modified) = file_modified(metadata) else {
+            return Ok(());
+        };
         self.db.execute(
             "INSERT INTO local_files (path, size, modified, entry) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(path) DO UPDATE SET size=excluded.size, modified=excluded.modified, entry=excluded.entry, sha256=NULL",
@@ -151,28 +172,47 @@ impl Cache {
 
     /// Invalidate the original file's shortcut, leaving imported archives intact.
     pub fn forget_local(&self, path: &Path) -> Result<()> {
-        self.db.execute("DELETE FROM local_files WHERE path = ?1", params![path.to_string_lossy()])?;
+        self.db.execute(
+            "DELETE FROM local_files WHERE path = ?1",
+            params![path.to_string_lossy()],
+        )?;
         Ok(())
     }
 
     /// Find an unchanged import with a package row and an existing blob.
     /// This fast path checks existence only; consumers must verify the blob on read.
-    pub fn imported_local(&self, path: &Path, metadata: &std::fs::Metadata) -> Result<Option<String>> {
-        let Some(modified) = file_modified(metadata) else { return Ok(None) };
-        let sha: Option<String> = self.db.query_row(
-            "SELECT l.sha256 FROM local_files l JOIN packages p
+    pub fn imported_local(
+        &self,
+        path: &Path,
+        metadata: &std::fs::Metadata,
+    ) -> Result<Option<String>> {
+        let Some(modified) = file_modified(metadata) else {
+            return Ok(None);
+        };
+        let sha: Option<String> = self
+            .db
+            .query_row(
+                "SELECT l.sha256 FROM local_files l JOIN packages p
              ON p.source_ref=l.path AND p.sha256=l.sha256
              WHERE l.path=?1 AND l.size=?2 AND l.modified=?3",
-            params![path.to_string_lossy(), metadata.len().to_string(), modified],
-            |row| row.get(0),
-        ).optional()?;
+                params![path.to_string_lossy(), metadata.len().to_string(), modified],
+                |row| row.get(0),
+            )
+            .optional()?;
         Ok(sha.filter(|sha| valid_sha256(sha) && self.blob_path(sha).is_file()))
     }
 
     /// Atomically record package ownership by absolute source path and its stat link.
     /// The caller must store the blob and compute both digests first. Package rows
     /// survive original-file deletion; missing timestamps disable the stat shortcut.
-    pub fn record_import(&self, path: &Path, metadata: &std::fs::Metadata, entry: &LocalEntry, sha256: &str, md5: &str) -> Result<()> {
+    pub fn record_import(
+        &self,
+        path: &Path,
+        metadata: &std::fs::Metadata,
+        entry: &LocalEntry,
+        sha256: &str,
+        md5: &str,
+    ) -> Result<()> {
         let transaction = self.db.unchecked_transaction()?;
         transaction.execute(
             "INSERT INTO packages (name, version, sha256, md5, source_kind, source_ref, display_name, entry, added_at)
@@ -186,7 +226,10 @@ impl Cache {
             self.forget_local(path)?;
         }
         self.record_local(path, metadata, entry)?;
-        transaction.execute("UPDATE local_files SET sha256=?2 WHERE path=?1", params![path.to_string_lossy(), sha256])?;
+        transaction.execute(
+            "UPDATE local_files SET sha256=?2 WHERE path=?1",
+            params![path.to_string_lossy(), sha256],
+        )?;
         transaction.commit()?;
         Ok(())
     }
@@ -197,11 +240,21 @@ impl Cache {
         let mut statement = self.db.prepare(
             "SELECT entry, sha256, md5 FROM packages WHERE source_kind='local-add-cache' ORDER BY name, version, source_ref",
         )?;
-        let rows = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
         let mut packages = Vec::new();
         for row in rows {
             let (entry, sha256, md5) = row?;
-            packages.push(CachedPackage { entry: serde_json::from_str(&entry)?, sha256, md5 });
+            packages.push(CachedPackage {
+                entry: serde_json::from_str(&entry)?,
+                sha256,
+                md5,
+            });
         }
         Ok(packages)
     }
@@ -214,15 +267,26 @@ impl Cache {
         let mut statement = self.db.prepare(
             "SELECT DISTINCT sha256 FROM packages WHERE name=?1 COLLATE NOCASE AND version=?2 AND md5=?3 LIMIT 2",
         )?;
-        let hashes = statement.query_map(params![name, version, md5], |row| row.get::<_, String>(0))?
+        let hashes = statement
+            .query_map(params![name, version, md5], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(if hashes.len() == 1 { hashes.into_iter().next() } else { None })
+        Ok(if hashes.len() == 1 {
+            hashes.into_iter().next()
+        } else {
+            None
+        })
     }
 
     /// Record verified, already-stored bytes using the requested package URL as provenance.
     /// Upserts replace the current mapping for a name/version/URL; rows from other
     /// sources remain independent and can expose ambiguous legacy MD5 mappings.
-    pub fn record_download(&self, entry: &LocalEntry, url: &str, sha256: &str, md5: &str) -> Result<()> {
+    pub fn record_download(
+        &self,
+        entry: &LocalEntry,
+        url: &str,
+        sha256: &str,
+        md5: &str,
+    ) -> Result<()> {
         self.db.execute(
             "INSERT INTO packages (name, version, sha256, md5, source_kind, source_ref, display_name, entry, added_at)
              VALUES (?1, ?2, ?3, ?4, 'remote', ?5, ?6, ?7, ?8)
@@ -282,17 +346,26 @@ impl Cache {
         }
         std::fs::create_dir_all(dest.parent().expect("blob path has a shard dir"))?;
         static NEXT_TMP: AtomicU64 = AtomicU64::new(0);
-        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos();
-        let tmp = self.root.join("tmp").join(format!("{}-{stamp}-{}", std::process::id(), NEXT_TMP.fetch_add(1, Ordering::Relaxed)));
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos();
+        let tmp = self.root.join("tmp").join(format!(
+            "{}-{stamp}-{}",
+            std::process::id(),
+            NEXT_TMP.fetch_add(1, Ordering::Relaxed)
+        ));
         let result = (|| -> Result<()> {
-            let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp)?;
             file.write_all(bytes)?;
             file.sync_all()?;
             drop(file);
-            if let Err(error) = std::fs::rename(&tmp, &dest) {
-                if self.load(&sha)?.is_none() {
-                    return Err(error).with_context(|| format!("storing blob {}", dest.display()));
-                }
+            if let Err(error) = std::fs::rename(&tmp, &dest)
+                && self.load(&sha)?.is_none()
+            {
+                return Err(error).with_context(|| format!("storing blob {}", dest.display()));
             }
             Ok(())
         })();
@@ -303,7 +376,9 @@ impl Cache {
 
     /// The stored bytes for a digest, if they are there and still hash to it.
     pub fn load(&self, sha: &str) -> Result<Option<Vec<u8>>> {
-        if !valid_sha256(sha) { return Ok(None) }
+        if !valid_sha256(sha) {
+            return Ok(None);
+        }
         let path = self.blob_path(sha);
         let Ok(bytes) = std::fs::read(&path) else {
             return Ok(None);
@@ -316,16 +391,27 @@ impl Cache {
     }
 
     fn blob_path(&self, sha: &str) -> PathBuf {
-        self.root.join("content").join("sha256").join(&sha[..2]).join(sha)
+        self.root
+            .join("content")
+            .join("sha256")
+            .join(&sha[..2])
+            .join(sha)
     }
 }
 
 fn valid_sha256(sha: &str) -> bool {
-    sha.len() == 64 && sha.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    sha.len() == 64
+        && sha
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn file_modified(metadata: &std::fs::Metadata) -> Option<String> {
-    metadata.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()
+    metadata
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
         .map(|duration| duration.as_nanos().to_string())
 }
 
@@ -374,7 +460,10 @@ mod tests {
 
         let sha = c.store(b"original").unwrap();
         std::fs::write(c.blob_path(&sha), b"tampered").unwrap();
-        assert!(c.load(&sha).unwrap().is_none(), "bytes that do not hash to their name are not trusted");
+        assert!(
+            c.load(&sha).unwrap().is_none(),
+            "bytes that do not hash to their name are not trusted"
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -387,9 +476,14 @@ mod tests {
             INSERT INTO local_files VALUES ('old.vip', '12', '34', '{}'); PRAGMA user_version=1;").unwrap();
         drop(db);
         let cache = Cache::open(&root).unwrap();
-        let (size, sha): (String, Option<String>) = cache.db.query_row(
-            "SELECT size, sha256 FROM local_files WHERE path='old.vip'", [], |row| Ok((row.get(0)?, row.get(1)?)),
-        ).unwrap();
+        let (size, sha): (String, Option<String>) = cache
+            .db
+            .query_row(
+                "SELECT size, sha256 FROM local_files WHERE path='old.vip'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
         assert_eq!(size, "12");
         assert!(sha.is_none());
         drop(cache);
@@ -436,11 +530,16 @@ mod tests {
             last_modified: Some("Mon, 01 Jan 2024 00:00:00 GMT".into()),
             sha256: Some(c.store(b"body one").unwrap()),
         };
-        c.record(url, "remote", "http://example.test/", &first).unwrap();
+        c.record(url, "remote", "http://example.test/", &first)
+            .unwrap();
         assert_eq!(c.state(url).unwrap().as_ref(), Some(&first));
 
-        let second = SourceState { etag: Some("\"bbb\"".into()), ..first };
-        c.record(url, "remote", "http://example.test/", &second).unwrap();
+        let second = SourceState {
+            etag: Some("\"bbb\"".into()),
+            ..first
+        };
+        c.record(url, "remote", "http://example.test/", &second)
+            .unwrap();
         assert_eq!(c.state(url).unwrap().as_ref(), Some(&second));
 
         std::fs::remove_dir_all(&root).ok();
@@ -449,8 +548,14 @@ mod tests {
     #[test]
     fn opening_an_existing_cache_again_keeps_what_is_in_it() {
         let root = temp_root("reopen");
-        let st = SourceState { sha256: Some("f".repeat(64)), ..SourceState::default() };
-        Cache::open(&root).unwrap().record("dir", "local", "dir", &st).unwrap();
+        let st = SourceState {
+            sha256: Some("f".repeat(64)),
+            ..SourceState::default()
+        };
+        Cache::open(&root)
+            .unwrap()
+            .record("dir", "local", "dir", &st)
+            .unwrap();
 
         assert_eq!(Cache::open(&root).unwrap().state("dir").unwrap(), Some(st));
         std::fs::remove_dir_all(&root).ok();
@@ -460,12 +565,16 @@ mod tests {
     fn opening_a_cache_records_the_schema_version() {
         let root = temp_root("version");
         let c = Cache::open(&root).unwrap();
-        let version: i32 = c.db.pragma_query_value(None, "user_version", |row| row.get(0)).unwrap();
+        let version: i32 =
+            c.db.pragma_query_value(None, "user_version", |row| row.get(0))
+                .unwrap();
         assert_eq!(version, CACHE_SCHEMA_VERSION);
         drop(c);
 
         let db = Connection::open(root.join(DB_FILE)).unwrap();
-        let version: i32 = db.pragma_query_value(None, "user_version", |row| row.get(0)).unwrap();
+        let version: i32 = db
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
         assert_eq!(version, CACHE_SCHEMA_VERSION);
         std::fs::remove_dir_all(&root).ok();
     }
@@ -475,7 +584,8 @@ mod tests {
         let root = temp_root("newer-version");
         std::fs::create_dir_all(&root).unwrap();
         let db = Connection::open(root.join(DB_FILE)).unwrap();
-        db.pragma_update(None, "user_version", CACHE_SCHEMA_VERSION + 1).unwrap();
+        db.pragma_update(None, "user_version", CACHE_SCHEMA_VERSION + 1)
+            .unwrap();
         drop(db);
 
         let error = match Cache::open(&root) {

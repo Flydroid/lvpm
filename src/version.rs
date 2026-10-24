@@ -35,7 +35,11 @@ impl Version {
                 digits.parse::<u64>().unwrap_or(0)
             })
             .collect();
-        Version { parts, pre, raw: raw.to_string() }
+        Version {
+            parts,
+            pre,
+            raw: raw.to_string(),
+        }
     }
 
     fn at(&self, i: usize) -> u64 {
@@ -133,15 +137,24 @@ mod tests {
         let (n, v) =
             split_id("national_instruments_lib_rs-232_interface_reference_example-1.0.0.1")
                 .unwrap();
-        assert_eq!(n, "national_instruments_lib_rs-232_interface_reference_example");
+        assert_eq!(
+            n,
+            "national_instruments_lib_rs-232_interface_reference_example"
+        );
         assert_eq!(v.raw, "1.0.0.1");
     }
 
     #[test]
     fn plain_ids_and_prereleases_still_split() {
         assert_eq!(split_id("oglib_error-6.0.1.29").unwrap().1.raw, "6.0.1.29");
-        assert_eq!(split_id("jki_lib_state_machine-2024.0.3.23").unwrap().1.raw, "2024.0.3.23");
-        assert_eq!(split_id("vipm_lib_x-0.1.0alpha1-1").unwrap().1.raw, "0.1.0alpha1-1");
+        assert_eq!(
+            split_id("jki_lib_state_machine-2024.0.3.23").unwrap().1.raw,
+            "2024.0.3.23"
+        );
+        assert_eq!(
+            split_id("vipm_lib_x-0.1.0alpha1-1").unwrap().1.raw,
+            "0.1.0alpha1-1"
+        );
         assert!(split_id("no_version_here").is_none());
     }
 

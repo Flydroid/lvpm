@@ -6,7 +6,7 @@
 //! package with a menu-launch VI drops it under `<project>`. LabVIEW reads
 //! both trees when it starts and caches them, so until it is told otherwise a
 //! freshly installed package has no palette entry and no **Tools** entry — the
-//! install looks like it did nothing. 
+//! install looks like it did nothing.
 //!
 //! Two Application-class methods do the work, `Palettes:Refresh` and
 //! `Menus:Refresh`, and **neither can be invoked from here.** They resolve
@@ -44,7 +44,10 @@ use std::time::{Duration, Instant};
 /// one day, which is why a missing VI is reported rather than fatal.
 const REFRESH_VIS: [(&str, &str); 2] = [
     ("palettes", r"vi.lib\Palette API\Refresh Palettes.vi"),
-    ("menus", r"resource\plugins\PopupMenus\support\Refresh Menus.vi"),
+    (
+        "menus",
+        r"resource\plugins\PopupMenus\support\Refresh Menus.vi",
+    ),
 ];
 
 /// One refresh: what it was, and how it went.
@@ -65,7 +68,10 @@ pub fn run(target: &LvTarget, timeout: Duration) -> Result<Vec<Outcome>> {
 
     let mut out = Vec::with_capacity(REFRESH_VIS.len());
     for (what, rel) in REFRESH_VIS {
-        out.push(Outcome { what, result: run_one(&mut conn, target.path.join(rel)) });
+        out.push(Outcome {
+            what,
+            result: run_one(&mut conn, target.path.join(rel)),
+        });
     }
     conn.close();
     Ok(out)
@@ -81,7 +87,9 @@ fn run_one(conn: &mut Connection, vi: PathBuf) -> Result<Duration> {
         anyhow::bail!("{} does not exist in this LabVIEW", vi.display());
     }
     let t0 = Instant::now();
-    let r = conn.open_vi_reference(&vi).with_context(|| format!("opening {}", vi.display()))?;
+    let r = conn
+        .open_vi_reference(&vi)
+        .with_context(|| format!("opening {}", vi.display()))?;
     let run = conn.run_vi(r);
     let _ = conn.release(r);
     run.map(|()| t0.elapsed())

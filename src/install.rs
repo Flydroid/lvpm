@@ -193,11 +193,20 @@ pub fn plan(roots: &Roots, spec: &Spec, zip: &mut Archive) -> Result<Plan> {
                 kept.push(dest);
                 continue;
             }
-            writes.push(PlannedWrite { zip_index, dest, overwrites: exists });
+            writes.push(PlannedWrite {
+                zip_index,
+                dest,
+                overwrites: exists,
+            });
         }
     }
 
-    Ok(Plan { writes, kept, missing_from_archive: missing, skipped_groups: skipped })
+    Ok(Plan {
+        writes,
+        kept,
+        missing_from_archive: missing,
+        skipped_groups: skipped,
+    })
 }
 
 /// The `lvaddoninfo.json` LabVIEW reads to mount an addon (fields as NI's own
@@ -228,7 +237,11 @@ pub fn apply(
     // root. Extract it next to the manifests so it survives until the relink
     // pass has made it runnable.
     let mut hook = |name: &str, member: &str| -> Result<Option<PathBuf>> {
-        match spec.script_vis.iter().any(|(h, v)| h == name && !v.is_empty()) {
+        match spec
+            .script_vis
+            .iter()
+            .any(|(h, v)| h == name && !v.is_empty())
+        {
             true => extract_hook(roots, &spec.name, zip, member),
             false => Ok(None),
         }
@@ -245,8 +258,7 @@ pub fn apply(
         let mut src = zip.by_index(w.zip_index)?;
         let mut buf = Vec::with_capacity(src.size() as usize);
         src.read_to_end(&mut buf)?;
-        std::fs::write(&w.dest, &buf)
-            .with_context(|| format!("writing {}", w.dest.display()))?;
+        std::fs::write(&w.dest, &buf).with_context(|| format!("writing {}", w.dest.display()))?;
         written.push(w.dest.to_string_lossy().replace('\\', "/"));
     }
     // The footprint is what the package ships, not what this run happened to
@@ -284,7 +296,11 @@ pub fn apply(
         },
         files: written,
         skipped_hooks: match roots.venv() {
-            Some(_) => spec.script_vis.iter().map(|(h, v)| format!("{h}={v}")).collect(),
+            Some(_) => spec
+                .script_vis
+                .iter()
+                .map(|(h, v)| format!("{h}={v}"))
+                .collect(),
             // PreInstall has run by now, PostInstall runs after the relink
             // pass and is recorded here only if it fails, and the uninstall
             // hooks wait for `lvpm uninstall` in the copies extracted above.
@@ -322,7 +338,11 @@ pub fn extract_hook(
     let Ok(mut src) = zip.by_name(member) else {
         return Ok(None);
     };
-    let dir = roots.store_dir().parent().map(|p| p.join("hooks")).unwrap_or_default();
+    let dir = roots
+        .store_dir()
+        .parent()
+        .map(|p| p.join("hooks"))
+        .unwrap_or_default();
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let dest = dir.join(format!("{package}-{member}"));
     let mut buf = Vec::with_capacity(src.size() as usize);
@@ -428,7 +448,11 @@ mod tests {
 
     #[test]
     fn addon_info_has_the_fields_ni_writes_and_floors_at_the_bound_target() {
-        let t = LvTarget { version: 26.3, bitness: 64, path: PathBuf::from(r"C:\LV") };
+        let t = LvTarget {
+            version: 26.3,
+            bitness: 64,
+            path: PathBuf::from(r"C:\LV"),
+        };
         let v: serde_json::Value = serde_json::from_str(&addon_info("oglib_error", &t)).unwrap();
         assert_eq!(v["AddonName"], "oglib_error");
         assert_eq!(v["ApiVersion"], "v1");

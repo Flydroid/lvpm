@@ -51,7 +51,9 @@ fn ini_token(target: &LvTarget, key: &str) -> Option<String> {
 /// Not a constant: LabVIEW 2025 defaults to 3363 and 2026 to 3364, and both can
 /// be installed side by side.
 pub fn vi_server_port(target: &LvTarget) -> u16 {
-    ini_token(target, "server.tcp.port").and_then(|v| v.parse().ok()).unwrap_or(3363)
+    ini_token(target, "server.tcp.port")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3363)
 }
 
 /// Fail early, and legibly, when a target cannot accept a VI Server client.
@@ -103,7 +105,10 @@ pub fn ensure_vi_server(target: &LvTarget, wait: Duration) -> Result<u16> {
     if !exe.is_file() {
         bail!("no LabVIEW.exe in {}", target.path.display());
     }
-    eprintln!("starting {} and waiting for VI Server on port {port}...", target.label());
+    eprintln!(
+        "starting {} and waiting for VI Server on port {port}...",
+        target.label()
+    );
     // Detached child: LabVIEW outlives lvpm by design — and must not keep
     // lvpm's own pipes open while it does (see `launch::spawn_detached`).
     crate::launch::spawn_detached(&mut std::process::Command::new(&exe))
@@ -231,12 +236,22 @@ pub enum LvValue {
     Path(String),
     /// A variant carrying its own value and named attributes.
     /// The inner value is usually unremarkable; the attributes are the point.
-    Variant { value: Box<LvValue>, attrs: Vec<(String, LvValue)> },
+    Variant {
+        value: Box<LvValue>,
+        attrs: Vec<(String, LvValue)>,
+    },
     /// An array. `elem` is the element's type code, kept separately so an
     /// empty array still knows what it is; `shape` is one length per
     /// dimension and `items` holds the elements in row-major order.
-    Array { elem: u16, shape: Vec<u32>, items: Vec<LvValue> },
-    Other { code: u16, data: Vec<u8> },
+    Array {
+        elem: u16,
+        shape: Vec<u32>,
+        items: Vec<LvValue>,
+    },
+    Other {
+        code: u16,
+        data: Vec<u8>,
+    },
 }
 
 impl LvValue {
@@ -250,7 +265,9 @@ impl LvValue {
             LvValue::Path(_) => TD_PATH,
             LvValue::Variant { .. } => TD_VARIANT,
             LvValue::Array { .. } => TD_ARRAY,
-            LvValue::Other { code, .. } => bail!("cannot encode an undecoded value (type {code:#04x})"),
+            LvValue::Other { code, .. } => {
+                bail!("cannot encode an undecoded value (type {code:#04x})")
+            }
         })
     }
 
@@ -276,13 +293,20 @@ impl LvValue {
         for v in &items {
             ensure!(v.type_code()? == elem, "array elements have mixed types");
         }
-        ensure!(elem != TD_ARRAY, "arrays of arrays are unsupported (use a shape instead)");
+        ensure!(
+            elem != TD_ARRAY,
+            "arrays of arrays are unsupported (use a shape instead)"
+        );
         Ok(LvValue::Array { elem, shape, items })
     }
 
     /// An empty one-dimensional array of the given element type code.
     pub fn empty_array(elem: u16) -> LvValue {
-        LvValue::Array { elem, shape: vec![0], items: Vec::new() }
+        LvValue::Array {
+            elem,
+            shape: vec![0],
+            items: Vec::new(),
+        }
     }
 
     /// The value's flattened bytes, without any container padding.
@@ -313,7 +337,9 @@ impl LvValue {
                 }
                 out
             }
-            LvValue::Other { code, .. } => bail!("cannot encode an undecoded value (type {code:#04x})"),
+            LvValue::Other { code, .. } => {
+                bail!("cannot encode an undecoded value (type {code:#04x})")
+            }
         })
     }
 }
@@ -346,11 +372,7 @@ impl std::fmt::Display for LvValue {
 }
 
 /// Print row-major `items` with one bracket level per dimension.
-fn fmt_rows(
-    f: &mut std::fmt::Formatter<'_>,
-    shape: &[u32],
-    items: &[LvValue],
-) -> std::fmt::Result {
+fn fmt_rows(f: &mut std::fmt::Formatter<'_>, shape: &[u32], items: &[LvValue]) -> std::fmt::Result {
     write!(f, "[")?;
     match shape {
         // Innermost dimension (or a shape we cannot trust): print the values.
@@ -364,7 +386,11 @@ fn fmt_rows(
         }
         [outer, rest @ ..] => {
             let stride = items.len() / (*outer).max(1) as usize;
-            for (i, row) in items.chunks(stride.max(1)).take(*outer as usize).enumerate() {
+            for (i, row) in items
+                .chunks(stride.max(1))
+                .take(*outer as usize)
+                .enumerate()
+            {
                 if i > 0 {
                     write!(f, ", ")?;
                 }
@@ -442,7 +468,10 @@ fn type_desc(code: u16, name: Option<&str>) -> Result<Vec<u8>> {
 /// Nothing in it depends on the element type, so a DBL, I32 or Boolean array
 /// differs from a String array only in the descriptor it points at.
 fn array_desc(elem: u16, dims: u16, name: Option<&str>) -> Result<Vec<u8>> {
-    ensure!(dims >= 1, "an array descriptor needs at least one dimension");
+    ensure!(
+        dims >= 1,
+        "an array descriptor needs at least one dimension"
+    );
     let flags: u16 = if name.is_some() { 0x40 } else { 0x00 };
     let mut td = vec![0, 0];
     td.extend_from_slice(&((flags << 8) | TD_ARRAY).to_be_bytes());
@@ -644,8 +673,14 @@ impl Method for RunVi {
     fn encode_args(&self) -> Result<Vec<u8>> {
         Ok(method_args(
             &[
-                param(type_desc(TD_BOOL, Some("Wait until done"))?, &[self.wait_until_done as u8]),
-                param(type_desc(TD_BOOL, Some("Auto Dispose Ref"))?, &[self.auto_dispose_ref as u8]),
+                param(
+                    type_desc(TD_BOOL, Some("Wait until done"))?,
+                    &[self.wait_until_done as u8],
+                ),
+                param(
+                    type_desc(TD_BOOL, Some("Auto Dispose Ref"))?,
+                    &[self.auto_dispose_ref as u8],
+                ),
             ],
             None,
         ))
@@ -680,7 +715,10 @@ impl Method for SaveInstrument<'_> {
     fn encode_args(&self) -> Result<Vec<u8>> {
         Ok(method_args(
             &[
-                param(type_desc(TD_PATH, Some("Path to saved file"))?, &encode_pth0(self.path)?),
+                param(
+                    type_desc(TD_PATH, Some("Path to saved file"))?,
+                    &encode_pth0(self.path)?,
+                ),
                 param(type_desc(TD_BOOL, Some("Save a Copy"))?, &[0]),
                 param(type_desc(TD_BOOL, Some("Without Diagram"))?, &[0]),
             ],
@@ -710,8 +748,14 @@ impl Method for CtrlValSet<'_> {
     fn encode_args(&self) -> Result<Vec<u8>> {
         Ok(method_args(
             &[
-                param(type_desc(TD_STRING, Some("Control Name"))?, &lv_string(self.control.as_bytes())),
-                param(type_desc(TD_VARIANT, Some("Value"))?, &variant(&self.value)?),
+                param(
+                    type_desc(TD_STRING, Some("Control Name"))?,
+                    &lv_string(self.control.as_bytes()),
+                ),
+                param(
+                    type_desc(TD_VARIANT, Some("Value"))?,
+                    &variant(&self.value)?,
+                ),
             ],
             None,
         ))
@@ -763,8 +807,14 @@ impl Method for CtrlValGet<'_> {
 
     fn encode_args(&self) -> Result<Vec<u8>> {
         Ok(method_args(
-            &[param(type_desc(TD_STRING, Some("Control Name"))?, &lv_string(self.control.as_bytes()))],
-            Some(&single_return_type(type_desc(TD_VARIANT, Some("Get Control Value Variant"))?)),
+            &[param(
+                type_desc(TD_STRING, Some("Control Name"))?,
+                &lv_string(self.control.as_bytes()),
+            )],
+            Some(&single_return_type(type_desc(
+                TD_VARIANT,
+                Some("Get Control Value Variant"),
+            )?)),
         ))
     }
 
@@ -783,14 +833,17 @@ impl Method for CtrlValGet<'_> {
 const GET_ALL_RETURN_TYPES: [u8; 98] = [
     0x00, 0x00, 0x00, 0x5e, // section length, this field excluded
     0x00, 0x00, 0x00, 0x04, // four descriptors
-    0x00, 0x0e, 0x40, 0x30, 0xff, 0xff, 0xff, 0xff, 0x04, b'N', b'a', b'm', b'e', 0x00, // String "Name"
-    0x00, 0x12, 0x40, 0x53, 0x0c, b'V', b'a', b'r', b'i', b'a', b'n', b't', b' ', b'D', b'a',
-    b't', b'a', 0x00, // Variant "Variant Data"
-    0x00, 0x0a, 0x00, 0x50, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01, // cluster of descriptors 0 and 1
-    0x00, 0x2c, 0x40, 0x40, 0x00, 0x01, 0xff, 0xff, 0xff, 0xff, 0x00, 0x02, // array of descriptor 2
-    0x1e, b'G', b'e', b't', b' ', b'A', b'l', b'l', b' ', b'C', b'o', b'n', b't', b'r', b'o',
-    b'l', b' ', b'V', b'a', b'l', b'u', b'e', b's', b' ', b'V', b'a', b'r', b'i', b'a', b'n',
-    b't', 0x00, // its name
+    0x00, 0x0e, 0x40, 0x30, 0xff, 0xff, 0xff, 0xff, 0x04, b'N', b'a', b'm', b'e',
+    0x00, // String "Name"
+    0x00, 0x12, 0x40, 0x53, 0x0c, b'V', b'a', b'r', b'i', b'a', b'n', b't', b' ', b'D', b'a', b't',
+    b'a', 0x00, // Variant "Variant Data"
+    0x00, 0x0a, 0x00, 0x50, 0x00, 0x02, 0x00, 0x00, 0x00,
+    0x01, // cluster of descriptors 0 and 1
+    0x00, 0x2c, 0x40, 0x40, 0x00, 0x01, 0xff, 0xff, 0xff, 0xff, 0x00,
+    0x02, // array of descriptor 2
+    0x1e, b'G', b'e', b't', b' ', b'A', b'l', b'l', b' ', b'C', b'o', b'n', b't', b'r', b'o', b'l',
+    b' ', b'V', b'a', b'l', b'u', b'e', b's', b' ', b'V', b'a', b'r', b'i', b'a', b'n', b't',
+    0x00, // its name
     0x00, 0x01, 0x00, 0x03, // one top-level type: descriptor 3, the array
 ];
 
@@ -815,7 +868,10 @@ impl Method for CtrlValGetAll {
 
     fn encode_args(&self) -> Result<Vec<u8>> {
         Ok(method_args(
-            &[param(type_desc(TD_BOOL, Some("Controls"))?, &[self.controls as u8])],
+            &[param(
+                type_desc(TD_BOOL, Some("Controls"))?,
+                &[self.controls as u8],
+            )],
             Some(&GET_ALL_RETURN_TYPES),
         ))
     }
@@ -826,7 +882,9 @@ impl Method for CtrlValGetAll {
         let mut out = Vec::with_capacity(n as usize);
         for _ in 0..n {
             let name = r.lv_string()?;
-            let value = r.variant().with_context(|| format!("decoding control {name:?}"))?;
+            let value = r
+                .variant()
+                .with_context(|| format!("decoding control {name:?}"))?;
             out.push((String::from_utf8_lossy(&name).into_owned(), value));
         }
         Ok(out)
@@ -857,7 +915,11 @@ impl<'a> Reader<'a> {
     }
 
     fn take(&mut self, n: usize) -> Result<&'a [u8]> {
-        ensure!(self.pos + n <= self.b.len(), "reply truncated at byte {}", self.pos);
+        ensure!(
+            self.pos + n <= self.b.len(),
+            "reply truncated at byte {}",
+            self.pos
+        );
         let s = &self.b[self.pos..self.pos + n];
         self.pos += n;
         Ok(s)
@@ -890,25 +952,40 @@ impl<'a> Reader<'a> {
         let _version = self.u32()?;
         let count = self.u32()?;
         ensure!(count >= 1, "variant with no type descriptors");
-        ensure!(count <= MAX_TYPE_DESCS, "variant with {count} type descriptors is implausible");
-        let table: Vec<TypeDesc> =
-            (0..count).map(|_| self.type_desc()).collect::<Result<_>>()?;
+        ensure!(
+            count <= MAX_TYPE_DESCS,
+            "variant with {count} type descriptors is implausible"
+        );
+        let table: Vec<TypeDesc> = (0..count)
+            .map(|_| self.type_desc())
+            .collect::<Result<_>>()?;
         let tops = self.u16()?;
-        ensure!(tops == 1, "variant with {tops} top-level types is unsupported");
+        ensure!(
+            tops == 1,
+            "variant with {tops} top-level types is unsupported"
+        );
         let root = self.u16()?;
         let value = self.value(&table, root, 0)?;
         let n = self.u32()?;
-        ensure!(n <= MAX_TYPE_DESCS, "variant with {n} attributes is implausible");
+        ensure!(
+            n <= MAX_TYPE_DESCS,
+            "variant with {n} attributes is implausible"
+        );
         if n == 0 {
             return Ok(value);
         }
         let mut attrs = Vec::with_capacity(n as usize);
         for _ in 0..n {
             let name = String::from_utf8_lossy(&self.lv_string()?).into_owned();
-            let av = self.variant().with_context(|| format!("decoding attribute {name:?}"))?;
+            let av = self
+                .variant()
+                .with_context(|| format!("decoding attribute {name:?}"))?;
             attrs.push((name, av));
         }
-        Ok(LvValue::Variant { value: Box::new(value), attrs })
+        Ok(LvValue::Variant {
+            value: Box::new(value),
+            attrs,
+        })
     }
 
     /// Read one type descriptor, keeping only what decoding the data needs.
@@ -927,7 +1004,10 @@ impl<'a> Reader<'a> {
             elem = self.u16()?;
         }
         let read = self.pos - start;
-        ensure!(read <= len, "type descriptor overruns its length ({read} > {len})");
+        ensure!(
+            read <= len,
+            "type descriptor overruns its length ({read} > {len})"
+        );
         self.take(len - read)?; // name and anything else we do not need
         Ok(TypeDesc { code, dims, elem })
     }
@@ -990,9 +1070,9 @@ impl<'a> Reader<'a> {
                     "array of {n} elements does not fit in the remaining {} bytes",
                     self.b.len() - self.pos
                 );
-                let elem = table
-                    .get(td.elem as usize)
-                    .with_context(|| format!("array element type {} is outside the table", td.elem))?;
+                let elem = table.get(td.elem as usize).with_context(|| {
+                    format!("array element type {} is outside the table", td.elem)
+                })?;
                 let mut items = Vec::with_capacity(n as usize);
                 for i in 0..n {
                     items.push(
@@ -1000,12 +1080,19 @@ impl<'a> Reader<'a> {
                             .with_context(|| format!("decoding array element {i}"))?,
                     );
                 }
-                LvValue::Array { elem: elem.code, shape, items }
+                LvValue::Array {
+                    elem: elem.code,
+                    shape,
+                    items,
+                }
             }
             other => match numeric_size(other) {
                 // Recognised size: preserve the bytes so the rest of the
                 // reply stays parseable.
-                Some(n) => LvValue::Other { code: other, data: self.take(n)?.to_vec() },
+                Some(n) => LvValue::Other {
+                    code: other,
+                    data: self.take(n)?.to_vec(),
+                },
                 // Unknown size means we cannot find the next element.
                 None => bail!("control type {other:#04x} is not supported"),
             },
@@ -1027,7 +1114,12 @@ pub struct ViError {
 
 impl std::fmt::Display for ViError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "VI Server returned error {}{}", self.code, describe_error(self.code))
+        write!(
+            f,
+            "VI Server returned error {}{}",
+            self.code,
+            describe_error(self.code)
+        )
     }
 }
 
@@ -1123,7 +1215,10 @@ impl Connection {
             _ => Ipv4Addr::LOCALHOST,
         };
 
-        let mut conn = Connection { sock, next_uid: 0x0010_0000 };
+        let mut conn = Connection {
+            sock,
+            next_uid: 0x0010_0000,
+        };
         // The hello uses a fixed id, and LabVIEW answers with an id of its own
         // choosing rather than echoing ours, so this one cannot be paired.
         conn.send(OP_HELLO, 0x0000_0006, &hello_payload(local))?;
@@ -1162,14 +1257,18 @@ impl Connection {
         msg.extend_from_slice(&uid.to_be_bytes());
         msg.extend_from_slice(&(body.len() as u32).to_be_bytes());
         msg.extend_from_slice(body);
-        self.sock.write_all(&msg).context("writing VI Server message")?;
+        self.sock
+            .write_all(&msg)
+            .context("writing VI Server message")?;
         self.sock.flush()?;
         Ok(())
     }
 
     fn recv(&mut self) -> Result<Message> {
         let mut head = [0u8; 16];
-        self.sock.read_exact(&mut head).context("reading VI Server header")?;
+        self.sock
+            .read_exact(&mut head)
+            .context("reading VI Server header")?;
         let err = i32::from_be_bytes(head[0..4].try_into().unwrap());
         let opcode = u32::from_be_bytes(head[4..8].try_into().unwrap());
         let uid = u32::from_be_bytes(head[8..12].try_into().unwrap());
@@ -1179,8 +1278,15 @@ impl Connection {
             bail!("implausible VI Server message length {len}; stream out of sync");
         }
         let mut body = vec![0u8; len];
-        self.sock.read_exact(&mut body).context("reading VI Server body")?;
-        Ok(Message { err, opcode, uid, body })
+        self.sock
+            .read_exact(&mut body)
+            .context("reading VI Server body")?;
+        Ok(Message {
+            err,
+            opcode,
+            uid,
+            body,
+        })
     }
 
     /// Send a request and wait for the reply carrying the same uID.
@@ -1258,7 +1364,13 @@ impl Connection {
     /// front panel can still be read afterwards. Remember the read timeout
     /// must cover the VI's runtime. See [`RunVi`] for the other combinations.
     pub fn run_vi(&mut self, vi: VIRef) -> Result<()> {
-        self.invoke(vi, &RunVi { wait_until_done: true, auto_dispose_ref: false })
+        self.invoke(
+            vi,
+            &RunVi {
+                wait_until_done: true,
+                auto_dispose_ref: false,
+            },
+        )
     }
 
     /// Start a VI and return as soon as LabVIEW acknowledges the request,
@@ -1275,7 +1387,13 @@ impl Connection {
     /// — the VI needs a front-panel flag of its own for that, since a running
     /// VI answers polls exactly as a finished one does.
     pub fn run_vi_async(&mut self, vi: VIRef) -> Result<()> {
-        self.invoke(vi, &RunVi { wait_until_done: false, auto_dispose_ref: false })
+        self.invoke(
+            vi,
+            &RunVi {
+                wait_until_done: false,
+                auto_dispose_ref: false,
+            },
+        )
     }
 
     /// Save a VI to a path — an ordinary in-place save. See [`SaveInstrument`].
@@ -1291,7 +1409,11 @@ impl Connection {
     /// Read one half of a front panel: the controls when `controls` is true,
     /// the indicators when it is false. See [`CtrlValGetAll`] — the method's
     /// name promises more than it delivers.
-    pub fn ctrl_val_get_all(&mut self, vi: VIRef, controls: bool) -> Result<Vec<(String, LvValue)>> {
+    pub fn ctrl_val_get_all(
+        &mut self,
+        vi: VIRef,
+        controls: bool,
+    ) -> Result<Vec<(String, LvValue)>> {
         self.invoke(vi, &CtrlValGetAll { controls })
     }
 
@@ -1456,9 +1578,11 @@ mod tests {
     /// this VI. If our encoder drifts from it, this fails.
     #[test]
     fn save_args_match_the_captured_invocation() {
-        let got = SaveInstrument { path: Path::new(r"C:\Git\lvpm\tools\Set VI Server Logging.vi") }
-            .encode_args()
-            .unwrap();
+        let got = SaveInstrument {
+            path: Path::new(r"C:\Git\lvpm\tools\Set VI Server Logging.vi"),
+        }
+        .encode_args()
+        .unwrap();
         let want: &[u8] = b"\x00\x00\x00\x04\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x10\
 \x00\x00\x00\x5e\x00\x00\x00\x24\x00\x00\x00\x01\x00\x1c\x40\x32\xff\xff\xff\xff\
 \x12Path to saved file\x00\x00\x01\x00\x00PTH0\x00\x00\x00\x2e\x00\x00\x00\x05\
@@ -1478,14 +1602,22 @@ mod tests {
         let short = args(r"C:\ab\cd.vi");
         let long = args(r"C:\ab\cdcdcdcdcd.vi");
         let size_of = |b: &[u8]| u32::from_be_bytes(b[16..20].try_into().unwrap());
-        assert_eq!(size_of(&long) - size_of(&short), (long.len() - short.len()) as u32);
+        assert_eq!(
+            size_of(&long) - size_of(&short),
+            (long.len() - short.len()) as u32
+        );
     }
 
     /// The hook pattern — wait for the VI, keep the reference alive — as
     /// captured from the E2E test after the auto-dispose bug was fixed.
     #[test]
     fn run_vi_matches_the_captured_wait_no_dispose_invocation() {
-        let got = RunVi { wait_until_done: true, auto_dispose_ref: false }.encode_args().unwrap();
+        let got = RunVi {
+            wait_until_done: true,
+            auto_dispose_ref: false,
+        }
+        .encode_args()
+        .unwrap();
         let want: &[u8] = b"\x00\x00\x00\x03\x00\x00\x00\x01\x00\x00\x00\x00\
 \x00\x00\x00\x10\x00\x00\x00\x22\x00\x00\x00\x1c\x00\x00\x00\x01\x00\x14\x40\x21\
 \x0fWait until done\x00\x01\x00\x00\x01\x00\
@@ -1499,7 +1631,10 @@ mod tests {
     /// tail of every `AppDoMethod` body lvpm sends.
     #[test]
     fn a_parameterless_method_sends_a_bare_argument_header() {
-        assert_eq!(method_args(&[], None), b"\x00\x00\x00\x01\x00\x00\x00\x01\x00\x00\x00\x00");
+        assert_eq!(
+            method_args(&[], None),
+            b"\x00\x00\x00\x01\x00\x00\x00\x01\x00\x00\x00\x00"
+        );
     }
 
     /// `Ctrl Val.Set` with a Dbl, an I32 and a Boolean — each byte-for-byte
@@ -1550,14 +1685,20 @@ mod tests {
     /// flattened control carried its label), so check the derived layout.
     #[test]
     fn ctrl_val_set_string_uses_the_derived_layout() {
-        let got = CtrlValSet { control: "String in", value: LvValue::Str("Hello".into()) }
-            .encode_args()
-            .unwrap();
+        let got = CtrlValSet {
+            control: "String in",
+            value: LvValue::Str("Hello".into()),
+        }
+        .encode_args()
+        .unwrap();
         // The variant: version, one descriptor (unnamed String), selector,
         // u32-length string, no attributes, plus one byte of block padding.
         let tail: &[u8] = b"\x26\x00\x80\x00\x00\x00\x00\x01\x00\x08\x00\x30\xff\xff\xff\xff\
 \x00\x01\x00\x00\x00\x00\x00\x05Hello\x00\x00\x00\x00\x00";
-        assert!(got.ends_with(&as_we_stamp_it(tail)), "variant layout drifted");
+        assert!(
+            got.ends_with(&as_we_stamp_it(tail)),
+            "variant layout drifted"
+        );
     }
 
     /// The exact variant LabVIEW returned for a two-element string array, from
@@ -1580,7 +1721,10 @@ mod tests {
             LvValue::Array {
                 elem: TD_STRING,
                 shape: vec![2],
-                items: vec![LvValue::Str("Hello 1".into()), LvValue::Str("Hello 2".into())],
+                items: vec![
+                    LvValue::Str("Hello 1".into()),
+                    LvValue::Str("Hello 2".into())
+                ],
             }
         );
         assert_eq!(got.to_string(), r#"["Hello 1", "Hello 2"]"#);
@@ -1599,7 +1743,11 @@ mod tests {
         assert_eq!(Reader::new(nap).pth0().unwrap(), "<Not A Path>");
 
         // And anything that is not a PTH0 fails rather than being guessed at.
-        assert!(Reader::new(b"XXXX\x00\x00\x00\x04\x00\x00\x00\x00").pth0().is_err());
+        assert!(
+            Reader::new(b"XXXX\x00\x00\x00\x04\x00\x00\x00\x00")
+                .pth0()
+                .is_err()
+        );
     }
 
     /// The action-info variant a hook VI's `Variant` control receives: named
@@ -1612,7 +1760,10 @@ mod tests {
             value: Box::new(LvValue::Str("lvpm".into())),
             attrs: vec![
                 ("Quiet Mode".into(), LvValue::Bool(true)),
-                ("Package Name".into(), LvValue::Str("delacor_lib_dqmh_documentation".into())),
+                (
+                    "Package Name".into(),
+                    LvValue::Str("delacor_lib_dqmh_documentation".into()),
+                ),
                 (
                     "Files Installed".into(),
                     LvValue::array(vec![LvValue::Path(r"C:\lv\vi.lib\a.vi".into())]).unwrap(),
@@ -1639,8 +1790,16 @@ mod tests {
         .unwrap();
         let flat = variant(&v).unwrap();
         // Two descriptors, the array rooted at index 1, exactly as for strings.
-        assert_eq!(&flat[4..8], b"\x00\x00\x00\x02", "element + array descriptors");
-        assert_eq!(&flat[8..16], b"\x00\x08\x00\x32\xff\xff\xff\xff", "unnamed Path element");
+        assert_eq!(
+            &flat[4..8],
+            b"\x00\x00\x00\x02",
+            "element + array descriptors"
+        );
+        assert_eq!(
+            &flat[8..16],
+            b"\x00\x08\x00\x32\xff\xff\xff\xff",
+            "unnamed Path element"
+        );
         assert_eq!(Reader::new(&flat).variant().unwrap(), v);
     }
 
@@ -1650,8 +1809,11 @@ mod tests {
     /// data as a u32 count followed by the packed elements.
     #[test]
     fn encodes_a_string_array_the_way_the_capture_reads_it() {
-        let v = LvValue::array(vec![LvValue::Str("Hello 1".into()), LvValue::Str("Hello 2".into())])
-            .unwrap();
+        let v = LvValue::array(vec![
+            LvValue::Str("Hello 1".into()),
+            LvValue::Str("Hello 2".into()),
+        ])
+        .unwrap();
         let want: &[u8] = b"\x26\x00\x80\x00\x00\x00\x00\x02\
 \x00\x08\x00\x30\xff\xff\xff\xff\
 \x00\x0c\x00\x40\x00\x01\xff\xff\xff\xff\x00\x00\
@@ -1670,8 +1832,16 @@ mod tests {
     fn numeric_arrays_reuse_the_string_array_framing() {
         let cases: [(LvValue, &[u8], &[u8]); 3] = [
             // element descriptor        flattened element
-            (LvValue::Dbl(1.0), b"\x00\x05\x00\x0a\x00", b"\x3f\xf0\x00\x00\x00\x00\x00\x00"),
-            (LvValue::I32(125), b"\x00\x05\x00\x03\x00", b"\x00\x00\x00\x7d"),
+            (
+                LvValue::Dbl(1.0),
+                b"\x00\x05\x00\x0a\x00",
+                b"\x3f\xf0\x00\x00\x00\x00\x00\x00",
+            ),
+            (
+                LvValue::I32(125),
+                b"\x00\x05\x00\x03\x00",
+                b"\x00\x00\x00\x7d",
+            ),
             (LvValue::Bool(true), b"\x00\x04\x00\x21", b"\x01"),
         ];
         for (elem, td, data) in cases {
@@ -1686,15 +1856,25 @@ mod tests {
             want.extend_from_slice(b"\x00\x00\x00\x00");
             let want = as_we_stamp_it(&want);
             assert_eq!(variant(&v).unwrap(), want, "{elem} array");
-            assert_eq!(Reader::new(&want).variant().unwrap(), v, "{elem} array round trip");
+            assert_eq!(
+                Reader::new(&want).variant().unwrap(),
+                v,
+                "{elem} array round trip"
+            );
         }
     }
 
     #[test]
     fn empty_and_malformed_arrays() {
         let empty = LvValue::empty_array(TD_I32);
-        assert_eq!(Reader::new(&variant(&empty).unwrap()).variant().unwrap(), empty);
-        assert!(LvValue::array(vec![]).is_err(), "an empty array needs its type stated");
+        assert_eq!(
+            Reader::new(&variant(&empty).unwrap()).variant().unwrap(),
+            empty
+        );
+        assert!(
+            LvValue::array(vec![]).is_err(),
+            "an empty array needs its type stated"
+        );
         assert!(
             LvValue::array(vec![LvValue::I32(1), LvValue::Dbl(1.0)]).is_err(),
             "mixed element types"
@@ -1724,7 +1904,12 @@ mod tests {
             LvValue::Array {
                 elem: TD_I32,
                 shape: vec![2, 2],
-                items: vec![LvValue::I32(2), LvValue::I32(3), LvValue::I32(12), LvValue::I32(23)],
+                items: vec![
+                    LvValue::I32(2),
+                    LvValue::I32(3),
+                    LvValue::I32(12),
+                    LvValue::I32(23)
+                ],
             }
         );
         assert_eq!(got.to_string(), "[[2, 3], [12, 23]]");
@@ -1745,7 +1930,12 @@ mod tests {
 \x00\x00\x00\x00";
         let v = LvValue::array_nd(
             vec![2, 2],
-            vec![LvValue::I32(1), LvValue::I32(2), LvValue::I32(11), LvValue::I32(22)],
+            vec![
+                LvValue::I32(1),
+                LvValue::I32(2),
+                LvValue::I32(11),
+                LvValue::I32(22),
+            ],
         )
         .unwrap();
         let ours = variant(&v).unwrap();
@@ -1754,10 +1944,18 @@ mod tests {
         // ignores: ours is the unnamed `00 05 00 03 00`, theirs the named
         // `00 0d 40 03 00 07 "Numeric" 00`.
         // The version word is deliberately ours, not theirs — see FLATTEN_VERSION.
-        assert_eq!(&ours[..4], &FLATTEN_VERSION.to_be_bytes(), "our flatten stamp");
+        assert_eq!(
+            &ours[..4],
+            &FLATTEN_VERSION.to_be_bytes(),
+            "our flatten stamp"
+        );
         assert_eq!(&ours[4..8], &theirs[4..8], "descriptor count");
         assert_eq!(&ours[8..13], b"\x00\x05\x00\x03\x00", "unnamed I32 element");
-        assert_eq!(&ours[13..], &theirs[21..], "array descriptor, root and data");
+        assert_eq!(
+            &ours[13..],
+            &theirs[21..],
+            "array descriptor, root and data"
+        );
 
         // And LabVIEW's own bytes decode back to the value it was sent.
         assert_eq!(Reader::new(theirs).variant().unwrap(), v);
@@ -1799,7 +1997,9 @@ Int32 2D Array out\x00\x00$@@\x00\x02\xff\xff\xff\xff\xff\xff\xff\xff\x00\x00\x1
 ray out\x00\x00\x01\x00\x01\x00\x00\x00\x02\x00\x00\x00\x02\x00\x00\x00\x02\x00\x00\x00\x03\
 \x00\x00\x00\x0c\x00\x00\x00\x17\x00\x00\x00\x00\x00\x00\x00\x00\x10\x00\x00\x00\x1a\x00\x00\
 \x00\x16\x00\x00\x00\x01\x00\x0e@!\x08Controls\x00\x00\x01\x00\x00";
-        let got = CtrlValGetAll { controls: false }.decode_reply(reply).unwrap();
+        let got = CtrlValGetAll { controls: false }
+            .decode_reply(reply)
+            .unwrap();
         let names: Vec<&str> = got.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(
             names,
@@ -1818,7 +2018,12 @@ ray out\x00\x00\x01\x00\x01\x00\x00\x00\x02\x00\x00\x00\x02\x00\x00\x00\x02\x00\
             LvValue::Array {
                 elem: TD_I32,
                 shape: vec![2, 2],
-                items: vec![LvValue::I32(2), LvValue::I32(3), LvValue::I32(12), LvValue::I32(23)],
+                items: vec![
+                    LvValue::I32(2),
+                    LvValue::I32(3),
+                    LvValue::I32(12),
+                    LvValue::I32(23)
+                ],
             }
         );
         assert_eq!(got[5].1.to_string(), "[[2, 3], [12, 23]]");
@@ -1830,7 +2035,9 @@ ray out\x00\x00\x01\x00\x01\x00\x00\x00\x02\x00\x00\x00\x02\x00\x00\x00\x02\x00\
     #[test]
     fn ctrl_val_get_all_matches_the_captured_invocation() {
         let got = CtrlValGetAll { controls: false }.encode_args().unwrap();
-        let mut want = vec![0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x21, 0x00, 0x00, 0x00, 0x62];
+        let mut want = vec![
+            0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x21, 0x00, 0x00, 0x00, 0x62,
+        ];
         want.extend_from_slice(&GET_ALL_RETURN_TYPES);
         want.extend_from_slice(
             b"\x00\x00\x00\x10\x00\x00\x00\x1c\x00\x00\x00\x16\x00\x00\x00\x01\
@@ -1844,33 +2051,48 @@ ray out\x00\x00\x01\x00\x01\x00\x00\x00\x02\x00\x00\x00\x02\x00\x00\x00\x02\x00\
     #[test]
     fn ctrl_val_get_all_decodes_the_captured_reply() {
         let reply: &[u8] = &{
-            let mut r = vec![0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x21, 0x00, 0x00, 0x01, 0x40];
+            let mut r = vec![
+                0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x21, 0x00, 0x00, 0x01, 0x40,
+            ];
             r.extend_from_slice(&GET_ALL_RETURN_TYPES);
             // Array of four (Name, Variant Data) pairs...
             r.extend_from_slice(b"\x00\x00\x00\x04");
             r.extend_from_slice(b"\x00\x00\x00\x0aDouble out\x26\x00\x80\x00\x00\x00\x00\x01\
 \x00\x11\x40\x0a\x00\x0aDouble out\x00\x00\x01\x00\x00\x40\x5f\x80\x00\x00\x00\x00\x00\x00\x00\x00\x00");
-            r.extend_from_slice(b"\x00\x00\x00\x09Int32 out\x26\x00\x80\x00\x00\x00\x00\x01\
-\x00\x0f\x40\x03\x00\x09Int32 out\x00\x01\x00\x00\x00\x00\x00\x7e\x00\x00\x00\x00");
-            r.extend_from_slice(b"\x00\x00\x00\x0bBoolean out\x26\x00\x80\x00\x00\x00\x00\x01\
-\x00\x10\x40\x21\x0bBoolean out\x00\x01\x00\x00\x00\x00\x00\x00\x00");
-            r.extend_from_slice(b"\x00\x00\x00\x0aString out\x26\x00\x80\x00\x00\x00\x00\x01\
+            r.extend_from_slice(
+                b"\x00\x00\x00\x09Int32 out\x26\x00\x80\x00\x00\x00\x00\x01\
+\x00\x0f\x40\x03\x00\x09Int32 out\x00\x01\x00\x00\x00\x00\x00\x7e\x00\x00\x00\x00",
+            );
+            r.extend_from_slice(
+                b"\x00\x00\x00\x0bBoolean out\x26\x00\x80\x00\x00\x00\x00\x01\
+\x00\x10\x40\x21\x0bBoolean out\x00\x01\x00\x00\x00\x00\x00\x00\x00",
+            );
+            r.extend_from_slice(
+                b"\x00\x00\x00\x0aString out\x26\x00\x80\x00\x00\x00\x00\x01\
 \x00\x14\x40\x30\xff\xff\xff\xff\x0aString out\x00\x00\x01\x00\x00\
-\x00\x00\x00\x0dHello_aString\x00\x00\x00\x00");
+\x00\x00\x00\x0dHello_aString\x00\x00\x00\x00",
+            );
             // ...then the echoed Controls parameter, value stripped.
-            r.extend_from_slice(b"\x00\x00\x00\x10\x00\x00\x00\x1a\x00\x00\x00\x16\x00\x00\x00\x01\
-\x00\x0e\x40\x21\x08Controls\x00\x00\x01\x00\x00");
+            r.extend_from_slice(
+                b"\x00\x00\x00\x10\x00\x00\x00\x1a\x00\x00\x00\x16\x00\x00\x00\x01\
+\x00\x0e\x40\x21\x08Controls\x00\x00\x01\x00\x00",
+            );
             assert_eq!(r.len(), 366, "reply reconstruction");
             r
         };
-        let got = CtrlValGetAll { controls: false }.decode_reply(reply).unwrap();
+        let got = CtrlValGetAll { controls: false }
+            .decode_reply(reply)
+            .unwrap();
         assert_eq!(
             got,
             vec![
                 ("Double out".to_string(), LvValue::Dbl(126.0)),
                 ("Int32 out".to_string(), LvValue::I32(126)),
                 ("Boolean out".to_string(), LvValue::Bool(false)),
-                ("String out".to_string(), LvValue::Str("Hello_aString".into())),
+                (
+                    "String out".to_string(),
+                    LvValue::Str("Hello_aString".into())
+                ),
             ]
         );
     }
@@ -1879,7 +2101,11 @@ ray out\x00\x00\x01\x00\x01\x00\x00\x00\x02\x00\x00\x00\x02\x00\x00\x00\x02\x00\
     /// LabVIEW's own client sent once the output terminal was wired.
     #[test]
     fn ctrl_val_get_matches_the_captured_invocation() {
-        let got = CtrlValGet { control: "Double out" }.encode_args().unwrap();
+        let got = CtrlValGet {
+            control: "Double out",
+        }
+        .encode_args()
+        .unwrap();
         let want: &[u8] = b"\x00\x00\x00\x02\x00\x00\x00\x21\x00\x00\x00\x2a\
 \x00\x00\x00\x26\x00\x00\x00\x01\x00\x1e\x40\x53\x19Get Control Value Variant\x00\x01\x00\x00\
 \x00\x00\x00\x10\x00\x00\x00\x30\x00\x00\x00\x1e\x00\x00\x00\x01\x00\x16\x40\x30\
@@ -1936,7 +2162,17 @@ ray out\x00\x00\x01\x00\x01\x00\x00\x00\x02\x00\x00\x00\x02\x00\x00\x00\x02\x00\
 
     #[test]
     fn unsupported_values_refuse_to_encode() {
-        let v = LvValue::Other { code: 0x08, data: vec![0; 8] };
-        assert!(CtrlValSet { control: "x", value: v }.encode_args().is_err());
+        let v = LvValue::Other {
+            code: 0x08,
+            data: vec![0; 8],
+        };
+        assert!(
+            CtrlValSet {
+                control: "x",
+                value: v
+            }
+            .encode_args()
+            .is_err()
+        );
     }
 }

@@ -31,15 +31,20 @@ pub fn package(cache: &Cache, client: &Client, entry: &Entry) -> Result<Vec<u8>>
         return Ok(bytes);
     }
     if let Some(md5) = &entry.md5
-        && let Some(sha256) = cache.package_sha256(&entry.name, &entry.version.to_string(), &md5.to_lowercase())?
+        && let Some(sha256) =
+            cache.package_sha256(&entry.name, &entry.version.to_string(), &md5.to_lowercase())?
         && let Some(bytes) = cache.load(&sha256)?
         && verify_md5(entry, &bytes).is_ok()
     {
         return Ok(bytes);
     }
-    let bytes = client.get(&entry.url).send()
+    let bytes = client
+        .get(&entry.url)
+        .send()
         .with_context(|| format!("downloading {}", entry.url))?
-        .error_for_status()?.bytes()?.to_vec();
+        .error_for_status()?
+        .bytes()?
+        .to_vec();
     let md5 = verify_md5(entry, &bytes)?;
     let sha256 = cache.store(&bytes)?;
     cache.record_download(&LocalEntry::from(entry), &entry.url, &sha256, &md5)?;
@@ -50,7 +55,11 @@ pub fn package(cache: &Cache, client: &Client, entry: &Entry) -> Result<Vec<u8>>
 fn verify_md5(entry: &Entry, bytes: &[u8]) -> Result<String> {
     let got = index::md5_hex(bytes);
     if let Some(want) = &entry.md5 {
-        ensure!(got.eq_ignore_ascii_case(want), "MD5 mismatch for {}: expected {want}, got {got}", entry.name);
+        ensure!(
+            got.eq_ignore_ascii_case(want),
+            "MD5 mismatch for {}: expected {want}, got {got}",
+            entry.name
+        );
     }
     Ok(got)
 }
@@ -72,8 +81,13 @@ mod tests {
 
     fn entry(url: String, md5: Option<String>) -> Entry {
         Entry {
-            name: "test_package".into(), version: Version::parse("1.0.0"), url, md5,
-            display_name: None, requires: Vec::new(), lv_min: None,
+            name: "test_package".into(),
+            version: Version::parse("1.0.0"),
+            url,
+            md5,
+            display_name: None,
+            requires: Vec::new(),
+            lv_min: None,
         }
     }
 
@@ -82,14 +96,21 @@ mod tests {
         let url = format!("http://{}/package.vip", listener.local_addr().unwrap());
         let thread = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
             let mut request = Vec::new();
             while !request.ends_with(b"\r\n\r\n") {
                 let mut byte = [0];
                 stream.read_exact(&mut byte).unwrap();
                 request.push(byte[0]);
             }
-            write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).unwrap();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                bytes.len()
+            )
+            .unwrap();
             stream.write_all(bytes).unwrap();
         });
         (url, thread)
@@ -114,9 +135,19 @@ mod tests {
         let (root, cache) = test_cache("bad-md5");
         let (url, thread) = server(b"wrong");
         let entry = entry(url, Some(index::md5_hex(b"expected")));
-        assert!(package(&cache, &Client::new(), &entry).unwrap_err().to_string().contains("MD5 mismatch"));
+        assert!(
+            package(&cache, &Client::new(), &entry)
+                .unwrap_err()
+                .to_string()
+                .contains("MD5 mismatch")
+        );
         thread.join().unwrap();
-        assert!(cache.package_sha256(&entry.name, "1.0.0", entry.md5.as_ref().unwrap()).unwrap().is_none());
+        assert!(
+            cache
+                .package_sha256(&entry.name, "1.0.0", entry.md5.as_ref().unwrap())
+                .unwrap()
+                .is_none()
+        );
         assert!(!root.join("content").exists());
         drop(cache);
         std::fs::remove_dir_all(root).ok();
@@ -128,21 +159,53 @@ mod tests {
         let source = root.join("original.vip");
         std::fs::write(&source, b"imported bytes").unwrap();
         let metadata = std::fs::metadata(&source).unwrap();
-        let mut wanted = entry("http://127.0.0.1:1/unavailable".into(), Some(index::md5_hex(b"imported bytes")));
+        let mut wanted = entry(
+            "http://127.0.0.1:1/unavailable".into(),
+            Some(index::md5_hex(b"imported bytes")),
+        );
         let sha256 = cache.store(b"imported bytes").unwrap();
-        cache.record_import(&source, &metadata, &LocalEntry::from(&wanted), &sha256, wanted.md5.as_ref().unwrap()).unwrap();
-        cache.record_download(&LocalEntry::from(&wanted), "http://another-source/", &sha256, wanted.md5.as_ref().unwrap()).unwrap();
-        assert_eq!(cache.package_sha256("TEST_PACKAGE", "1.0.0", wanted.md5.as_ref().unwrap()).unwrap(), Some(sha256.clone()));
+        cache
+            .record_import(
+                &source,
+                &metadata,
+                &LocalEntry::from(&wanted),
+                &sha256,
+                wanted.md5.as_ref().unwrap(),
+            )
+            .unwrap();
+        cache
+            .record_download(
+                &LocalEntry::from(&wanted),
+                "http://another-source/",
+                &sha256,
+                wanted.md5.as_ref().unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            cache
+                .package_sha256("TEST_PACKAGE", "1.0.0", wanted.md5.as_ref().unwrap())
+                .unwrap(),
+            Some(sha256.clone())
+        );
         std::fs::remove_file(&source).unwrap();
-        assert_eq!(package(&cache, &Client::new(), &wanted).unwrap(), b"imported bytes");
+        assert_eq!(
+            package(&cache, &Client::new(), &wanted).unwrap(),
+            b"imported bytes"
+        );
         wanted.url = format!("cache:{sha256}");
-        assert_eq!(package(&cache, &Client::new(), &wanted).unwrap(), b"imported bytes");
+        assert_eq!(
+            package(&cache, &Client::new(), &wanted).unwrap(),
+            b"imported bytes"
+        );
         wanted.md5 = Some(index::md5_hex(b"different"));
         assert!(package(&cache, &Client::new(), &wanted).is_err());
         wanted.url = source.to_string_lossy().into_owned();
         wanted.md5 = None;
         std::fs::write(&source, b"current local bytes").unwrap();
-        assert_eq!(package(&cache, &Client::new(), &wanted).unwrap(), b"current local bytes");
+        assert_eq!(
+            package(&cache, &Client::new(), &wanted).unwrap(),
+            b"current local bytes"
+        );
         drop(cache);
         std::fs::remove_dir_all(root).ok();
     }
@@ -154,10 +217,21 @@ mod tests {
         let sha256 = cache.store(bytes).unwrap();
         let blob = root.join("content/sha256").join(&sha256[..2]).join(&sha256);
         for corrupt in [false, true] {
-            if corrupt { std::fs::write(&blob, b"corrupt").unwrap() } else { std::fs::remove_file(&blob).unwrap() }
+            if corrupt {
+                std::fs::write(&blob, b"corrupt").unwrap()
+            } else {
+                std::fs::remove_file(&blob).unwrap()
+            }
             let (url, thread) = server(bytes);
             let entry = entry(url, Some(index::md5_hex(bytes)));
-            cache.record_download(&LocalEntry::from(&entry), &entry.url, &sha256, entry.md5.as_ref().unwrap()).unwrap();
+            cache
+                .record_download(
+                    &LocalEntry::from(&entry),
+                    &entry.url,
+                    &sha256,
+                    entry.md5.as_ref().unwrap(),
+                )
+                .unwrap();
             assert_eq!(package(&cache, &Client::new(), &entry).unwrap(), bytes);
             thread.join().unwrap();
             assert_eq!(cache.load(&sha256).unwrap().unwrap(), bytes);
@@ -174,13 +248,35 @@ mod tests {
         let wanted = entry("http://127.0.0.1:1/unavailable".into(), Some(md5.clone()));
         let first = cache.store(b"first").unwrap();
         let second = cache.store(b"second").unwrap();
-        cache.record_download(&LocalEntry::from(&wanted), "http://first/", &first, &md5).unwrap();
-        cache.record_download(&LocalEntry::from(&wanted), "http://second/", &second, &md5).unwrap();
-        assert!(cache.package_sha256("test_package", "1.0.0", &md5).unwrap().is_none());
-        assert!(cache.package_sha256("other_package", "1.0.0", &md5).unwrap().is_none());
-        assert!(cache.package_sha256("test_package", "2.0.0", &md5).unwrap().is_none());
+        cache
+            .record_download(&LocalEntry::from(&wanted), "http://first/", &first, &md5)
+            .unwrap();
+        cache
+            .record_download(&LocalEntry::from(&wanted), "http://second/", &second, &md5)
+            .unwrap();
+        assert!(
+            cache
+                .package_sha256("test_package", "1.0.0", &md5)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            cache
+                .package_sha256("other_package", "1.0.0", &md5)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            cache
+                .package_sha256("test_package", "2.0.0", &md5)
+                .unwrap()
+                .is_none()
+        );
         let (url, thread) = server(bytes);
-        assert_eq!(package(&cache, &Client::new(), &entry(url, Some(md5))).unwrap(), bytes);
+        assert_eq!(
+            package(&cache, &Client::new(), &entry(url, Some(md5))).unwrap(),
+            bytes
+        );
         thread.join().unwrap();
         let (url, thread) = server(bytes);
         let no_md5 = entry(url, None);

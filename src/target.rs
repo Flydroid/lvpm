@@ -27,7 +27,12 @@ impl LvTarget {
     }
 
     pub fn label(&self) -> String {
-        format!("LabVIEW {} ({}-bit)  v{}", self.year(), self.bitness, self.version)
+        format!(
+            "LabVIEW {} ({}-bit)  v{}",
+            self.year(),
+            self.bitness,
+            self.version
+        )
     }
 }
 
@@ -47,9 +52,15 @@ pub fn detect() -> Result<Vec<LvTarget>> {
         };
         for name in root.enum_keys().flatten() {
             // Version subkeys look like "26.3"; skip "AddOns", "CurrentVersion".
-            let Ok(version) = name.parse::<f64>() else { continue };
-            let Ok(sub) = root.open_subkey_with_flags(&name, KEY_READ | flags) else { continue };
-            let Ok(path) = sub.get_value::<String, _>("Path") else { continue };
+            let Ok(version) = name.parse::<f64>() else {
+                continue;
+            };
+            let Ok(sub) = root.open_subkey_with_flags(&name, KEY_READ | flags) else {
+                continue;
+            };
+            let Ok(path) = sub.get_value::<String, _>("Path") else {
+                continue;
+            };
             if path.trim().is_empty() {
                 continue;
             }
@@ -59,14 +70,25 @@ pub fn detect() -> Result<Vec<LvTarget>> {
             }
             // Several internal versions share one directory (26.0 and 26.3);
             // keep the highest per install path.
-            match out.iter_mut().find(|t| t.path == path && t.bitness == bitness) {
+            match out
+                .iter_mut()
+                .find(|t| t.path == path && t.bitness == bitness)
+            {
                 Some(existing) => existing.version = existing.version.max(version),
-                None => out.push(LvTarget { version, bitness, path }),
+                None => out.push(LvTarget {
+                    version,
+                    bitness,
+                    path,
+                }),
             }
         }
     }
 
-    out.sort_by(|a, b| b.version.partial_cmp(&a.version).unwrap_or(std::cmp::Ordering::Equal));
+    out.sort_by(|a, b| {
+        b.version
+            .partial_cmp(&a.version)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     Ok(out)
 }
 
@@ -77,16 +99,28 @@ pub fn detect() -> Result<Vec<LvTarget>> {
     if let Ok(rd) = std::fs::read_dir("/usr/local/natinst") {
         for e in rd.flatten() {
             let p = e.path();
-            let n = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let n = p
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
             if let Some(rest) = n.strip_prefix("LabVIEW-")
                 && let Some(year) = rest.split('-').next().and_then(|y| y.parse::<u32>().ok())
             {
                 let bitness = if n.ends_with("-64") { 64 } else { 32 };
-                out.push(LvTarget { version: (year - 2000) as f64, bitness, path: p });
+                out.push(LvTarget {
+                    version: (year - 2000) as f64,
+                    bitness,
+                    path: p,
+                });
             }
         }
     }
-    out.sort_by(|a, b| b.version.partial_cmp(&a.version).unwrap_or(std::cmp::Ordering::Equal));
+    out.sort_by(|a, b| {
+        b.version
+            .partial_cmp(&a.version)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     Ok(out)
 }
 
@@ -110,7 +144,10 @@ pub fn select(targets: &[LvTarget], want: &str) -> Result<LvTarget> {
     }
 
     let known: Vec<String> = targets.iter().map(|t| t.year().to_string()).collect();
-    bail!("no LabVIEW target matching {want:?} (detected: {})", known.join(", "));
+    bail!(
+        "no LabVIEW target matching {want:?} (detected: {})",
+        known.join(", ")
+    );
 }
 
 /// Which kind of place a `Target Dir` token names.
@@ -268,7 +305,11 @@ impl Roots {
             other => bail!("unknown Target Dir token {other:?} (from {target_dir:?})"),
         };
 
-        Ok(if rest.is_empty() { base } else { base.join(rest) })
+        Ok(if rest.is_empty() {
+            base
+        } else {
+            base.join(rest)
+        })
     }
 
     /// Manifests live beside the thing they describe: inside the venv or the
@@ -381,7 +422,11 @@ mod tests {
 
     #[test]
     fn project_roots_put_labview_tokens_in_the_addon_and_leave_machine_roots_alone() {
-        let t = LvTarget { version: 26.3, bitness: 64, path: PathBuf::from(r"C:\LV2026") };
+        let t = LvTarget {
+            version: 26.3,
+            bitness: 64,
+            path: PathBuf::from(r"C:\LV2026"),
+        };
         let venv = Path::new(r"C:\repo\.lv-venv");
         let r = Roots::project(venv, &t, "oglib_error");
 
@@ -389,16 +434,27 @@ mod tests {
             r.expand("<vi.lib>/_OpenG.lib/error").unwrap(),
             Path::new(r"C:\repo\.lv-venv\oglib_error\1\vi.lib\_OpenG.lib\error")
         );
-        assert_eq!(r.expand("<application>").unwrap(), Path::new(r"C:\repo\.lv-venv\oglib_error\1"));
-        assert!(!r.expand("<OS Public Application Data>").unwrap().starts_with(r"C:\repo"));
+        assert_eq!(
+            r.expand("<application>").unwrap(),
+            Path::new(r"C:\repo\.lv-venv\oglib_error\1")
+        );
+        assert!(
+            !r.expand("<OS Public Application Data>")
+                .unwrap()
+                .starts_with(r"C:\repo")
+        );
         assert!(!r.expand("<temp>").unwrap().starts_with(r"C:\repo"));
 
         // Nothing LabVIEW-class may leave the venv; machine roots are not
         // written to at all in venv mode, and the guard is what says so.
-        r.check_contained(&r.expand("<menus>/Categories").unwrap()).unwrap();
+        r.check_contained(&r.expand("<menus>/Categories").unwrap())
+            .unwrap();
         assert!(r.check_contained(&r.expand("<temp>").unwrap()).is_err());
 
-        assert_eq!(r.store_dir(), Path::new(r"C:\repo\.lv-venv\.lvpm\installed"));
+        assert_eq!(
+            r.store_dir(),
+            Path::new(r"C:\repo\.lv-venv\.lvpm\installed")
+        );
         assert_eq!(Roots::project_store(venv, &t).store_dir(), r.store_dir());
         assert_eq!(Roots::project_store(venv, &t).application, venv);
         assert_eq!(r.venv(), Some(venv));
@@ -407,12 +463,24 @@ mod tests {
 
     #[test]
     fn classify_sorts_tokens_by_where_they_point() {
-        assert_eq!(Roots::classify("<vi.lib>/addons/Foo").unwrap(), TokenClass::LabView);
-        assert_eq!(Roots::classify("<application>").unwrap(), TokenClass::LabView);
+        assert_eq!(
+            Roots::classify("<vi.lib>/addons/Foo").unwrap(),
+            TokenClass::LabView
+        );
+        assert_eq!(
+            Roots::classify("<application>").unwrap(),
+            TokenClass::LabView
+        );
         assert_eq!(Roots::classify("<menus>").unwrap(), TokenClass::LabView);
         assert_eq!(Roots::classify("<temp>").unwrap(), TokenClass::Temp);
-        assert_eq!(Roots::classify("<OS Public Application Data>/x").unwrap(), TokenClass::Os);
-        assert_eq!(Roots::classify("<OS System Core Libraries>").unwrap(), TokenClass::Os);
+        assert_eq!(
+            Roots::classify("<OS Public Application Data>/x").unwrap(),
+            TokenClass::Os
+        );
+        assert_eq!(
+            Roots::classify("<OS System Core Libraries>").unwrap(),
+            TokenClass::Os
+        );
         assert!(Roots::classify("nonsense").is_err());
     }
 }

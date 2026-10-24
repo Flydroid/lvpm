@@ -8,7 +8,7 @@
 //! and indexes itself from each package's own spec.
 
 use crate::cache::{Cache, LocalEntry, SourceState};
-use crate::version::{split_id, Version};
+use crate::version::{Version, split_id};
 use anyhow::{Context, Result};
 use md5::{Digest, Md5};
 use reqwest::StatusCode;
@@ -53,9 +53,16 @@ impl From<&Entry> for LocalEntry {
             name: entry.name.clone(),
             version: entry.version.to_string(),
             display_name: entry.display_name.clone(),
-            requires: entry.requires.iter().map(|requirement| (
-                requirement.name.clone(), requirement.min.as_ref().map(ToString::to_string),
-            )).collect(),
+            requires: entry
+                .requires
+                .iter()
+                .map(|requirement| {
+                    (
+                        requirement.name.clone(),
+                        requirement.min.as_ref().map(ToString::to_string),
+                    )
+                })
+                .collect(),
             lv_min: entry.lv_min,
         }
     }
@@ -68,9 +75,14 @@ fn local_entry(entry: LocalEntry, url: String, md5: Option<String>) -> Entry {
         url,
         md5,
         display_name: entry.display_name,
-        requires: entry.requires.into_iter().map(|(name, min)| Requirement {
-            name, min: min.map(|version| Version::parse(&version)),
-        }).collect(),
+        requires: entry
+            .requires
+            .into_iter()
+            .map(|(name, min)| Requirement {
+                name,
+                min: min.map(|version| Version::parse(&version)),
+            })
+            .collect(),
         lv_min: entry.lv_min,
     }
 }
@@ -104,7 +116,9 @@ impl Index {
         let mut seen: HashMap<&str, &Entry> = HashMap::new();
         for e in &self.entries {
             let hit = e.name.to_lowercase().contains(&q)
-                || e.display_name.as_deref().is_some_and(|d| d.to_lowercase().contains(&q));
+                || e.display_name
+                    .as_deref()
+                    .is_some_and(|d| d.to_lowercase().contains(&q));
             if !hit {
                 continue;
             }
@@ -149,13 +163,19 @@ fn scan_local_repo(cache: &Cache, dir: &Path, refresh: bool, out: &mut Vec<Entry
         let path = std::path::absolute(path)?;
         let metadata = std::fs::metadata(&path)?;
         if !refresh && let Some(entry) = cache.local_entry(&path, &metadata)? {
-            out.push(local_entry(entry, path.to_string_lossy().into_owned(), None));
+            out.push(local_entry(
+                entry,
+                path.to_string_lossy().into_owned(),
+                None,
+            ));
             continue;
         }
         match entry_from_vip(&path) {
             Ok(entry) => {
                 let after = std::fs::metadata(&path)?;
-                if metadata.len() == after.len() && metadata.modified().ok() == after.modified().ok() {
+                if metadata.len() == after.len()
+                    && metadata.modified().ok() == after.modified().ok()
+                {
                     cache.record_local(&path, &metadata, &LocalEntry::from(&entry))?;
                 } else {
                     cache.forget_local(&path)?;
@@ -179,7 +199,11 @@ fn entry_from_vip(path: &Path) -> Result<Entry> {
 fn entry_from_bytes(path: &Path, bytes: &[u8]) -> Result<Entry> {
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;
     let idx = (0..zip.len())
-        .find(|i| zip.by_index(*i).map(|f| f.name().eq_ignore_ascii_case("spec")).unwrap_or(false))
+        .find(|i| {
+            zip.by_index(*i)
+                .map(|f| f.name().eq_ignore_ascii_case("spec"))
+                .unwrap_or(false)
+        })
         .context("no `spec` member")?;
     let mut buf = Vec::new();
     std::io::Read::read_to_end(&mut zip.by_index(idx)?, &mut buf)?;
@@ -191,7 +215,11 @@ fn entry_from_bytes(path: &Path, bytes: &[u8]) -> Result<Entry> {
         url: path.to_string_lossy().into_owned(),
         md5: None,
         display_name: spec.display_name,
-        requires: spec.requires.as_deref().map(parse_requires).unwrap_or_default(),
+        requires: spec
+            .requires
+            .as_deref()
+            .map(parse_requires)
+            .unwrap_or_default(),
         lv_min: spec.lv_gate.as_deref().and_then(parse_lv_gate),
     })
 }
@@ -210,16 +238,24 @@ pub struct Import {
 /// completed earlier in the same call remain committed. Originals are never moved.
 pub fn cache_add(cache_dir: &Path, source: &Path, refresh: bool) -> Result<Vec<Import>> {
     let source = std::path::absolute(source)?;
-    let is_package = |path: &Path| path.extension().is_some_and(|extension| {
-        extension.eq_ignore_ascii_case("vip") || extension.eq_ignore_ascii_case("ogp")
-    });
+    let is_package = |path: &Path| {
+        path.extension().is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("vip") || extension.eq_ignore_ascii_case("ogp")
+        })
+    };
     let mut files = if source.is_dir() {
         std::fs::read_dir(&source)?
             .map(|entry| entry.map(|entry| entry.path()))
             .collect::<std::io::Result<Vec<_>>>()?
-            .into_iter().filter(|path| path.is_file() && is_package(path)).collect::<Vec<_>>()
+            .into_iter()
+            .filter(|path| path.is_file() && is_package(path))
+            .collect::<Vec<_>>()
     } else {
-        anyhow::ensure!(source.is_file() && is_package(&source), "cache add expects a .vip/.ogp file or package directory: {}", source.display());
+        anyhow::ensure!(
+            source.is_file() && is_package(&source),
+            "cache add expects a .vip/.ogp file or package directory: {}",
+            source.display()
+        );
         vec![source]
     };
     files.sort();
@@ -228,17 +264,35 @@ pub fn cache_add(cache_dir: &Path, source: &Path, refresh: bool) -> Result<Vec<I
     for path in files {
         let metadata = std::fs::metadata(&path)?;
         if !refresh && let Some(sha256) = cache.imported_local(&path, &metadata)? {
-            imports.push(Import { path, sha256, reused: true });
+            imports.push(Import {
+                path,
+                sha256,
+                reused: true,
+            });
             continue;
         }
         let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
-        let entry = entry_from_bytes(&path, &bytes).with_context(|| format!("importing {}", path.display()))?;
+        let entry = entry_from_bytes(&path, &bytes)
+            .with_context(|| format!("importing {}", path.display()))?;
         let after = std::fs::metadata(&path)?;
-        anyhow::ensure!(metadata.len() == after.len() && metadata.modified().ok() == after.modified().ok(),
-            "package changed during import; retry cache add: {}", path.display());
+        anyhow::ensure!(
+            metadata.len() == after.len() && metadata.modified().ok() == after.modified().ok(),
+            "package changed during import; retry cache add: {}",
+            path.display()
+        );
         let sha256 = cache.store(&bytes)?;
-        cache.record_import(&path, &metadata, &LocalEntry::from(&entry), &sha256, &md5_hex(&bytes))?;
-        imports.push(Import { path, sha256, reused: false });
+        cache.record_import(
+            &path,
+            &metadata,
+            &LocalEntry::from(&entry),
+            &sha256,
+            &md5_hex(&bytes),
+        )?;
+        imports.push(Import {
+            path,
+            sha256,
+            reused: false,
+        });
     }
     Ok(imports)
 }
@@ -254,7 +308,11 @@ pub fn load(
     let mut entries = Vec::new();
     let cache = Cache::open(cache_dir)?;
     for package in cache.imported_packages()? {
-        entries.push(local_entry(package.entry, format!("cache:{}", package.sha256), Some(package.md5)));
+        entries.push(local_entry(
+            package.entry,
+            format!("cache:{}", package.sha256),
+            Some(package.md5),
+        ));
     }
 
     for dir in local_sources {
@@ -265,11 +323,18 @@ pub fn load(
     }
 
     let mut sources: Vec<(String, String)> = match defaults {
-        true => SOURCES.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect(),
+        true => SOURCES
+            .iter()
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .collect(),
         false => Vec::new(),
     };
     for repo in extra {
-        let base = if repo.ends_with('/') { repo.clone() } else { format!("{repo}/") };
+        let base = if repo.ends_with('/') {
+            repo.clone()
+        } else {
+            format!("{repo}/")
+        };
         sources.push((format!("{base}index.vipr"), base));
     }
 
@@ -351,7 +416,10 @@ fn feed_body(
 
     let resp = resp.error_for_status()?;
     let header = |name: reqwest::header::HeaderName| {
-        resp.headers().get(name).and_then(|v| v.to_str().ok()).map(str::to_string)
+        resp.headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
     };
     let fresh = SourceState {
         resolved_url: Some(resp.url().to_string()),
@@ -366,7 +434,15 @@ fn feed_body(
         started.elapsed().as_secs_f32()
     );
     let sha = cache.store(&bytes)?;
-    cache.record(url, "remote", base, &SourceState { sha256: Some(sha), ..fresh })?;
+    cache.record(
+        url,
+        "remote",
+        base,
+        &SourceState {
+            sha256: Some(sha),
+            ..fresh
+        },
+    )?;
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
@@ -375,8 +451,12 @@ fn parse_into(body: &str, base_url: &str, out: &mut Vec<Entry>) {
 
     let flush = |cur: Option<(String, HashMap<String, String>)>, out: &mut Vec<Entry>| {
         let Some((id, kv)) = cur else { return };
-        let Some((name, version)) = split_id(&id) else { return };
-        let Some(rel) = kv.get("Package.URL") else { return };
+        let Some((name, version)) = split_id(&id) else {
+            return;
+        };
+        let Some(rel) = kv.get("Package.URL") else {
+            return;
+        };
         out.push(Entry {
             name,
             version,
@@ -402,10 +482,10 @@ fn parse_into(body: &str, base_url: &str, out: &mut Vec<Entry>) {
                 .map(|id| (id.to_string(), HashMap::new()));
         } else if line.starts_with('[') {
             flush(cur.take(), out);
-        } else if let Some((k, v)) = line.split_once('=') {
-            if let Some((_, kv)) = cur.as_mut() {
-                kv.insert(k.trim().to_string(), v.trim().trim_matches('"').to_string());
-            }
+        } else if let Some((k, v)) = line.split_once('=')
+            && let Some((_, kv)) = cur.as_mut()
+        {
+            kv.insert(k.trim().to_string(), v.trim().trim_matches('"').to_string());
         }
     }
     flush(cur.take(), out);
@@ -426,10 +506,16 @@ fn parse_requires(s: &str) -> Vec<Requirement> {
                     } else {
                         None
                     };
-                    return Some(Requirement { name: n.trim().to_string(), min });
+                    return Some(Requirement {
+                        name: n.trim().to_string(),
+                        min,
+                    });
                 }
             }
-            Some(Requirement { name: part.to_string(), min: None })
+            Some(Requirement {
+                name: part.to_string(),
+                min: None,
+            })
         })
         .collect()
 }
@@ -473,7 +559,9 @@ mod tests {
                     }
                     head.push(byte[0]);
                 }
-                log.lock().unwrap().push(String::from_utf8_lossy(&head).into_owned());
+                log.lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&head).into_owned());
                 conn.write_all(response.as_bytes()).ok();
             }
         });
@@ -481,8 +569,8 @@ mod tests {
     }
 
     fn test_cache(name: &str) -> (std::path::PathBuf, Cache) {
-        let root = std::env::temp_dir()
-            .join(format!("lvpm-index-test-{name}-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("lvpm-index-test-{name}-{}", std::process::id()));
         std::fs::remove_dir_all(&root).ok();
         let cache = Cache::open(&root).unwrap();
         (root, cache)
@@ -490,8 +578,8 @@ mod tests {
 
     #[test]
     fn local_package_directories_cache_metadata_without_cache_blobs() {
-        let root = std::env::temp_dir()
-            .join(format!("lvpm-local-source-test-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("lvpm-local-source-test-{}", std::process::id()));
         std::fs::remove_dir_all(&root).ok();
         let packages = root.join("packages");
         std::fs::create_dir_all(&packages).unwrap();
@@ -508,46 +596,127 @@ mod tests {
             .unwrap();
         std::fs::write(&archive, writer.finish().unwrap().into_inner()).unwrap();
 
-        let idx = load(&root.join("cache"), false, &[], std::slice::from_ref(&packages), false).unwrap();
+        let idx = load(
+            &root.join("cache"),
+            false,
+            &[],
+            std::slice::from_ref(&packages),
+            false,
+        )
+        .unwrap();
         assert_eq!(idx.entries.len(), 1);
         let entry = &idx.entries[0];
         assert_eq!(entry.name, "local_thing");
         assert_eq!(entry.display_name.as_deref(), Some("Local Thing"));
         assert_eq!(entry.requires[0].name, "foo");
         assert!(is_local_url(&entry.url));
-        assert_eq!(std::fs::read(&entry.url).unwrap(), std::fs::read(&archive).unwrap());
-        assert_eq!(std::fs::read_dir(root.join("cache/content/sha256")).err().unwrap().kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(
+            std::fs::read(&entry.url).unwrap(),
+            std::fs::read(&archive).unwrap()
+        );
+        assert_eq!(
+            std::fs::read_dir(root.join("cache/content/sha256"))
+                .err()
+                .unwrap()
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
         assert!(root.join("cache/lvpm-cache.db").exists());
 
         let valid_bytes = std::fs::read(&archive).unwrap();
         std::fs::write(&archive, b"not a zip").unwrap();
-        assert!(load(&root.join("cache"), false, &[], std::slice::from_ref(&packages), false).unwrap().entries.is_empty());
+        assert!(
+            load(
+                &root.join("cache"),
+                false,
+                &[],
+                std::slice::from_ref(&packages),
+                false
+            )
+            .unwrap()
+            .entries
+            .is_empty()
+        );
         std::fs::write(&archive, &valid_bytes).unwrap();
-        let restored = load(&root.join("cache"), false, &[], std::slice::from_ref(&packages), false).unwrap();
-        assert_eq!(restored.entries[0].requires[0].min.as_ref().unwrap().raw, "1.2");
+        let restored = load(
+            &root.join("cache"),
+            false,
+            &[],
+            std::slice::from_ref(&packages),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            restored.entries[0].requires[0].min.as_ref().unwrap().raw,
+            "1.2"
+        );
 
         let original = std::fs::metadata(&archive).unwrap();
         std::fs::write(&archive, vec![0; original.len() as usize]).unwrap();
-        std::fs::File::options().write(true).open(&archive).unwrap()
-            .set_modified(original.modified().unwrap()).unwrap();
-        let cached = load(&root.join("cache"), false, &[], std::slice::from_ref(&packages), false).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&archive)
+            .unwrap()
+            .set_modified(original.modified().unwrap())
+            .unwrap();
+        let cached = load(
+            &root.join("cache"),
+            false,
+            &[],
+            std::slice::from_ref(&packages),
+            false,
+        )
+        .unwrap();
         assert_eq!(cached.entries[0].name, "local_thing");
-        let refreshed = load(&root.join("cache"), true, &[], std::slice::from_ref(&packages), false).unwrap();
+        let refreshed = load(
+            &root.join("cache"),
+            true,
+            &[],
+            std::slice::from_ref(&packages),
+            false,
+        )
+        .unwrap();
         assert!(refreshed.entries.is_empty());
-        let invalidated = load(&root.join("cache"), false, &[], std::slice::from_ref(&packages), false).unwrap();
+        let invalidated = load(
+            &root.join("cache"),
+            false,
+            &[],
+            std::slice::from_ref(&packages),
+            false,
+        )
+        .unwrap();
         assert!(invalidated.entries.is_empty());
 
         std::fs::remove_file(&archive).unwrap();
-        assert!(load(&root.join("cache"), false, &[], std::slice::from_ref(&packages), false).unwrap().entries.is_empty());
+        assert!(
+            load(
+                &root.join("cache"),
+                false,
+                &[],
+                std::slice::from_ref(&packages),
+                false
+            )
+            .unwrap()
+            .entries
+            .is_empty()
+        );
         std::fs::write(packages.join("new.vip"), &valid_bytes).unwrap();
-        assert_eq!(load(&root.join("cache"), false, &[], &[packages], false).unwrap().entries.len(), 1);
+        assert_eq!(
+            load(&root.join("cache"), false, &[], &[packages], false)
+                .unwrap()
+                .entries
+                .len(),
+            1
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
 
     fn write_import_fixture(path: &Path, version: &str) -> Vec<u8> {
         let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-        writer.start_file("spec", zip::write::SimpleFileOptions::default()).unwrap();
+        writer
+            .start_file("spec", zip::write::SimpleFileOptions::default())
+            .unwrap();
         writer.write_all(format!("[Package]\nName=imported_library\nVersion={version}\nDisplay Name=Imported Library\n[Dependencies]\nRequires=foo>=1.2\n").as_bytes()).unwrap();
         let bytes = writer.finish().unwrap().into_inner();
         std::fs::write(path, &bytes).unwrap();
@@ -567,17 +736,33 @@ mod tests {
         assert_eq!(imports.len(), 2);
         assert!(imports.iter().all(|import| !import.reused));
         assert_eq!(imports[0].sha256, imports[1].sha256);
-        assert!(cache_add(&root, &packages, false).unwrap().iter().all(|import| import.reused));
+        assert!(
+            cache_add(&root, &packages, false)
+                .unwrap()
+                .iter()
+                .all(|import| import.reused)
+        );
         let records = cache.imported_packages().unwrap();
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].md5, md5_hex(&bytes));
         assert_eq!(records[0].entry.requires[0].1.as_deref(), Some("1.2"));
-        assert_eq!(std::fs::read_dir(root.join("content/sha256").join(&imports[0].sha256[..2])).unwrap().count(), 1);
+        assert_eq!(
+            std::fs::read_dir(root.join("content/sha256").join(&imports[0].sha256[..2]))
+                .unwrap()
+                .count(),
+            1
+        );
         std::fs::remove_dir_all(&packages).unwrap();
         let index = load(&root, false, &[], &[], false).unwrap();
         let entry = index.best("imported_library", None, None).unwrap();
         assert_eq!(entry.url, format!("cache:{}", imports[0].sha256));
-        assert_eq!(cache.load(entry.url.strip_prefix("cache:").unwrap()).unwrap().unwrap(), bytes);
+        assert_eq!(
+            cache
+                .load(entry.url.strip_prefix("cache:").unwrap())
+                .unwrap()
+                .unwrap(),
+            bytes
+        );
         assert_eq!(index.search("Imported Library").len(), 1);
         drop(cache);
         std::fs::remove_dir_all(root).ok();
@@ -601,7 +786,14 @@ mod tests {
         assert!(!changed[0].reused);
         assert_ne!(changed[0].sha256, *sha);
         let index = load(&root, false, &[], &[], false).unwrap();
-        assert_eq!(index.best("imported_library", None, None).unwrap().version.raw, "2.0.0.1");
+        assert_eq!(
+            index
+                .best("imported_library", None, None)
+                .unwrap()
+                .version
+                .raw,
+            "2.0.0.1"
+        );
         assert_eq!(cache.load(&changed[0].sha256).unwrap().unwrap(), newer);
         drop(cache);
         std::fs::remove_dir_all(root).ok();
@@ -621,7 +813,8 @@ mod tests {
 
     const BODY: &str = "[Self]\nSelf.Name=Test\n";
     const OK: &str = "HTTP/1.1 200 OK\r\nContent-Length: 22\r\nETag: \"v1\"\r\nConnection: close\r\n\r\n[Self]\nSelf.Name=Test\n";
-    const NOT_MODIFIED: &str = "HTTP/1.1 304 Not Modified\r\nETag: \"v1\"\r\nConnection: close\r\n\r\n";
+    const NOT_MODIFIED: &str =
+        "HTTP/1.1 304 Not Modified\r\nETag: \"v1\"\r\nConnection: close\r\n\r\n";
 
     #[test]
     fn a_304_on_a_cached_feed_serves_the_stored_body() {
@@ -629,11 +822,20 @@ mod tests {
         let (root, cache) = test_cache("revalidate");
         let client = Client::new();
 
-        assert_eq!(feed_body(&cache, &client, &s.url, "http://b/", false).unwrap(), BODY);
-        assert_eq!(feed_body(&cache, &client, &s.url, "http://b/", true).unwrap(), BODY);
+        assert_eq!(
+            feed_body(&cache, &client, &s.url, "http://b/", false).unwrap(),
+            BODY
+        );
+        assert_eq!(
+            feed_body(&cache, &client, &s.url, "http://b/", true).unwrap(),
+            BODY
+        );
 
         let reqs = s.requests.lock().unwrap();
-        assert!(!reqs[0].contains("if-none-match"), "nothing was cached to revalidate against");
+        assert!(
+            !reqs[0].contains("if-none-match"),
+            "nothing was cached to revalidate against"
+        );
         assert!(
             reqs[1].to_lowercase().contains("if-none-match: \"v1\""),
             "the stored ETag goes back out: {}",
@@ -652,7 +854,11 @@ mod tests {
         let body = feed_body(&cache, &Client::new(), &s.url, "http://b/", false).unwrap();
 
         assert_eq!(body, BODY);
-        assert_eq!(s.requests.lock().unwrap().len(), 2, "the 304 was retried unconditionally");
+        assert_eq!(
+            s.requests.lock().unwrap().len(),
+            2,
+            "the 304 was retried unconditionally"
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -675,7 +881,10 @@ Package.Display Name=A Thing
         assert_eq!(out.len(), 1);
         let e = &out[0];
         assert_eq!(e.name, "abcdef_thing");
-        assert_eq!(e.url, "http://example.test/packages/abcdef_thing/abcdef_thing-1.0.16.17.vip");
+        assert_eq!(
+            e.url,
+            "http://example.test/packages/abcdef_thing/abcdef_thing-1.0.16.17.vip"
+        );
         assert_eq!(e.md5.as_deref(), Some("d3b17d5964e33b4dc2bdb905e2200074"));
         assert_eq!(e.lv_min, Some(11.0));
         assert_eq!(e.requires.len(), 2);
