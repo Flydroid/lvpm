@@ -1935,21 +1935,21 @@ and version.
 - [x] Slice 5: PubGrub solver
   - [x] Step 5.1: Provider over `Index`, version mapping, gate, preferences
   - [x] Step 5.2: Conflict report, unresolved requirements, cancellation
-
   - Commits add2df1, e24a3dc, 9fd3d0c. Cancellation is `SolveError::Cancelled` until Slice 15 adds the typed error. Open, pre-existing (in `version.rs`/`index.rs`, not the solver): prerelease tails are discarded so `1.0alpha1 == 1.0alpha2` and dedup can lock the wrong archive; `1.0.0alpha1-1` sorts above `1.0.0`; a `>` requirement is stored as `>=`. Gate messages truncate LabVIEW minor versions (`25.3` shows as 2025). Decide before Slice 8 writes locks.
+
 #### Wave 4
 - [x] Slice 6: `OpEnv` and query operations in core
   - [x] Step 6.1: `OpEnv`, destination and index loading
   - [x] Step 6.2: Query commands return data
-
   - Commits 085d29b, 2b8a900. `render::sink()` is gone; `main()` builds one `OpEnv`. Behaviour change to watch (AC-N1): config and targets now load eagerly for every command, so a malformed config fails commands that never read it before (`targets`, `start`, `list --prefix`). Out-of-list edits: `venv.rs` (probe/locate/find/load take `venv_dir` and `targets`), `events.rs` (`VenvSelected`, `HeadlessInstallationChosen`), `config.rs` (`get(&Config)`), test step visibility. The untagged Slice 6 `targets` row needs a real LabVIEW 2026.
+
 #### Wave 5
 - [x] Slice 7: Install and uninstall in core with reusable seams
   - [x] Step 7.1: Pure move of install into `ops::install`
   - [x] Step 7.2: Split into `resolve_greedy` / `InstallSession` / `apply` / `finish`
   - [x] Step 7.3: `ops::uninstall` on the same session
-
   - Commits c84c66d, 46f7b40, 3f348b1. Plan premise corrected: install manifests now record `archive_sha256`, which changes the hashed manifests in `tests/golden/*/tree.txt`; the harness normaliser drops that one field before comparing (accepted by the user 2026-10-24). Unrecorded output changes: relink progress lines start on their own line; a stderr event during an open stdout line ends that line first. `finish` takes `InstallOptions`; the `begin_unpack` seam is the top of `unpack()` in `ops/install.rs`. Dropped the unreachable dry-run hook listing. `reqwest` left the CLI crate, `zip` moved to dev-dependencies. For Slice 10: `InstallPlan` is `entries: Vec<Entry>` and `apply` checks no hash yet. For Slice 14: `cmd_relink` duplicates `finish`'s relink block.
+
 #### Wave 6
 - [x] Slice 7b (inserted 2026-10-24 by user decision): version comparison fixes before locking
   - Prerelease tails compare (`1.0alpha1 < 1.0alpha2`, no dedup merge); a prerelease sorts below its release even with a revision suffix; a `>` requirement is strict. May change which version the greedy CLI picks when prereleases are involved.
@@ -1957,14 +1957,14 @@ and version.
 - [x] Slice 8: `lvpm lock`
   - [x] Step 8.1: Lock format
   - [x] Step 8.2: `ops::lock` and `lvpm lock`
-
   - Commits 0cd2541, 76e20c7, 6ffbc2d. `errors` module added; `Downloads` split out of `InstallSession` (`ops/session.rs`) so `lock` fetches through the cache without a destination. `source` is the feed index URL or `local`. `labview` must be a year (`LockError::LabviewNotAYear`). A package in both dependency tables satisfies both lines and is not dev (6ffbc2d). For Slice 9: `Lockfile::read`, `Inputs::of`, `constraint_text` are pub. For Slice 10: `Downloads` is `pub(super)`.
+
 #### Wave 7
 - [x] Slice 9: Staleness and `lvpm lock --check`
   - [x] Step 9.1: Staleness rules as named predicates
   - [x] Step 9.2: `lvpm lock --check`
-
   - Commits a20f876, 8c11dba. `Lockfile::staleness` returns a typed `StaleReason`; `lock` on a current lock is a no-op (`LockUpToDate`); `check` reads only the manifest and lock. Sources compare as a set. For Slice 10/11: reuse `render::lock::stale_reason`. For Slice 12: add `conflicts_with("check")` to `--upgrade`/`--upgrade-package`.
+
 #### Wave 8
 - [ ] Slice 10: Exact sync
   - [ ] Step 10.1: `plan_sync` as data
