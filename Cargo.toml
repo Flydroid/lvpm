@@ -19,3 +19,13 @@ zip = "8.6.0"
 
 [target."cfg(windows)".dependencies]
 winreg = "0.56.0"
+
+[dev-dependencies]
+cucumber = "0.23.0"
+futures = "0.3.34"
+regex = "1.13.1"
+tempfile = "3.27.0"
+
+[[test]]
+name = "acceptance"
+harness = false
