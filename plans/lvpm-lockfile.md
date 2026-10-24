@@ -1928,9 +1928,10 @@ and version.
   - [x] Step 3.1: Events, sink, stateful renderer; convert `index.rs`
   - [x] Step 3.2: Convert relink, venv, launch and viserver
   - Commits 51a6c14, 9005a72. Accepted deviations: `LocalPackageIgnored`, `RelinkDoneNotClearable` and `RelinkProgressUnreadable` carry the error cause as text to keep output byte-identical (typed when `LockError`/`SyncError` land, Slice 8/10); `render::sink()` is a process-wide sink until `OpEnv` (Slice 6) threads one through; a failed feed request leaves `FeedCheckStart` without `FeedChecked`, as the old output did; `main.rs` still begins some lines with `print!` itself (moves in Slices 6, 7, 14). Out-of-list edits: `refresh.rs` (sink propagation), `config.rs`/`target.rs` allows, test-crate allows, `tests/steps/in_process.rs`, `tests/support/events.rs`, `Sandbox.feed` lazy start. Unrecorded renderer paths (relink progress and notes, `wrote <manifest>`, `starting LabVIEW`) are pinned by renderer unit tests only.
-- [ ] Slice 4: Manifest editing and `[dev-dependencies]`
-  - [ ] Step 4.1: Parse `[dev-dependencies]`
-  - [ ] Step 4.2: Format-preserving edits
+- [x] Slice 4: Manifest editing and `[dev-dependencies]`
+  - [x] Step 4.1: Parse `[dev-dependencies]`
+  - [x] Step 4.2: Format-preserving edits
+  - Commits e46c505, 2895668, 6347533 (AC-M2 fix: `remove` keeps whole-line comments above the entry). Out-of-list edits: `tests/acceptance.rs` (feature registration, `manifest` world field), `tests/steps/{mod,manifest}.rs`. For Slice 13: `remove` of an absent entry returns the text unchanged, so `ops::remove` checks presence and both tables for the `--dev` hint; `add`/`remove` compute text with the pure functions and write only after lock and sync succeed (AC-M3).
 - [ ] Slice 5: PubGrub solver
   - [ ] Step 5.1: Provider over `Index`, version mapping, gate, preferences
   - [ ] Step 5.2: Conflict report, unresolved requirements, cancellation
