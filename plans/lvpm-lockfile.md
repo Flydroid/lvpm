@@ -1984,9 +1984,10 @@ and version.
   - Commits 7edb5cb, 588f7e8, 6af600b. `--upgrade` and `--upgrade-package` conflict with each other and with `--check`. A manifest floor that excludes `@ver` is rewritten in memory (never `*`, never a transitive package); manifest then lock are written inside `ops::snapshot::restoring_on_failure`, which Slice 13 reuses. Pins show as `--upgrade-package X@ver` in conflicts (6af600b). One feature-file wording change to avoid an ambiguous step.
 
 #### Wave 11
-- [ ] Slice 13: `lvpm add` / `lvpm remove`; `install <pkg>` routing
-  - [ ] Step 13.1: `ops::add` / `ops::remove`: compute in memory, verify, then write
-  - [ ] Step 13.2: CLI commands and full `install` routing
+- [x] Slice 13: `lvpm add` / `lvpm remove`; `install <pkg>` routing
+  - [x] Step 13.1: `ops::add` / `ops::remove`: compute in memory, verify, then write
+  - [x] Step 13.2: CLI commands and full `install` routing
+  - Commits bcc36cc, ef5c5fe, 65ff987. Harness guard now also covers `add` and `remove`. DECIDED WHILE USER AWAY: the Slice 1 recordings `venv-install-beta` and `venv-install-vi-fixture` ran bare `lvpm install <pkg>` in a venv project, which AC-M7 now routes to `add`; only those two rows were re-recorded (65ff987), logged in config-changelog. The `a venv with X installed` setup step now passes `--labview-version 2026` to stay additive. One more `@unsafe` scenario (install with a name and `--global` stays additive), covered by @core routing tests. Small open: a conflict from `add` shows the new entry as an `lvpm.toml:` line although nothing is written yet.
 
 #### Wave 12
 - [ ] Slice 14: Remaining operations move to core
