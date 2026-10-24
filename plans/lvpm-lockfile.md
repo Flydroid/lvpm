@@ -1924,9 +1924,10 @@ and version.
   - Commits b5be260, 1e67871. Out-of-list edits, justified by the move: `tests/support/fixtures.rs` (VI path), `tests/support/venv.rs` (doc comment). Carried forward: Slice 3.2 must edit `lib.rs` (drop the temporary `disallowed_methods` allow) and `clippy.toml` (add the `std::env` and `Stdio::inherit` entries); Slice 8 adds `errors` to `lib.rs`; Slice 16 fixes the moved `src/*.rs` paths in README.md, PROVENANCE.md and docs/.
 
 #### Wave 3
-- [ ] Slice 3: Event sink replaces printing in the moved modules
-  - [ ] Step 3.1: Events, sink, stateful renderer; convert `index.rs`
-  - [ ] Step 3.2: Convert relink, venv, launch and viserver
+- [x] Slice 3: Event sink replaces printing in the moved modules
+  - [x] Step 3.1: Events, sink, stateful renderer; convert `index.rs`
+  - [x] Step 3.2: Convert relink, venv, launch and viserver
+  - Commits 51a6c14, 9005a72. Accepted deviations: `LocalPackageIgnored`, `RelinkDoneNotClearable` and `RelinkProgressUnreadable` carry the error cause as text to keep output byte-identical (typed when `LockError`/`SyncError` land, Slice 8/10); `render::sink()` is a process-wide sink until `OpEnv` (Slice 6) threads one through; a failed feed request leaves `FeedCheckStart` without `FeedChecked`, as the old output did; `main.rs` still begins some lines with `print!` itself (moves in Slices 6, 7, 14). Out-of-list edits: `refresh.rs` (sink propagation), `config.rs`/`target.rs` allows, test-crate allows, `tests/steps/in_process.rs`, `tests/support/events.rs`, `Sandbox.feed` lazy start. Unrecorded renderer paths (relink progress and notes, `wrote <manifest>`, `starting LabVIEW`) are pinned by renderer unit tests only.
 - [ ] Slice 4: Manifest editing and `[dev-dependencies]`
   - [ ] Step 4.1: Parse `[dev-dependencies]`
   - [ ] Step 4.2: Format-preserving edits
