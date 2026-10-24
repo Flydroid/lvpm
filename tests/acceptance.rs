@@ -31,6 +31,7 @@ use support::sandbox::Sandbox;
 const FEATURE_FILES: &[&str] = &[
     "tests/features/lvpm-lockfile/slice-1-characterization-harness-and-recorded-cli-output.feature",
     "tests/features/lvpm-lockfile/slice-3-event-sink-replaces-printing-in-the-moved-modules.feature",
+    "tests/features/lvpm-lockfile/slice-4-manifest-editing-and-dev-dependencies.feature",
 ];
 const LABVIEW_TAG: &str = "labview";
 const TEST_LABVIEW_ENV_VAR: &str = "LVPM_TEST_LABVIEW";
@@ -51,6 +52,8 @@ pub struct CliWorld {
     pub row_outputs: Vec<Output>,
     /// What core reported to the recording sink of an `@core` scenario.
     pub core_events: Vec<lvpm_core::events::Event>,
+    /// What an `@core` manifest-editing scenario has done and seen.
+    pub manifest: steps::manifest::ManifestState,
 }
 
 impl CliWorld {
@@ -63,6 +66,7 @@ impl CliWorld {
             recordings: Vec::new(),
             row_outputs: Vec::new(),
             core_events: Vec::new(),
+            manifest: Default::default(),
         }
     }
 
