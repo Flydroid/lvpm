@@ -86,11 +86,11 @@ Reference and `vipm.toml` comparison: [manifest.md](manifest.md).
   exact, `>=` floor, `*` newest, in every dependency table; `name@x` stays
   CLI-only. Breaking: a bare version is exact today. `vipm.toml` bare
   versions are read as `=x`.
-- **`[dependency-groups.<name>]`** — tables shaped like `[dependencies]`, for
-  test, CI and build tooling, with a reserved `include-groups = [...]` key;
-  selected with `--with`, `--without`, `--only`; `dev` installed by default;
-  `[dev-dependencies]` is another spelling of `[dependency-groups.dev]`.
-  Design in [manifest.md](manifest.md#to-do).
+- **`[dependency-groups.<name>]`** — done: tables shaped like
+  `[dependencies]` with a reserved `include-groups = [...]` key, selected
+  with `--with`, `--without`, `--only`; only `main` installs by default.
+  Open: whether `dev` should install by default. Reference in
+  [manifest.md](manifest.md#dependency-groups).
 - Per-dependency tables: `{ version = "...", hooks = "run", source = "local" }`.
 - `[venv]` overrides: `dir`, `vi-server-port`, `bitness`.
 - **`vipm.toml` conversion** — done for `--manifest vipm.toml`

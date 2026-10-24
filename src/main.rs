@@ -71,6 +71,21 @@ struct RelinkArgs {
     keep_open: bool,
 }
 
+/// Which `[dependency-groups]` a manifest install takes. `main` names
+/// `[dependencies]`, the only group installed by default.
+#[derive(clap::Args, Clone)]
+struct GroupArgs {
+    /// Also install these dependency groups (comma-separated).
+    #[arg(long, value_name = "GROUP", value_delimiter = ',', conflicts_with_all = ["only", "package"])]
+    with: Vec<String>,
+    /// Leave these groups out, `main` included (comma-separated).
+    #[arg(long, value_name = "GROUP", value_delimiter = ',', conflicts_with_all = ["only", "package"])]
+    without: Vec<String>,
+    /// Install only these groups (comma-separated); add `main` to keep [dependencies].
+    #[arg(long, value_name = "GROUP", value_delimiter = ',', conflicts_with = "package")]
+    only: Vec<String>,
+}
+
 #[derive(Subcommand)]
 enum Cmd {
     /// List detected LabVIEW installations.
@@ -116,6 +131,8 @@ enum Cmd {
         /// resolving to something older than what is installed is refused.
         #[arg(long)]
         allow_downgrade: bool,
+        #[command(flatten)]
+        groups: GroupArgs,
         #[command(flatten)]
         relink: RelinkArgs,
     },
@@ -289,6 +306,7 @@ fn main() -> Result<()> {
             force_relink,
             run_hooks,
             allow_downgrade,
+            groups,
             relink,
         } => cmd_install(
             &cli,
@@ -300,6 +318,7 @@ fn main() -> Result<()> {
             *force_relink,
             *run_hooks,
             *allow_downgrade,
+            groups,
             relink,
         ),
         Cmd::Relink { package, all, relink } => cmd_relink(&cli, package.as_deref(), *all, relink),
@@ -768,6 +787,7 @@ fn cmd_install(
     force_relink: bool,
     run_hooks: bool,
     allow_downgrade: bool,
+    groups: &GroupArgs,
     relink_args: &RelinkArgs,
 ) -> Result<()> {
     // Headless (containers, CI): nothing opens the IDE, and whatever the job
@@ -799,7 +819,7 @@ fn cmd_install(
     // when a single package is named. Inside a project a bare `lvpm install`
     // means the manifest's dependencies — the way `npm install` does.
     let found = manifest_for(cli, manifest, venv.as_ref().map(|v| v.repo.as_path()))?;
-    let (wanted, from_manifest): (Vec<(String, project::Constraint)>, _) = match (package, &found) {
+    let (wanted, from_manifest) = match (package, &found) {
         (Some(p), _) => {
             let w = match p.split_once('@') {
                 Some((n, v)) => vec![(n.to_string(), project::Constraint::parse(v)?)],
@@ -807,19 +827,32 @@ fn cmd_install(
             };
             (w, None)
         }
-        (None, Some((path, proj))) => (proj.dependencies.clone(), Some((path, proj))),
+        (None, Some((path, proj))) => {
+            let s = proj.select(&groups.with, &groups.without, &groups.only)?;
+            (s.dependencies, Some((path, proj, s.groups)))
+        }
         (None, None) => bail!("give a package name, or --manifest <FILE>"),
     };
-    ensure!(!wanted.is_empty(), "the manifest lists no [dependencies]");
 
-    if let Some((path, proj)) = &from_manifest {
+    if let Some((path, proj, selected)) = &from_manifest {
+        ensure!(!wanted.is_empty(), "nothing to install: the selected groups ({}) are empty", selected.join(", "));
         eprintln!(
-            "manifest: {}{} — {} dependenc{}",
+            "manifest: {}{} — {} dependenc{} ({})",
             path.display(),
             proj.name.as_deref().map(|n| format!(" ({n})")).unwrap_or_default(),
             wanted.len(),
-            if wanted.len() == 1 { "y" } else { "ies" }
+            if wanted.len() == 1 { "y" } else { "ies" },
+            selected.join(", ")
         );
+        let skipped: Vec<&str> = proj
+            .groups
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .filter(|n| !selected.iter().any(|s| s == n))
+            .collect();
+        if !skipped.is_empty() {
+            eprintln!("      groups not selected: {} (--with <GROUP> adds one)", skipped.join(", "));
+        }
         if let Some(v) = &proj.labview {
             eprintln!("      manifest says labview = {v:?} (minimum)");
         }
@@ -905,7 +938,7 @@ fn cmd_install(
     }
     println!();
 
-    if let Some((_, proj)) = &from_manifest
+    if let Some((_, proj, _)) = &from_manifest
         && !proj.nipm.is_empty()
     {
         println!(

@@ -25,6 +25,8 @@ defaults = true                   # false: only the sources listed here
 [dependencies]
 delacor_lib_qmh = "7.1.2.1547"    # exactly this version
 oglib_error = ">=6.0.1"           # the newest version satisfying the floor
+
+[dependency-groups.test]          # installed only with --with test
 jki_lib_caraya = "*"              # the newest version
 
 [nipm.dependencies]               # NI Package Manager packages: reported, not installed
@@ -116,8 +118,10 @@ Rules:
 
 ### How the manifest resolves
 
-`lvpm install` with no package name installs every `[dependencies]` entry as
-one plan with one relink pass:
+`lvpm install` with no package name installs the selected groups (only
+`[dependencies]` by default, see
+[`[dependency-groups]`](#dependency-groups)) as one plan with one relink
+pass:
 
 - Each root asks for what its constraint says. A dependency declared by a
   package's own spec is always treated as a floor.
@@ -131,7 +135,7 @@ one plan with one relink pass:
 - Every root that cannot be found is collected and reported together, so one
   typo does not hide the others. A missing transitive dependency is reported
   and skipped.
-- An empty `[dependencies]` is an error for a manifest-driven install.
+- An empty selection is an error for a manifest-driven install.
 
 `lvpm install <name>[@<version>]` inside a project installs that one package
 using the project's `[sources]`, but does not add it to the manifest yet.
@@ -139,6 +143,59 @@ using the project's `[sources]`, but does not add it to the manifest yet.
 `lvpm install` is additive: it never removes a package that is installed but
 no longer listed. Use `lvpm uninstall <name>`, or `lvpm uninstall --all`
 followed by `lvpm install`, until `lvpm sync` exists (see [To do](#to-do)).
+
+## `[dependency-groups]`
+
+Named sets of packages the project needs only sometimes: test frameworks,
+CI tooling, build tools. They belong to the project and never become package
+metadata (as in [PEP 735](https://peps.python.org/pep-0735/)). Each group is
+a table with the shape of `[dependencies]`:
+
+```toml
+[dependencies]                    # the group "main"
+delacor_lib_qmh = "7.1.2.1547"
+
+[dependency-groups.test]
+jki_lib_caraya = "*"
+oglib_error = ">=6.0"
+
+[dependency-groups.ci]
+include-groups = ["test"]         # everything in test, plus:
+ni_vi_analyzer_tests = "1.2.0.3"
+
+[dependency-groups.build]
+vipm_package_builder = "*"
+```
+
+- **Same syntax as `[dependencies]`.** A group line takes the same
+  constraints with the same meaning, so a line can move between tables
+  unchanged.
+- **`include-groups`** is the one reserved key: an array of group names whose
+  packages this group takes too. An unknown name is an error when the
+  manifest is read; a cycle is an error naming it (`a -> b -> a`) when the
+  group is selected.
+- **`main`** is the name of `[dependencies]` on the command line, so no group
+  may be called that.
+- A package named in more than one selected table must ask for the same
+  version in each; otherwise the error names both tables.
+
+Only `main` is installed by default. The `install` flags choose more, each
+taking a comma-separated list:
+
+| Command                          | Installs                                      |
+| -------------------------------- | --------------------------------------------- |
+| `lvpm install`                   | main                                          |
+| `lvpm install --with test`       | main + test                                   |
+| `lvpm install --with ci`         | main + test + ci (`ci` includes `test`)       |
+| `lvpm install --with ci --without test` | main + ci                              |
+| `lvpm install --only test`       | test only, no `[dependencies]`                |
+| `lvpm install --only main,build` | main + build                                  |
+| `lvpm install --without main --with build` | build only                          |
+
+`--without` applies after includes are expanded. `--only` replaces the
+default and cannot be combined with `--with` or `--without`; none of the
+three apply to a single-package `lvpm install <name>`. The install banner
+names the groups in effect and lists the ones not selected.
 
 ## `[nipm.dependencies]`
 
@@ -295,55 +352,12 @@ Tracked in [roadmap.md](roadmap.md#the-manifest-and-the-lockfile---wip):
     `lvpm add`), as in `cargo add`; it is not written in the manifest.
     `lvpm add` writes `=x` when given a version and a caret on the resolved
     version otherwise, as `cargo add` does.
-- **`[dependency-groups.<name>]`**: named sets of packages that belong to the
-  project only, such as test, CI or build tooling. They never become package
-  metadata (as in [PEP 735](https://peps.python.org/pep-0735/)), but each
-  group is a table with exactly the shape of `[dependencies]`:
-
-  ```toml
-  [dependencies]                  # always installed: the group "main"
-  delacor_lib_qmh = "7.1.2.1547"
-
-  [dependency-groups.dev]
-  jki_lib_caraya = "*"
-  lvpm_lib_viunit = ">=1.0"
-
-  [dependency-groups.ci]
-  include-groups = ["dev"]       # everything in dev, plus:
-  ni_vi_analyzer_tests = "=1.2.0.3"
-
-  [dependency-groups.build]
-  vipm_package_builder = "*"
-  ```
-
-  - **Same syntax everywhere.** A group line is read exactly like a
-    `[dependencies]` line, with the grammar above, so copying a line between
-    tables never changes its meaning.
-  - **`include-groups`** is the one reserved key. Its value is an array of
-    group names, which no dependency line can be (those are strings), so it
-    cannot be mistaken for a package. Includes are resolved before
-    installing; a cycle is an error naming the groups.
-  - A package appearing in more than one selected table must carry the same
-    constraint in each, otherwise the error names both.
-  - Selection, as in Poetry: `--with <g>` adds groups to the defaults,
-    `--without <g>` removes them, `--only <g>` installs just those groups
-    (`main` names `[dependencies]`, so `--only main` skips every group).
-    Each flag takes a comma-separated list. Defaults come from
-    `[project] default-groups`, else `["dev"]` when a `dev` group exists.
-    VIPM installs dev dependencies only with `--dev`; lvpm installs them by
-    default because a venv is a development environment.
-
-    | Command                       | Installs                                                  |
-    | ----------------------------- | --------------------------------------------------------- |
-    | `lvpm install`                | main + dev                                                |
-    | `lvpm install --with ci`      | main + dev + ci (`ci` also includes `dev`)                |
-    | `lvpm install --without dev`  | main only                                                 |
-    | `lvpm install --only dev`     | dev only, no `[dependencies]`                             |
-    | `lvpm install --only main`    | main only, no groups                                      |
-
-  - `[dev-dependencies]` (the `vipm.toml` table) is another spelling of
-    `[dependency-groups.dev]`; the shape is identical, so nothing is
-    converted. Defining both is an error.
+- **Dependency groups, remaining** (groups and `--with` / `--without` /
+  `--only` are done, see [`[dependency-groups]`](#dependency-groups)):
+  - **Open decision: default groups.** Only `main` installs by default.
+    Whether a `dev` group (or a `[project] default-groups` list) should be
+    installed by default, as uv does, is undecided. VIPM installs its dev
+    dependencies only with `--dev`, which matches today's behaviour.
   - `lvpm add <pkg> --group <g>` writes into that group's table.
   - `lvpm.lock` records every group's packages, each tagged with its groups,
     so changing the selection never re-resolves. `lvpm sync` uninstalls
