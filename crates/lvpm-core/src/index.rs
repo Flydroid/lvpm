@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// (index url, base url that `Package.URL` is relative to)
-pub const SOURCES: &[(&str, &str)] = &[
+pub(crate) const SOURCES: &[(&str, &str)] = &[
     (
         "http://download.ni.com/evaluation/labview/lvtn/vipm/index.vipr",
         "http://download.ni.com/evaluation/labview/lvtn/vipm/",
@@ -138,14 +138,14 @@ impl Index {
 
 /// Lowercase hex MD5. `md-5` 0.11 returns a `hybrid_array::Array`, which has
 /// no `LowerHex`, so format the bytes ourselves.
-pub fn md5_hex(bytes: &[u8]) -> String {
+pub(crate) fn md5_hex(bytes: &[u8]) -> String {
     let mut h = Md5::new();
     h.update(bytes);
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// An entry's download location, once resolved: a URL to fetch or a file to read.
-pub fn is_local_url(url: &str) -> bool {
+pub(crate) fn is_local_url(url: &str) -> bool {
     !url.starts_with("http://") && !url.starts_with("https://")
 }
 

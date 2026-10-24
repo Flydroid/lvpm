@@ -153,7 +153,7 @@ pub fn read(path: &Path) -> Result<Project> {
     parse(&text).with_context(|| format!("parsing manifest {}", path.display()))
 }
 
-pub fn parse(text: &str) -> Result<Project> {
+pub(crate) fn parse(text: &str) -> Result<Project> {
     let f: File = toml::from_str(text)?;
     let mut p = Project {
         name: f.project.name,

@@ -103,7 +103,7 @@ fn safe_relative(rel: &str) -> Result<PathBuf> {
     Ok(out)
 }
 
-pub fn manifest_path(roots: &Roots, name: &str) -> PathBuf {
+pub(crate) fn manifest_path(roots: &Roots, name: &str) -> PathBuf {
     roots.store_dir().join(format!("{name}.json"))
 }
 
@@ -213,7 +213,7 @@ pub fn plan(roots: &Roots, spec: &Spec, zip: &mut Archive) -> Result<Plan> {
 /// addons write them). The floor is the bound target itself, not what the
 /// package claimed: the relink pass saves the payload in that version's
 /// format, so nothing older could load it anyway.
-pub fn addon_info(name: &str, target: &LvTarget) -> String {
+pub(crate) fn addon_info(name: &str, target: &LvTarget) -> String {
     serde_json::to_string_pretty(&serde_json::json!({
         "AddonName": name,
         "ApiVersion": "v1",

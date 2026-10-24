@@ -1,19 +1,9 @@
 //! lvpm — an open-source package manager for LabVIEW packages.
 
-mod cache;
-mod config;
-mod fetch;
-mod index;
-mod install;
-mod launch;
-mod project;
-mod refresh;
-mod relink;
-mod spec;
-mod target;
-mod venv;
-mod version;
-mod viserver;
+use lvpm_core::{
+    cache, config, fetch, index, install, launch, project, refresh, relink, spec, target, venv,
+    version, viserver,
+};
 
 use anyhow::{Context, Result, bail, ensure};
 use clap::{Parser, Subcommand};

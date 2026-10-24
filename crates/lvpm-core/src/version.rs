@@ -100,7 +100,7 @@ fn is_version(s: &str) -> bool {
 /// carries its own `-<digit>` — `national_instruments_lib_rs-232_...-1.0.0.1`
 /// — being cut at `rs-232`. Checked against all 4815 ids in the public
 /// indexes: every one splits, and only the RS-232 package changes.
-pub fn split_id(id: &str) -> Option<(String, Version)> {
+pub(crate) fn split_id(id: &str) -> Option<(String, Version)> {
     let b = id.as_bytes();
     let mut fallback = None;
     for (i, c) in b.iter().enumerate() {

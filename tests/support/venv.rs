@@ -45,7 +45,7 @@ const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
 /// The VI Server port `lvpm venv create` will give the venv in `venv_dir`.
 ///
-/// Mirrors `port_for` in `src/venv.rs`, so a sandbox can be made at a path
+/// Mirrors `port_for` in `crates/lvpm-core/src/venv.rs`, so a sandbox can be made at a path
 /// whose port nothing else on the machine is using. `Sandbox::learn_venv_port`
 /// checks it against the port `lvpm` actually wrote.
 pub fn predicted_port(venv_dir: &Path) -> u16 {

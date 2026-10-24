@@ -22,7 +22,7 @@ impl LvTarget {
         2000 + self.version.trunc() as u32
     }
 
-    pub fn key(&self) -> String {
+    pub(crate) fn key(&self) -> String {
         format!("LabVIEW-{}-{}bit", self.year(), self.bitness)
     }
 
@@ -93,7 +93,7 @@ pub fn detect() -> Result<Vec<LvTarget>> {
 }
 
 #[cfg(not(windows))]
-pub fn detect() -> Result<Vec<LvTarget>> {
+pub(crate) fn detect() -> Result<Vec<LvTarget>> {
     // LabVIEW on Linux lives under /usr/local/natinst/LabVIEW-<year>-64
     let mut out = Vec::new();
     if let Ok(rd) = std::fs::read_dir("/usr/local/natinst") {
@@ -237,7 +237,7 @@ impl Roots {
     /// LabVIEW install dir — that is what LVAddons overlays — so every
     /// LabVIEW-tree token lands inside the addon. The machine roots stay real:
     /// the venv policy skips those groups rather than redirecting them.
-    pub fn project(venv: &Path, target: &LvTarget, pkg: &str) -> Roots {
+    pub(crate) fn project(venv: &Path, target: &LvTarget, pkg: &str) -> Roots {
         let mut r = Roots::labview(target);
         r.application = venv.join(pkg).join("1");
         r.venv = Some(venv.to_path_buf());
@@ -248,7 +248,7 @@ impl Roots {
     /// boundary rather than a destination: the manifest store, and the prune
     /// that stops there on uninstall — so removing a package takes its `1`
     /// and its `<pkg>` dir with it.
-    pub fn project_store(venv: &Path, target: &LvTarget) -> Roots {
+    pub(crate) fn project_store(venv: &Path, target: &LvTarget) -> Roots {
         let mut r = Roots::labview(target);
         r.application = venv.to_path_buf();
         r.venv = Some(venv.to_path_buf());
@@ -261,7 +261,7 @@ impl Roots {
     }
 
     /// What kind of place a `Target Dir` names, without resolving it.
-    pub fn classify(target_dir: &str) -> Result<TokenClass> {
+    pub(crate) fn classify(target_dir: &str) -> Result<TokenClass> {
         let Some((tok, _)) = target_dir.split_once('>') else {
             bail!("malformed Target Dir: {target_dir:?}");
         };
@@ -273,7 +273,7 @@ impl Roots {
     }
 
     /// Resolve a `Target Dir` such as `<menus>/Categories`.
-    pub fn expand(&self, target_dir: &str) -> Result<PathBuf> {
+    pub(crate) fn expand(&self, target_dir: &str) -> Result<PathBuf> {
         let Some((tok, rest)) = target_dir.split_once('>') else {
             bail!("malformed Target Dir: {target_dir:?}");
         };
@@ -314,7 +314,7 @@ impl Roots {
 
     /// Manifests live beside the thing they describe: inside the venv or the
     /// sandbox, in ProgramData keyed by target for a real install.
-    pub fn store_dir(&self) -> PathBuf {
+    pub(crate) fn store_dir(&self) -> PathBuf {
         match (&self.venv, &self.scratch, &self.target) {
             (Some(v), _, _) => v.join(".lvpm").join("installed"),
             (None, Some(p), _) => p.join(".lvpm").join("installed"),
@@ -333,7 +333,7 @@ impl Roots {
     /// LabVIEW itself. Anything that walks a directory tree — relinking, say —
     /// has to know the difference, because handed one of these it would work on
     /// code no install of ours ever touched.
-    pub fn is_shared_root(&self, dir: &Path) -> bool {
+    pub(crate) fn is_shared_root(&self, dir: &Path) -> bool {
         // Above the install dir is shared by definition.
         if self.application.starts_with(dir) {
             return true;
@@ -365,7 +365,7 @@ impl Roots {
     }
 
     /// Guard against a package writing outside the sandbox, or the venv.
-    pub fn check_contained(&self, p: &Path) -> Result<()> {
+    pub(crate) fn check_contained(&self, p: &Path) -> Result<()> {
         let bound = match (&self.scratch, &self.venv) {
             (Some(root), _) => Some((root, "the scratch prefix")),
             (None, Some(root)) => Some((root, "the venv")),

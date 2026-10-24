@@ -132,7 +132,7 @@ impl Cache {
     /// Reuse metadata only when the absolute path, size, and modification time match.
     /// Unavailable timestamps or invalid JSON are misses; stats are not integrity
     /// checks and cannot detect replacements preserving both size and timestamp.
-    pub fn local_entry(
+    pub(crate) fn local_entry(
         &self,
         path: &Path,
         metadata: &std::fs::Metadata,
@@ -153,7 +153,7 @@ impl Cache {
 
     /// Replace parsed metadata and clear its import shortcut without deleting packages.
     /// No record is written when a usable modification time is unavailable.
-    pub fn record_local(
+    pub(crate) fn record_local(
         &self,
         path: &Path,
         metadata: &std::fs::Metadata,
@@ -171,7 +171,7 @@ impl Cache {
     }
 
     /// Invalidate the original file's shortcut, leaving imported archives intact.
-    pub fn forget_local(&self, path: &Path) -> Result<()> {
+    pub(crate) fn forget_local(&self, path: &Path) -> Result<()> {
         self.db.execute(
             "DELETE FROM local_files WHERE path = ?1",
             params![path.to_string_lossy()],
@@ -181,7 +181,7 @@ impl Cache {
 
     /// Find an unchanged import with a package row and an existing blob.
     /// This fast path checks existence only; consumers must verify the blob on read.
-    pub fn imported_local(
+    pub(crate) fn imported_local(
         &self,
         path: &Path,
         metadata: &std::fs::Metadata,
@@ -205,7 +205,7 @@ impl Cache {
     /// Atomically record package ownership by absolute source path and its stat link.
     /// The caller must store the blob and compute both digests first. Package rows
     /// survive original-file deletion; missing timestamps disable the stat shortcut.
-    pub fn record_import(
+    pub(crate) fn record_import(
         &self,
         path: &Path,
         metadata: &std::fs::Metadata,
@@ -236,7 +236,7 @@ impl Cache {
 
     /// Load explicitly imported metadata for resolution, without reading blob bytes.
     /// Remote downloads are excluded: their availability is still decided by feeds.
-    pub fn imported_packages(&self) -> Result<Vec<CachedPackage>> {
+    pub(crate) fn imported_packages(&self) -> Result<Vec<CachedPackage>> {
         let mut statement = self.db.prepare(
             "SELECT entry, sha256, md5 FROM packages WHERE source_kind='local-add-cache' ORDER BY name, version, source_ref",
         )?;
@@ -263,7 +263,12 @@ impl Cache {
     /// Names are case-insensitive; version text and lowercase MD5 match exactly.
     /// Sources may share identical content. Zero or ambiguous matches return None;
     /// the caller must still load and verify the returned blob and advertised MD5.
-    pub fn package_sha256(&self, name: &str, version: &str, md5: &str) -> Result<Option<String>> {
+    pub(crate) fn package_sha256(
+        &self,
+        name: &str,
+        version: &str,
+        md5: &str,
+    ) -> Result<Option<String>> {
         let mut statement = self.db.prepare(
             "SELECT DISTINCT sha256 FROM packages WHERE name=?1 COLLATE NOCASE AND version=?2 AND md5=?3 LIMIT 2",
         )?;
@@ -280,7 +285,7 @@ impl Cache {
     /// Record verified, already-stored bytes using the requested package URL as provenance.
     /// Upserts replace the current mapping for a name/version/URL; rows from other
     /// sources remain independent and can expose ambiguous legacy MD5 mappings.
-    pub fn record_download(
+    pub(crate) fn record_download(
         &self,
         entry: &LocalEntry,
         url: &str,
@@ -299,7 +304,7 @@ impl Cache {
     }
 
     /// Read HTTP validators and the feed body's digest by original source URL.
-    pub fn state(&self, source: &str) -> Result<Option<SourceState>> {
+    pub(crate) fn state(&self, source: &str) -> Result<Option<SourceState>> {
         let row = self
             .db
             .query_row(
@@ -319,7 +324,13 @@ impl Cache {
     }
 
     /// Replace feed metadata after its body is stored, retaining the original lookup URL.
-    pub fn record(&self, source: &str, kind: &str, base_url: &str, st: &SourceState) -> Result<()> {
+    pub(crate) fn record(
+        &self,
+        source: &str,
+        kind: &str,
+        base_url: &str,
+        st: &SourceState,
+    ) -> Result<()> {
         self.db.execute(
             "INSERT INTO sources (ref, kind, base_url, resolved_url, etag, last_modified, sha256, fetched_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
@@ -338,7 +349,7 @@ impl Cache {
     /// Existing blobs are verified and corruption repaired. New staging files are
     /// synced before rename; write failures propagate and staging is cleaned up.
     /// Callers must record database references only after this succeeds.
-    pub fn store(&self, bytes: &[u8]) -> Result<String> {
+    pub(crate) fn store(&self, bytes: &[u8]) -> Result<String> {
         let sha = sha256_hex(bytes);
         let dest = self.blob_path(&sha);
         if self.load(&sha)?.is_some() {
@@ -375,7 +386,7 @@ impl Cache {
     }
 
     /// The stored bytes for a digest, if they are there and still hash to it.
-    pub fn load(&self, sha: &str) -> Result<Option<Vec<u8>>> {
+    pub(crate) fn load(&self, sha: &str) -> Result<Option<Vec<u8>>> {
         if !valid_sha256(sha) {
             return Ok(None);
         }
@@ -415,7 +426,7 @@ fn file_modified(metadata: &std::fs::Metadata) -> Option<String> {
         .map(|duration| duration.as_nanos().to_string())
 }
 
-pub fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(bytes);
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()

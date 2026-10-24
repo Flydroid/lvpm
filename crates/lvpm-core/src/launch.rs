@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 /// makes the venv instance behave like the user's LabVIEW, VI Server access
 /// list included, and a malformed rewrite of that list disables VI Server
 /// outright.
-pub fn override_keys(text: &str, keys: &[(&str, &str)]) -> String {
+pub(crate) fn override_keys(text: &str, keys: &[(&str, &str)]) -> String {
     let mut seen = vec![false; keys.len()];
     let mut out = String::with_capacity(text.len() + 256);
     for line in text.lines() {
@@ -125,7 +125,7 @@ pub fn spawn(v: &Venv, ini: &Path, lvproj: Option<&Path>) -> Result<Child> {
 /// our stdout. An IDE that inherits that pipe holds it open for as long as it
 /// runs, and `lvpm launch | tail` never returns. So our std handles are made
 /// non-inheritable for the duration of the spawn, and restored afterwards.
-pub fn spawn_detached(cmd: &mut Command) -> std::io::Result<Child> {
+pub(crate) fn spawn_detached(cmd: &mut Command) -> std::io::Result<Child> {
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());

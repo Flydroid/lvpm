@@ -50,7 +50,7 @@ fn ini_token(target: &LvTarget, key: &str) -> Option<String> {
 ///
 /// Not a constant: LabVIEW 2025 defaults to 3363 and 2026 to 3364, and both can
 /// be installed side by side.
-pub fn vi_server_port(target: &LvTarget) -> u16 {
+pub(crate) fn vi_server_port(target: &LvTarget) -> u16 {
     ini_token(target, "server.tcp.port")
         .and_then(|v| v.parse().ok())
         .unwrap_or(3363)
@@ -278,7 +278,7 @@ impl LvValue {
     }
 
     /// Build an array of `shape.len()` dimensions from row-major `items`.
-    pub fn array_nd(shape: Vec<u32>, items: Vec<LvValue>) -> Result<LvValue> {
+    pub(crate) fn array_nd(shape: Vec<u32>, items: Vec<LvValue>) -> Result<LvValue> {
         ensure!(!shape.is_empty(), "an array needs at least one dimension");
         let want: u64 = shape.iter().map(|d| *d as u64).product();
         ensure!(
@@ -660,7 +660,7 @@ pub trait Method {
 /// hands the reference's lifetime to the VI: LabVIEW releases it the moment
 /// the VI stops, and any later use of the refnum fails with 1026 — so it must
 /// be false for the set → run → read-back pattern.
-pub struct RunVi {
+pub(crate) struct RunVi {
     pub wait_until_done: bool,
     pub auto_dispose_ref: bool,
 }
@@ -703,7 +703,7 @@ impl Method for RunVi {
 /// LabVIEW re-saves unconditionally when asked, and observed installs skip a
 /// large share of files on that basis — one package had none of its 385 files
 /// rewritten.
-pub struct SaveInstrument<'a> {
+pub(crate) struct SaveInstrument<'a> {
     pub path: &'a Path,
 }
 
@@ -735,7 +735,7 @@ impl Method for SaveInstrument<'_> {
 ///
 /// The value travels as a variant; LabVIEW answers error 91 if its inner type
 /// does not match the control's.
-pub struct CtrlValSet<'a> {
+pub(crate) struct CtrlValSet<'a> {
     pub control: &'a str,
     pub value: LvValue,
 }
@@ -796,7 +796,7 @@ fn reply_data(body: &[u8]) -> Result<&[u8]> {
 /// (a variant named after the method's output terminal). LabVIEW's own client
 /// omits that section when the output terminal is unwired — and then the
 /// reply is an empty echo, err=0 and no data.
-pub struct CtrlValGet<'a> {
+pub(crate) struct CtrlValGet<'a> {
     pub control: &'a str,
 }
 
@@ -856,7 +856,7 @@ const GET_ALL_RETURN_TYPES: [u8; 98] = [
 /// of each — TRUE returned exactly the four `… in`, FALSE exactly the four
 /// `… out`. Reading a whole panel therefore costs two calls; see
 /// [`Connection::ctrl_val_get_panel`].
-pub struct CtrlValGetAll {
+pub(crate) struct CtrlValGetAll {
     /// TRUE selects the controls, FALSE the indicators.
     pub controls: bool,
 }
@@ -1108,7 +1108,7 @@ impl<'a> Reader<'a> {
 /// code — error 1000 in particular, which says the reference has gone stale
 /// rather than that the operation was wrong.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ViError {
+pub(crate) struct ViError {
     pub code: i32,
 }
 
@@ -1132,7 +1132,7 @@ pub fn error_code(e: &anyhow::Error) -> Option<i32> {
 
 /// A message as it appears on the wire.
 #[derive(Debug)]
-pub struct Message {
+pub(crate) struct Message {
     pub err: i32,
     pub opcode: u32,
     pub uid: u32,
@@ -1152,7 +1152,7 @@ pub struct Connection {
 /// encoder serves both the wire protocol and any future offline path rewriting:
 /// `"PTH0" | u32 byte length | u32 component count | pascal components`, with an
 /// absolute Windows path contributing its drive letter as the first component.
-pub fn encode_pth0(path: &Path) -> Result<Vec<u8>> {
+pub(crate) fn encode_pth0(path: &Path) -> Result<Vec<u8>> {
     let s = path.to_string_lossy().replace('/', "\\");
     let mut parts: Vec<String> = Vec::new();
     for (i, comp) in s.split('\\').filter(|c| !c.is_empty()).enumerate() {
@@ -1335,7 +1335,7 @@ impl Connection {
     /// exactly why we call our own VIs: their panes are ours to define, so the
     /// bytes stay under our control instead of tracking someone else's.
     #[allow(dead_code)]
-    pub fn call(&mut self, vi: VIRef, args: &[u8]) -> Result<Vec<u8>> {
+    pub(crate) fn call(&mut self, vi: VIRef, args: &[u8]) -> Result<Vec<u8>> {
         let mut body = Vec::with_capacity(args.len() + 4);
         body.extend_from_slice(&vi.0.to_be_bytes());
         body.extend_from_slice(args);
@@ -1347,7 +1347,7 @@ impl Connection {
     ///
     /// Body layout, confirmed against LabVIEW's logged `viRef=`/`meth=` fields:
     /// `+0 refnum | +4 format tag (2) | +8 method id | +12 flattened arguments`.
-    pub fn invoke<M: Method>(&mut self, vi: VIRef, method: &M) -> Result<M::Output> {
+    pub(crate) fn invoke<M: Method>(&mut self, vi: VIRef, method: &M) -> Result<M::Output> {
         let args = method.encode_args()?;
         let mut body = Vec::with_capacity(12 + args.len());
         body.extend_from_slice(&vi.0.to_be_bytes());
@@ -1409,7 +1409,7 @@ impl Connection {
     /// Read one half of a front panel: the controls when `controls` is true,
     /// the indicators when it is false. See [`CtrlValGetAll`] — the method's
     /// name promises more than it delivers.
-    pub fn ctrl_val_get_all(
+    pub(crate) fn ctrl_val_get_all(
         &mut self,
         vi: VIRef,
         controls: bool,

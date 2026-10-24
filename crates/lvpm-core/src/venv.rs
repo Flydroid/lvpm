@@ -74,7 +74,7 @@ impl Venv {
     }
 
     /// The ini a LabVIEW on this venv is started with.
-    pub fn ini_path(&self) -> PathBuf {
+    pub(crate) fn ini_path(&self) -> PathBuf {
         self.dir.join(".lvpm").join("labview.ini")
     }
 
@@ -120,7 +120,7 @@ fn probe_in(cwd: &Path, venv_dir: &Path) -> Found {
 /// rather than a fall-through to the installation — installing globally when
 /// the user believes they are installing into a project is the one outcome
 /// that must never happen quietly.
-pub fn locate(cwd: &Path) -> Result<Option<PathBuf>> {
+pub(crate) fn locate(cwd: &Path) -> Result<Option<PathBuf>> {
     match probe(cwd)? {
         Found::Venv(dir) => Ok(Some(dir)),
         Found::ManifestOnly(dir) => bail!(
@@ -146,7 +146,7 @@ pub fn find(project: Option<&Path>, cwd: &Path) -> Result<Option<Venv>> {
 }
 
 /// Read a venv's binding and find the LabVIEW it names on this machine.
-pub fn load(repo: &Path) -> Result<Venv> {
+pub(crate) fn load(repo: &Path) -> Result<Venv> {
     let repo = std::path::absolute(repo)?;
     let dir = repo.join(config::load()?.venv_dir);
     let bp = binding_path(&dir);
@@ -302,7 +302,7 @@ pub fn remove(v: &Venv, yes: bool) -> Result<()> {
 /// A VI Server port of the venv's own, stable across runs so that a launched
 /// instance and a later `lvpm install` agree on where to meet: a hash of the
 /// venv's path into 3400–3999, clear of the 33xx LabVIEW's own defaults use.
-pub fn port_for(dir: &Path) -> u16 {
+pub(crate) fn port_for(dir: &Path) -> u16 {
     let key = dir.to_string_lossy().to_lowercase().replace('\\', "/");
     // FNV-1a, 64-bit — small, dependency-free, and good enough to spread a
     // handful of repo paths across six hundred ports.

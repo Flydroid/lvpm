@@ -5,7 +5,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-pub const DEFAULT_VENV_DIR: &str = ".lv-venv";
+pub(crate) const DEFAULT_VENV_DIR: &str = ".lv-venv";
 
 #[derive(Debug, PartialEq)]
 pub struct Config {

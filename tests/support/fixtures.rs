@@ -22,7 +22,7 @@ pub const GLOBAL_PAYLOAD_DIR: &str = "vi.lib/_lvpm_test_fixture";
 /// never collides with the copy lvpm runs.
 const REAL_VI: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/src/lv-src/relink-package.vi"
+    "/crates/lvpm-core/src/lv-src/relink-package.vi"
 ));
 /// A real PostInstall hook: reads the `Package Name` attribute of its `Variant`
 /// control and writes it to `lvpm-test-hook-marker.txt` in LabVIEW's temp dir.
