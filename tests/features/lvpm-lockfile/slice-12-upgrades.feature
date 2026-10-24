@@ -30,41 +30,49 @@ Feature: Only an explicit upgrade moves locked versions
     When I run "lvpm lock --upgrade-package beta --upgrade-package alpha"
     Then "beta" is 2.0 and "alpha" is 2.0, and "gamma" is unchanged
 
+  @pending-12-2
   Scenario: a version the constraint admits leaves the manifest alone
     When I run "lvpm lock --upgrade-package beta@1.5"
     Then "beta" is 1.5 in lvpm.lock
     And lvpm.toml is byte-identical to before
 
+  @pending-12-2
   Scenario: a version the floor excludes rewrites the floor and says so
     When I run "lvpm lock --upgrade-package beta@0.9"
     Then lvpm.toml says "beta" = ">=0.9" and nothing else in it changed
     And the output says lvpm.toml was updated: beta ">=1.0" -> ">=0.9"
     And "beta" is 0.9 in lvpm.lock
 
+  @pending-12-2
   Scenario: a version an exact pin excludes rewrites the pin
     When I run "lvpm lock --upgrade-package gamma@2.0"
     Then lvpm.toml says "gamma" = "2.0"
 
+  @pending-12-2
   Scenario: a "*" constraint is never rewritten
     Given lvpm.toml says "beta" = "*"
     When I run "lvpm lock --upgrade-package beta@0.9"
     Then lvpm.toml still says "beta" = "*" and "beta" is 0.9 in lvpm.lock
 
+  @pending-12-2
   Scenario: a transitive package is never added to the manifest
     When I run "lvpm lock --upgrade-package alpha@2.0"
     Then "alpha" is 2.0 in lvpm.lock
     And lvpm.toml has no "alpha" entry
 
+  @pending-12-2
   Scenario: a version that does not exist fails and changes nothing
     When I run "lvpm lock --upgrade-package beta@9.9"
     Then the command fails saying no "beta" 9.9 is in any source
     And lvpm.toml and lvpm.lock are byte-identical to before
 
+  @pending-12-2
   Scenario: a name that is not locked fails and changes nothing
     When I run "lvpm lock --upgrade-package zeta"
     Then the command fails saying "zeta" is not in lvpm.lock
     And lvpm.toml and lvpm.lock are byte-identical to before
 
+  @pending-12-2
   Scenario Outline: an upgrade to an ineligible version fails and changes nothing
     Given <situation>
     When I run "lvpm lock --upgrade-package beta@2.0"

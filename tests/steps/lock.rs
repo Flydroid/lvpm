@@ -574,11 +574,13 @@ async fn the_output_says_the_lock_was_written(world: &mut CliWorld) {
 
 #[then(regex = r#"^the output lists "([^"]+)" and "([^"]+)"$"#)]
 async fn the_output_lists(world: &mut CliWorld, first: String, second: String) {
+    // A change line leads with its sign (`+ alpha 2.0`, `~ alpha 1.0 -> 2.0`);
+    // a scenario may name the change with or without it.
     let lines: Vec<&str> = world.output().stdout.lines().map(str::trim).collect();
     for expected in [first, second] {
         assert!(
-            lines.contains(&expected.as_str()),
-            "{expected:?} is not a line of:\n{}",
+            lines.iter().any(|line| line.ends_with(&expected)),
+            "{expected:?} is not the end of a line of:\n{}",
             world.output().stdout
         );
     }

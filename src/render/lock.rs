@@ -42,6 +42,10 @@ pub(super) fn render(r: &mut Renderer, event: &Event) {
         Event::LockUpToDate { path } => {
             r.line(Stream::Out, &format!("{} is up to date", path.display()))
         }
+        Event::LockNothingNewer { path } => r.line(
+            Stream::Out,
+            &format!("no changes, nothing newer; {} is as it was", path.display()),
+        ),
         Event::LockWouldChange { changes } => {
             r.line(Stream::Out, "lvpm.lock would be updated:");
             for change in changes {
@@ -275,6 +279,19 @@ mod tests {
             path: PathBuf::from("lvpm.lock"),
         });
         assert_eq!(out.text(), "lvpm.lock is up to date\n");
+        assert_eq!(err.text(), "");
+    }
+
+    #[test]
+    fn an_upgrade_with_nothing_newer_says_so_on_stdout() {
+        let (mut renderer, out, err) = renderer();
+        renderer.render(&Event::LockNothingNewer {
+            path: PathBuf::from("lvpm.lock"),
+        });
+        assert_eq!(
+            out.text(),
+            "no changes, nothing newer; lvpm.lock is as it was\n"
+        );
         assert_eq!(err.text(), "");
     }
 

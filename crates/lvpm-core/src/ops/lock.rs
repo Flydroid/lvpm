@@ -40,15 +40,87 @@ pub fn lock(env: &OpEnv) -> Result<Lockfile, LockError> {
     }
 
     let (lock, changes) = relock(env, &found, previous.as_ref())?;
-    write_atomically(&lock_path, &lock.to_toml()?)?;
+    write_lock(env, &lock_path, &lock, changes)?;
+    Ok(lock)
+}
+
+/// What an upgrade lets move off the versions the lock holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Upgrade {
+    /// Every package, to the newest version the constraints allow.
+    Everything,
+    /// Only these packages, by name, and whatever they force along.
+    Packages(Vec<String>),
+}
+
+/// Re-lock, letting the packages `which` names move to the newest versions the
+/// constraints allow; every other package stays where the lock has it unless
+/// the new set cannot hold it there. A lock with nothing newer to move to is
+/// left as it is.
+pub fn upgrade(env: &OpEnv, which: &Upgrade) -> Result<Lockfile, LockError> {
+    let found = find_manifest(env)?;
+    let lock_path = found.0.with_file_name(lockfile::FILE_NAME);
+    let previous = Lockfile::read(&lock_path).ok();
+    let moving = match which {
+        Upgrade::Everything => Moving::Everything,
+        Upgrade::Packages(names) => Moving::Only(names),
+    };
+    let (lock, changes) = relock_moving(env, &found, previous.as_ref(), &moving)?;
+    if previous.as_ref() == Some(&lock) {
+        env.sink.emit(Event::LockNothingNewer { path: lock_path });
+        return Ok(lock);
+    }
+    write_lock(env, &lock_path, &lock, changes)?;
+    Ok(lock)
+}
+
+/// `lock` on disk, then what changed and that it was written.
+fn write_lock(
+    env: &OpEnv,
+    lock_path: &Path,
+    lock: &Lockfile,
+    changes: Vec<LockChange>,
+) -> Result<(), LockError> {
+    write_atomically(lock_path, &lock.to_toml()?)?;
     if !changes.is_empty() {
         env.sink.emit(Event::LockChanged { changes });
     }
     env.sink.emit(Event::LockWritten {
-        path: lock_path,
+        path: lock_path.to_path_buf(),
         packages: lock.packages.len(),
     });
-    Ok(lock)
+    Ok(())
+}
+
+/// Which locked versions a new resolution may leave.
+enum Moving<'a> {
+    /// None: every one that still fits is kept.
+    Nothing,
+    /// Only the packages with these names (any case).
+    Only(&'a [String]),
+    /// All of them.
+    Everything,
+}
+
+impl Moving<'_> {
+    fn moves(&self, name: &str) -> bool {
+        match self {
+            Moving::Nothing => false,
+            Moving::Only(names) => names.iter().any(|moving| moving.eq_ignore_ascii_case(name)),
+            Moving::Everything => true,
+        }
+    }
+}
+
+/// The versions the solver prefers: the ones `previous` holds, except those
+/// of the packages `moving` lets move.
+fn preferences(previous: Option<&Lockfile>, moving: &Moving) -> Vec<(String, Version)> {
+    previous
+        .iter()
+        .flat_map(|lock| &lock.packages)
+        .filter(|package| !moving.moves(&package.name))
+        .map(|package| (package.name.clone(), Version::parse(&package.version)))
+        .collect()
 }
 
 /// The lock the manifest resolves to now, and how it differs from `previous`,
@@ -59,11 +131,20 @@ pub(super) fn relock(
     found: &(PathBuf, Project),
     previous: Option<&Lockfile>,
 ) -> Result<(Lockfile, Vec<LockChange>), LockError> {
+    relock_moving(env, found, previous, &Moving::Nothing)
+}
+
+fn relock_moving(
+    env: &OpEnv,
+    found: &(PathBuf, Project),
+    previous: Option<&Lockfile>,
+    moving: &Moving,
+) -> Result<(Lockfile, Vec<LockChange>), LockError> {
     let project = &found.1;
     let labview = project.labview.as_deref().ok_or(LockError::NoLabview)?;
     let gate = lv_gate(labview)?;
     let index = env.load_index(Some(found))?;
-    let resolution = resolve(env, project, &index, previous, gate)?;
+    let resolution = resolve(env, project, &index, &preferences(previous, moving), gate)?;
     let hashes = hash_archives(env, &resolution)?;
     let feeds = index::feeds(&project.resolved_sources()?, project.default_sources);
     let lock = build(project, labview, &resolution, &hashes, &feeds);
@@ -127,12 +208,12 @@ fn lv_gate(labview: &str) -> Result<f64, LockError> {
 }
 
 /// The solver's answer for the manifest's direct and dev dependencies,
-/// keeping the versions an earlier lock chose where they still fit.
+/// keeping the versions in `preferences` where they still fit.
 fn resolve(
     env: &OpEnv,
     project: &Project,
     index: &Index,
-    previous: Option<&Lockfile>,
+    preferences: &[(String, Version)],
     gate: f64,
 ) -> Result<Resolution, LockError> {
     let constraints: Vec<_> = project
@@ -141,17 +222,11 @@ fn resolve(
         .chain(&project.dev_dependencies)
         .cloned()
         .collect();
-    let preferences: Vec<(String, Version)> = previous
-        .iter()
-        .flat_map(|lock| &lock.packages)
-        .map(|package| (package.name.clone(), Version::parse(&package.version)))
-        .collect();
-    solve::solve(&constraints, index, &preferences, Some(gate), &env.cancel).map_err(
-        |why| match why {
-            SolveError::Conflict(conflict) => LockError::Conflict(conflict),
-            SolveError::Cancelled => LockError::Cancelled,
-        },
-    )
+    solve::solve(&constraints, index, preferences, Some(gate), &env.cancel).map_err(|why| match why
+    {
+        SolveError::Conflict(conflict) => LockError::Conflict(conflict),
+        SolveError::Cancelled => LockError::Cancelled,
+    })
 }
 
 /// The SHA-256 of every chosen archive, by lowercased name. Each archive
@@ -834,6 +909,76 @@ mod tests {
             std::fs::read_to_string(project.lock_path()).unwrap(),
             older.replace("version = 0\n", "version = 1\n")
         );
+    }
+
+    // ---- upgrade ----
+
+    #[test]
+    fn an_upgrade_prefers_every_locked_version_except_those_it_lets_move() {
+        let previous = lock_of(&[("alpha", "1.0"), ("Beta", "1.0"), ("gamma", "1.0")]);
+        let preferred = |moving: &Moving| -> Vec<(String, String)> {
+            preferences(Some(&previous), moving)
+                .into_iter()
+                .map(|(name, version)| (name, version.raw))
+                .collect()
+        };
+        let pair = |name: &str| (name.to_string(), "1.0".to_string());
+        assert_eq!(
+            preferred(&Moving::Nothing),
+            [pair("alpha"), pair("Beta"), pair("gamma")]
+        );
+        let beta = ["beta".to_string()];
+        assert_eq!(
+            preferred(&Moving::Only(&beta)),
+            [pair("alpha"), pair("gamma")],
+            "a name matches in any case"
+        );
+        assert_eq!(preferred(&Moving::Everything), []);
+        assert_eq!(preferences(None, &Moving::Nothing), []);
+    }
+
+    #[test]
+    fn an_upgrade_moves_to_the_newest_version_and_then_finds_nothing_newer() {
+        let project = ProjectDir::new("upgrade", MANIFEST, &[("gamma", "1.0", "23.0", "")]);
+        lock(&project.env(&Recorder::default())).unwrap();
+        write_vip(
+            &project.root.join("packages/gamma-1.5.vip"),
+            ("gamma", "1.5", "23.0", ""),
+        );
+
+        // A plain lock keeps what it holds; an upgrade moves.
+        let sink = Recorder::default();
+        let kept = lock(&project.env(&sink)).unwrap();
+        assert_eq!(kept.packages[0].version, "1.0");
+        let sink = Recorder::default();
+        let moved = upgrade(&project.env(&sink), &Upgrade::Everything).unwrap();
+        assert_eq!(moved.packages[0].version, "1.5");
+        assert!(
+            sink.events().iter().any(|event| matches!(event,
+                Event::LockChanged { changes } if *changes == [LockChange::Changed {
+                    name: "gamma".into(), from: "1.0".into(), to: "1.5".into() }])),
+            "{:?}",
+            sink.events()
+        );
+        let written = std::fs::read(project.lock_path()).unwrap();
+        assert_eq!(written, moved.to_toml().unwrap().into_bytes());
+
+        let sink = Recorder::default();
+        let again = upgrade(
+            &project.env(&sink),
+            &Upgrade::Packages(vec!["Gamma".into()]),
+        )
+        .unwrap();
+        assert_eq!(again, moved);
+        assert!(
+            matches!(&sink.events()[..], [
+                Event::LockHashing { .. },
+                Event::LockNothingNewer { path },
+            ] if *path == project.lock_path()),
+            "{:?}",
+            sink.events()
+        );
+        assert_eq!(std::fs::read(project.lock_path()).unwrap(), written);
     }
 
     // ---- check ----

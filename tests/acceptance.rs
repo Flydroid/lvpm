@@ -39,6 +39,7 @@ const FEATURE_FILES: &[&str] = &[
     "tests/features/lvpm-lockfile/slice-9-staleness-and-lvpm-lock-check.feature",
     "tests/features/lvpm-lockfile/slice-10-exact-sync.feature",
     "tests/features/lvpm-lockfile/slice-11-headless-implies-locked.feature",
+    "tests/features/lvpm-lockfile/slice-12-upgrades.feature",
 ];
 const LABVIEW_TAG: &str = "labview";
 /// A scenario that needs a later slice, tagged `@pending-<slice>`. It is not

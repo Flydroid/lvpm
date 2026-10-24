@@ -249,6 +249,9 @@ pub enum Event {
     LockWritten { path: PathBuf, packages: usize },
     /// The lock on disk still represents the manifest, so it was left alone.
     LockUpToDate { path: PathBuf },
+    /// An upgrade found nothing newer than the lock holds, so it was left
+    /// alone.
+    LockNothingNewer { path: PathBuf },
     /// A dry run: the lock the manifest resolves to now differs from the one
     /// on disk by `changes`, and nothing was written.
     LockWouldChange { changes: Vec<LockChange> },

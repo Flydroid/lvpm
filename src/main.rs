@@ -5,6 +5,7 @@
 #![allow(clippy::disallowed_methods)]
 
 use lvpm_core::ops::install::InstallOptions;
+use lvpm_core::ops::lock::Upgrade;
 use lvpm_core::ops::relink::RelinkOptions;
 use lvpm_core::ops::route::{self, InstallMode, InstallRequest};
 use lvpm_core::ops::sync::{LockFlags, SyncOptions, strictness};
@@ -321,6 +322,14 @@ enum Cmd {
         /// otherwise exit non-zero and say why on one line. Reads no source.
         #[arg(long)]
         check: bool,
+        /// Move every package to the newest version the constraints allow.
+        #[arg(long, conflicts_with_all = ["check", "upgrade_package"])]
+        upgrade: bool,
+        /// Move this package to the newest version the constraints allow, and
+        /// leave the rest where lvpm.lock has them unless they cannot stay.
+        /// Repeat it for more than one package.
+        #[arg(long, value_name = "PACKAGE", conflicts_with = "check")]
+        upgrade_package: Vec<String>,
     },
     /// Show what lvpm has installed into the selected target.
     List,
@@ -469,9 +478,17 @@ fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Launch { lvproj } => cmd_launch(&env, lvproj.as_deref()),
-        Cmd::Lock { check } => match check {
-            true => ops::lock::check(&env),
-            false => ops::lock::lock(&env).map(drop),
+        Cmd::Lock {
+            check,
+            upgrade,
+            upgrade_package,
+        } => match (check, upgrade, upgrade_package.as_slice()) {
+            (true, ..) => ops::lock::check(&env),
+            (_, true, _) => ops::lock::upgrade(&env, &Upgrade::Everything).map(drop),
+            (_, _, []) => ops::lock::lock(&env).map(drop),
+            (_, _, packages) => {
+                ops::lock::upgrade(&env, &Upgrade::Packages(packages.to_vec())).map(drop)
+            }
         }
         .map_err(|why| anyhow!(render::lock::error(&why))),
         Cmd::List => {
@@ -1127,4 +1144,33 @@ fn cmd_vi_run(
     conn.release(vi_ref)?;
     conn.close();
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lock_args(args: &[&str]) -> Result<Cli, clap::Error> {
+        Cli::try_parse_from(["lvpm", "lock"].into_iter().chain(args.iter().copied()))
+    }
+
+    #[test]
+    fn a_check_writes_nothing_so_it_cannot_upgrade_and_an_upgrade_is_all_or_some() {
+        for args in [
+            &["--check", "--upgrade"][..],
+            &["--check", "--upgrade-package", "beta"],
+            &["--upgrade", "--upgrade-package", "beta"],
+        ] {
+            assert!(lock_args(args).is_err(), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn upgrade_package_repeats() {
+        let cli = lock_args(&["--upgrade-package", "beta", "--upgrade-package", "alpha"]).unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Lock { upgrade_package, .. } if upgrade_package == ["beta", "alpha"]
+        ));
+    }
 }
