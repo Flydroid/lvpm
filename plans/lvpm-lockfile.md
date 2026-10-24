@@ -1973,8 +1973,9 @@ and version.
   - Commits 861b1ab, 2a60743, c160070. Harness guard `real_installation_risk` refuses any sync/install/uninstall that resolves to a real LabVIEW installation (only the Slice 1 fixture is exempt). OPEN FOR USER: 3 scenarios tagged `@unsafe` never run (hook failing mid-sync, `--global` exact sync, headless exact sync): they need a disposable LabVIEW, and the hook one needs a decision because a venv runs no hooks. OPEN: after a sync fails part-way, packages that already landed are not relinked or hooked, and a re-run skips them as installed. Small: the cucumber runner runs on a 64 MiB thread (debug-build stack overflow, cause unknown); `lvpm lock` still fails with a dead hosted feed even when archives are cached.
 
 #### Wave 9
-- [ ] Slice 11: Headless implies `--locked`
-  - [ ] Step 11.1: Strictness as a pure function, the note, `--no-locked`
+- [x] Slice 11: Headless implies `--locked`
+  - [x] Step 11.1: Strictness as a pure function, the note, `--no-locked`
+  - Commit 41f9b75. `ops::sync::strictness(headless, LockFlags) -> Strictness { policy, implied_by_headless }` (precedence: `--frozen`, `--locked`, `--no-locked`, then headless); `SyncOptions.headless_implied` makes `sync` emit `Event::HeadlessImpliesLocked` before anything else, and the CLI words the failure with `render::sync::headless_error` only when headless alone implied it. The note goes to stderr, like the other headless notes. The CLI's headless notes now share `src/render/headless.rs` (byte-identical). The sandbox runs children headless on request (`Sandbox::set_headless`), and `real_installation_risk` takes `headless` so it settles a headless child's destination as lvpm does. The `add`/`remove` rows are `@pending-13` (the harness skips any `@pending-*` scenario and counts it): Slice 13 removes the tag.
 
 #### Wave 10
 - [ ] Slice 12: Upgrades
