@@ -1960,10 +1960,11 @@ and version.
 
   - Commits 0cd2541, 76e20c7, 6ffbc2d. `errors` module added; `Downloads` split out of `InstallSession` (`ops/session.rs`) so `lock` fetches through the cache without a destination. `source` is the feed index URL or `local`. `labview` must be a year (`LockError::LabviewNotAYear`). A package in both dependency tables satisfies both lines and is not dev (6ffbc2d). For Slice 9: `Lockfile::read`, `Inputs::of`, `constraint_text` are pub. For Slice 10: `Downloads` is `pub(super)`.
 #### Wave 7
-- [ ] Slice 9: Staleness and `lvpm lock --check`
-  - [ ] Step 9.1: Staleness rules as named predicates
-  - [ ] Step 9.2: `lvpm lock --check`
+- [x] Slice 9: Staleness and `lvpm lock --check`
+  - [x] Step 9.1: Staleness rules as named predicates
+  - [x] Step 9.2: `lvpm lock --check`
 
+  - Commits a20f876, 8c11dba. `Lockfile::staleness` returns a typed `StaleReason`; `lock` on a current lock is a no-op (`LockUpToDate`); `check` reads only the manifest and lock. Sources compare as a set. For Slice 10/11: reuse `render::lock::stale_reason`. For Slice 12: add `conflicts_with("check")` to `--upgrade`/`--upgrade-package`.
 #### Wave 8
 - [ ] Slice 10: Exact sync
   - [ ] Step 10.1: `plan_sync` as data
