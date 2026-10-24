@@ -1990,8 +1990,9 @@ and version.
   - Commits bcc36cc, ef5c5fe, 65ff987. Harness guard now also covers `add` and `remove`. DECIDED WHILE USER AWAY: the Slice 1 recordings `venv-install-beta` and `venv-install-vi-fixture` ran bare `lvpm install <pkg>` in a venv project, which AC-M7 now routes to `add`; only those two rows were re-recorded (65ff987), logged in config-changelog. The `a venv with X installed` setup step now passes `--labview-version 2026` to stay additive. One more `@unsafe` scenario (install with a name and `--global` stays additive), covered by @core routing tests. Small open: a conflict from `add` shows the new entry as an `lvpm.toml:` line although nothing is written yet.
 
 #### Wave 12
-- [ ] Slice 14: Remaining operations move to core
-  - [ ] Step 14.1: Move relink, run-hooks, refresh, start, venv and launch commands
+- [x] Slice 14: Remaining operations move to core
+  - [x] Step 14.1: Move relink, run-hooks, refresh, start, venv and launch commands
+  - Commits a5274e4. New core ops: `start`, `venv_cmd` (create/status/existing/remove), `launch_cmd`, `relink`, `hooks::run_hooks`, `refresh`. `cmd_relink` and `finish` share `ops::relink::relink_in_destination`. `venv::create` takes injected venv dir and targets. Core has no terminal I/O (grep clean; clippy scenario). Unrecorded output change: `run-hooks` lines go through the stateful renderer (same open-line rule as Slice 7). Still open debt: text-valued error events; `relink --keep-open` and venv-relink paths have no recording.
 
 #### Wave 13
 - [ ] Slice 15: Cancellation before files are written
