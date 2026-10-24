@@ -1966,10 +1966,11 @@ and version.
   - Commits a20f876, 8c11dba. `Lockfile::staleness` returns a typed `StaleReason`; `lock` on a current lock is a no-op (`LockUpToDate`); `check` reads only the manifest and lock. Sources compare as a set. For Slice 10/11: reuse `render::lock::stale_reason`. For Slice 12: add `conflicts_with("check")` to `--upgrade`/`--upgrade-package`.
 
 #### Wave 8
-- [ ] Slice 10: Exact sync
-  - [ ] Step 10.1: `plan_sync` as data
-  - [ ] Step 10.2: Fetch by SHA-256, all before the first change
-  - [ ] Step 10.3: `apply_sync`, `lvpm sync`, routing for bare install
+- [x] Slice 10: Exact sync
+  - [x] Step 10.1: `plan_sync` as data
+  - [x] Step 10.2: Fetch by SHA-256, all before the first change
+  - [x] Step 10.3: `apply_sync`, `lvpm sync`, routing for bare install
+  - Commits 861b1ab, 2a60743, c160070. Harness guard `real_installation_risk` refuses any sync/install/uninstall that resolves to a real LabVIEW installation (only the Slice 1 fixture is exempt). OPEN FOR USER: 3 scenarios tagged `@unsafe` never run (hook failing mid-sync, `--global` exact sync, headless exact sync): they need a disposable LabVIEW, and the hook one needs a decision because a venv runs no hooks. OPEN: after a sync fails part-way, packages that already landed are not relinked or hooked, and a re-run skips them as installed. Small: the cucumber runner runs on a 64 MiB thread (debug-build stack overflow, cause unknown); `lvpm lock` still fails with a dead hosted feed even when archives are cached.
 
 #### Wave 9
 - [ ] Slice 11: Headless implies `--locked`
