@@ -1,5 +1,9 @@
 //! lvpm — an open-source package manager for LabVIEW packages.
 
+// The CLI is where terminal I/O belongs; the workspace-wide `clippy.toml` bars
+// it from `lvpm-core` only.
+#![allow(clippy::disallowed_methods)]
+
 use lvpm_core::{
     cache, config, fetch, index, install, launch, project, refresh, relink, spec, target, venv,
     version, viserver,

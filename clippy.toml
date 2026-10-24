@@ -1,0 +1,8 @@
+# The core library has no terminal I/O (AC-K2). The lint that enforces this is
+# switched on for `lvpm-core` in Slice 3; until then `lvpm-core` and the CLI
+# allow it.
+disallowed-methods = [
+    { path = "std::io::stdin", reason = "lvpm-core takes no input of its own: the front end reads it" },
+    { path = "std::io::stdout", reason = "lvpm-core does not print: it emits events" },
+    { path = "std::io::stderr", reason = "lvpm-core does not print: it emits events" },
+]
