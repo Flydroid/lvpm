@@ -36,6 +36,7 @@ fn golden_dir() -> PathBuf {
 struct LvpmWorld {
     sandbox: Sandbox,
     last_output: Option<Output>,
+    first_output: Option<Output>,
     comparison: Option<Result<(), String>>,
 }
 
@@ -44,6 +45,7 @@ impl LvpmWorld {
         LvpmWorld {
             sandbox: Sandbox::new(),
             last_output: None,
+            first_output: None,
             comparison: None,
         }
     }
@@ -51,6 +53,15 @@ impl LvpmWorld {
     /// Run a recorded command line such as `lvpm search a` and keep its
     /// normalised output.
     fn run(&mut self, command_line: &str) {
+        self.run_with(command_line, None);
+    }
+
+    /// Run a command line that asks a question, with `answer` on its stdin.
+    fn run_answering(&mut self, command_line: &str, answer: &str) {
+        self.run_with(command_line, Some(answer));
+    }
+
+    fn run_with(&mut self, command_line: &str, answer: Option<&str>) {
         let mut words = command_line.split_whitespace();
         assert_eq!(
             words.next(),
@@ -58,7 +69,10 @@ impl LvpmWorld {
             "a recorded command starts with `{PROGRAM}`: {command_line}"
         );
         let args: Vec<&str> = words.collect();
-        let output = self.sandbox.run_lvpm(&args);
+        let output = match answer {
+            Some(text) => self.sandbox.run_lvpm_answering(&args, text),
+            None => self.sandbox.run_lvpm(&args),
+        };
         self.last_output = Some(self.sandbox.normalised(&output));
     }
 }
@@ -85,6 +99,57 @@ async fn loopback_project(world: &mut LvpmWorld) {
     world.sandbox.use_loopback_project();
 }
 
+#[given("no project")]
+async fn no_project(world: &mut LvpmWorld) {
+    assert!(!world.sandbox.work_dir().join("lvpm.toml").exists());
+}
+
+#[given("beta installed in dest")]
+async fn beta_installed_in_loopback_project(world: &mut LvpmWorld) {
+    world.sandbox.use_loopback_project();
+    world
+        .sandbox
+        .setup_lvpm(&["install", "beta", "--prefix", "dest"]);
+}
+
+#[given("an empty dest")]
+async fn empty_dest(world: &mut LvpmWorld) {
+    world.sandbox.make_empty_dest();
+}
+
+#[given("venv.dir set to .venv")]
+async fn venv_dir_set(world: &mut LvpmWorld) {
+    world
+        .sandbox
+        .setup_lvpm(&["config", "set", "venv.dir", ".venv"]);
+}
+
+#[given("a folder with alpha 1.0")]
+async fn folder_with_alpha(world: &mut LvpmWorld) {
+    world.sandbox.make_folder_with_alpha(PACKAGES);
+}
+
+/// One throwaway search leaves both public feeds in the cache, as seeding
+/// would: the recorded command then needs no network.
+#[given("no project, seeded default feeds")]
+async fn seeded_default_feeds(world: &mut LvpmWorld) {
+    world.sandbox.setup_lvpm(&["search", "a"]);
+}
+
+#[given("no project, beta installed in dest")]
+async fn beta_installed_without_a_project(world: &mut LvpmWorld) {
+    world
+        .sandbox
+        .setup_lvpm(&["install", "beta", "--prefix", "dest"]);
+}
+
+#[given("a project using only the loopback feed and an empty cache")]
+async fn loopback_project_with_empty_cache(world: &mut LvpmWorld) {
+    let cached = std::fs::read_dir(world.sandbox.cache_dir()).expect("the cache directory exists");
+    assert_eq!(cached.count(), 0, "the cache must start empty");
+    world.sandbox.use_loopback_project();
+}
+
 #[when(expr = "I run {string}")]
 async fn run_command(world: &mut LvpmWorld, command_line: String) {
     world.run(&command_line);
@@ -96,6 +161,75 @@ async fn equals_recording(world: &mut LvpmWorld, name: String) {
     if let Err(why) = Golden::new(golden_dir(), Mode::from_env()).check(&name, output) {
         panic!("{why}");
     }
+}
+
+#[when(expr = "I run {string} twice, the second time with --refresh")]
+async fn run_twice(world: &mut LvpmWorld, command_line: String) {
+    world.run(&command_line);
+    world.first_output = world.last_output.take();
+    world.run(&format!("{command_line} --refresh"));
+}
+
+#[then(expr = "both outputs equal the recordings {string} and {string}")]
+async fn both_equal_recordings(world: &mut LvpmWorld, first: String, second: String) {
+    let first_output = world.first_output.as_ref().expect("the command ran twice");
+    let second_output = world.last_output.as_ref().expect("the command ran twice");
+    let golden = Golden::new(golden_dir(), Mode::from_env());
+    for (name, output) in [(&first, first_output), (&second, second_output)] {
+        if let Err(why) = golden.check(name, output) {
+            panic!("{why}");
+        }
+    }
+}
+
+#[given("a project requiring LabVIEW 2026")]
+async fn labview_project(world: &mut LvpmWorld) {
+    world.sandbox.use_loopback_project_for_labview("2026");
+}
+
+/// The venv lives in the world, bound to the host's LabVIEW 2026 by
+/// `venv create`, which starts no LabVIEW.
+#[given("a venv for LabVIEW 2026")]
+async fn venv_for_labview(world: &mut LvpmWorld) {
+    world.sandbox.use_loopback_project_for_labview("2026");
+    world
+        .sandbox
+        .setup_lvpm(&["venv", "create", "--labview-version", "2026"]);
+}
+
+#[given("a project with a venv")]
+async fn project_with_venv(world: &mut LvpmWorld) {
+    venv_for_labview(world).await;
+}
+
+/// `--no-relink`: the setup copies files only and never starts a LabVIEW.
+#[given("a venv with beta installed")]
+async fn venv_with_beta(world: &mut LvpmWorld) {
+    venv_for_labview(world).await;
+    world
+        .sandbox
+        .setup_lvpm(&["install", "beta", "--no-relink"]);
+}
+
+#[given("a venv with hooked installed")]
+async fn venv_with_hooked(world: &mut LvpmWorld) {
+    venv_for_labview(world).await;
+    world
+        .sandbox
+        .setup_lvpm(&["install", "hooked", "--no-relink"]);
+}
+
+#[when(expr = "I run {string} and answer {string}")]
+async fn run_and_answer(world: &mut LvpmWorld, command_line: String, answer: String) {
+    world.run_answering(&command_line, &format!("{answer}\n"));
+}
+
+#[when("I close any LabVIEW the command started on the venv")]
+async fn close_venv_labview(world: &mut LvpmWorld) {
+    assert!(
+        world.sandbox.close_venv_labview(),
+        "a LabVIEW is still listening on the venv's VI Server port"
+    );
 }
 
 #[given(expr = "the recording {string} with one byte altered")]

@@ -1,0 +1,1 @@
+  checking feed http://<FEED>/feed/index.vipr ... unchanged (<DUR>)

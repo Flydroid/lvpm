@@ -1,0 +1,5 @@
+venv: <WORLD>\work\.lv-venv  [LabVIEW 2026 (64-bit)  v26.3]
+target: LabVIEW 2026 (64-bit)  v26.3  (<LABVIEW>)
+loading indexes...
+  downloading feed http://<FEED>/feed/index.vipr (first run) ... 0.0 MB in <DUR>
+  4 package versions known

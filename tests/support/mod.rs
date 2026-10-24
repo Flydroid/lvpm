@@ -6,4 +6,5 @@ pub mod feed;
 pub mod fixtures;
 pub mod golden;
 pub mod normalise;
+pub mod venv;
 pub mod world;

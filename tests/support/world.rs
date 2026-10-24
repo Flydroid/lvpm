@@ -9,9 +9,12 @@ use super::feed::Feed;
 use super::fixtures::FixturePackage;
 use super::golden::Output;
 use super::normalise::{Anchors, normalise};
-use std::io::Read;
+use super::venv::{self, VenvBinding};
+use std::io::{Read, Write};
+use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
@@ -32,6 +35,9 @@ const CONFIG_VARIABLE_PREFIX: &str = "LVPM_CONFIG_";
 pub struct Sandbox {
     dir: TempDir,
     feed: Option<Feed>,
+    /// The venv `lvpm` last reported having made here; kept because the
+    /// binding file is gone once `venv remove` has run.
+    venv: Mutex<Option<VenvBinding>>,
 }
 
 impl Sandbox {
@@ -39,6 +45,7 @@ impl Sandbox {
         let sandbox = Sandbox {
             dir: tempfile::tempdir().expect("create the world directory"),
             feed: None,
+            venv: Mutex::new(None),
         };
         for dir in sandbox.directories() {
             std::fs::create_dir_all(dir).expect("create a world directory");
@@ -92,24 +99,97 @@ impl Sandbox {
     /// Make the working directory a project whose only source is the loopback
     /// feed.
     pub fn use_loopback_project(&self) {
+        self.write_manifest("");
+    }
+
+    /// The same project, requiring at least the given LabVIEW year.
+    pub fn use_loopback_project_for_labview(&self, year: &str) {
+        self.write_manifest(&format!(
+            "labview = \"{year}\"
+"
+        ));
+    }
+
+    fn write_manifest(&self, extra_project_keys: &str) {
         let manifest = format!(
-            "[project]\nname = \"fixture\"\nversion = \"0.1.0\"\n\n[sources]\nloopback = \"{}\"\ndefaults = false\n",
+            "[project]
+name = \"fixture\"
+version = \"0.1.0\"
+{extra_project_keys}
+             [sources]
+loopback = \"{}\"
+defaults = false
+",
             self.feed().project_source_url()
         );
         std::fs::write(self.work_dir().join("lvpm.toml"), manifest).expect("write lvpm.toml");
     }
 
-    /// Run the built `lvpm` with `args` in this world.
-    pub fn run_lvpm(&self, args: &[&str]) -> Output {
-        self.run_lvpm_within(args, RUN_TIMEOUT)
+    /// An empty `dest` directory in the working directory.
+    pub fn make_empty_dest(&self) {
+        std::fs::create_dir_all(self.work_dir().join("dest")).expect("create dest");
     }
 
-    fn run_lvpm_within(&self, args: &[&str], timeout: Duration) -> Output {
+    /// A `folder` in the working directory holding `alpha-1.0.vip`.
+    pub fn make_folder_with_alpha(&self, packages: &[FixturePackage]) {
+        let alpha = packages
+            .iter()
+            .find(|package| package.name == "alpha" && package.version == "1.0")
+            .expect("the fixture table has alpha 1.0");
+        let folder = self.work_dir().join("folder");
+        std::fs::create_dir_all(&folder).expect("create folder");
+        std::fs::write(folder.join(alpha.file_name()), alpha.build_vip()).expect("write alpha");
+    }
+
+    /// Run `lvpm` as a scenario's setup, which must succeed.
+    pub fn setup_lvpm(&self, args: &[&str]) {
+        let output = self.run_lvpm(args);
+        assert_eq!(
+            output.exit_code,
+            0,
+            "setup `lvpm {}` failed: {output:?}",
+            args.join(" ")
+        );
+    }
+
+    /// Stop whatever the world started that is still running (a LabVIEW on
+    /// its venv), and say whether the venv's VI Server port is now quiet.
+    pub fn close_venv_labview(&self) -> bool {
+        venv::stop_processes_mentioning(self.root());
+        match self.venv_binding() {
+            Some(binding) => !port_is_listening(binding.port),
+            None => true,
+        }
+    }
+
+    fn venv_binding(&self) -> Option<VenvBinding> {
+        self.venv.lock().expect("venv binding").clone()
+    }
+
+    fn remember_venv(&self) {
+        if let Some(binding) = venv::read_binding(&self.work_dir()) {
+            *self.venv.lock().expect("venv binding") = Some(binding);
+        }
+    }
+
+    /// Run the built `lvpm` with `args` in this world.
+    pub fn run_lvpm(&self, args: &[&str]) -> Output {
+        self.run_lvpm_within(args, None, RUN_TIMEOUT)
+    }
+
+    /// Run `lvpm` with `input` on its stdin, for commands that ask a question.
+    pub fn run_lvpm_answering(&self, args: &[&str], input: &str) -> Output {
+        self.run_lvpm_within(args, Some(input), RUN_TIMEOUT)
+    }
+
+    fn run_lvpm_within(&self, args: &[&str], input: Option<&str>, timeout: Duration) -> Output {
         let mut command = Command::new(env!("CARGO_BIN_EXE_lvpm"));
         command.args(args).current_dir(self.work_dir());
         self.apply_environment(&mut command);
-        run_within(command, timeout)
-            .unwrap_or_else(|why| panic!("`lvpm {}` did not finish: {why}", args.join(" ")))
+        let output = run_within(command, input, timeout)
+            .unwrap_or_else(|why| panic!("`lvpm {}` did not finish: {why}", args.join(" ")));
+        self.remember_venv();
+        output
     }
 
     fn apply_environment(&self, command: &mut Command) {
@@ -141,9 +221,12 @@ impl Sandbox {
     /// replaced, ready to compare with a recording.
     pub fn normalised(&self, output: &Output) -> Output {
         let origin = self.feed.as_ref().map(Feed::origin);
+        let binding = self.venv_binding();
         let anchors = Anchors {
             root: self.root(),
             feed_origin: origin.as_deref(),
+            labview_dir: binding.as_ref().map(|b| b.labview_dir.as_path()),
+            venv_port: binding.as_ref().map(|b| b.port),
         };
         Output {
             stdout: normalise(&output.stdout, &anchors),
@@ -153,14 +236,41 @@ impl Sandbox {
     }
 }
 
-/// Run `command` to completion, or kill it when `timeout` passes.
-fn run_within(mut command: Command, timeout: Duration) -> Result<Output, String> {
+impl Drop for Sandbox {
+    /// A scenario that failed half way must not leave a LabVIEW behind.
+    fn drop(&mut self) {
+        if self.venv_binding().is_some() {
+            venv::stop_processes_mentioning(self.root());
+        }
+    }
+}
+
+fn port_is_listening(port: u16) -> bool {
+    let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    TcpStream::connect_timeout(&address, Duration::from_millis(500)).is_ok()
+}
+
+/// Run `command` to completion, or kill it when `timeout` passes. Its stdin
+/// carries `input` and then ends; with no input it is empty.
+fn run_within(
+    mut command: Command,
+    input: Option<&str>,
+    timeout: Duration,
+) -> Result<Output, String> {
     let mut child = command
-        .stdin(Stdio::null())
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("could not start: {e}"))?;
+    if let (Some(text), Some(mut stdin)) = (input, child.stdin.take()) {
+        // A child that exits without reading closes the pipe; that is its answer.
+        stdin.write_all(text.as_bytes()).ok();
+    }
     let stdout = read_in_background(child.stdout.take().expect("piped stdout"));
     let stderr = read_in_background(child.stderr.take().expect("piped stderr"));
     let deadline = Instant::now() + timeout;
@@ -265,12 +375,90 @@ mod tests {
     #[test]
     fn a_process_that_outlives_the_timeout_is_killed_and_reported() {
         let started = Instant::now();
-        let error = run_within(sleeper(), Duration::from_millis(300)).unwrap_err();
+        let error = run_within(sleeper(), None, Duration::from_millis(300)).unwrap_err();
         assert!(error.contains("timed out"), "{error}");
         assert!(
             started.elapsed() < Duration::from_secs(10),
             "was not killed promptly"
         );
+    }
+
+    #[test]
+    fn a_remembered_venv_anchors_its_port_and_labview_dir_in_normalised_output() {
+        let sandbox = sandbox_with_feed();
+        let venv_dir = sandbox.work_dir().join(venv::VENV_DIR).join(".lvpm");
+        std::fs::create_dir_all(&venv_dir).unwrap();
+        std::fs::write(
+            venv_dir.join("venv.json"),
+            r#"{"target_path":"C:\\LV\\2026","port":3412}"#,
+        )
+        .unwrap();
+        sandbox.remember_venv();
+        let raw = Output {
+            stdout: r"VI Server port 3412 in C:\LV\2026".into(),
+            stderr: String::new(),
+            exit_code: 0,
+        };
+        assert_eq!(
+            sandbox.normalised(&raw).stdout,
+            "VI Server port <PORT> in <LABVIEW>"
+        );
+    }
+
+    #[test]
+    fn a_world_without_a_venv_has_a_quiet_port_to_report() {
+        assert!(sandbox_with_feed().close_venv_labview());
+    }
+
+    #[test]
+    fn a_labview_project_manifest_is_one_lvpm_can_read() {
+        let sandbox = sandbox_with_feed();
+        sandbox.use_loopback_project_for_labview("2026");
+        let manifest = std::fs::read_to_string(sandbox.work_dir().join("lvpm.toml")).unwrap();
+        assert!(manifest.contains("labview = \"2026\""), "{manifest}");
+        sandbox.setup_lvpm(&["search", "a"]);
+    }
+
+    #[test]
+    fn the_alpha_folder_holds_the_fixture_archive_byte_for_byte() {
+        let sandbox = sandbox_with_feed();
+        sandbox.make_folder_with_alpha(PACKAGES);
+        let written = std::fs::read(sandbox.work_dir().join("folder").join("alpha-1.0.vip"));
+        assert_eq!(written.unwrap(), PACKAGES[0].build_vip());
+        sandbox.make_empty_dest();
+        assert!(sandbox.work_dir().join("dest").is_dir());
+    }
+
+    #[test]
+    #[should_panic(expected = "setup `lvpm install` failed")]
+    fn a_setup_command_that_fails_stops_the_scenario() {
+        sandbox_with_feed().setup_lvpm(&["install"]);
+    }
+
+    #[test]
+    fn input_reaches_the_childs_stdin_and_then_the_pipe_closes() {
+        let output = run_within(
+            stdin_echo(),
+            Some(
+                "an answer
+",
+            ),
+            RUN_TIMEOUT,
+        )
+        .unwrap();
+        assert_eq!(output.stdout.trim(), "an answer");
+        assert_eq!(output.exit_code, 0);
+    }
+
+    fn stdin_echo() -> Command {
+        // `findstr "^"` copies stdin to stdout on Windows, as `cat` does elsewhere.
+        if cfg!(windows) {
+            let mut command = Command::new("findstr");
+            command.arg("^");
+            command
+        } else {
+            Command::new("cat")
+        }
     }
 
     fn sleeper() -> Command {

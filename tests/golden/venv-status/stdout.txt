@@ -1,0 +1,6 @@
+<WORLD>\work\.lv-venv
+  project        <WORLD>\work
+  bound to       LabVIEW 2026 (64-bit)  v26.3  (<LABVIEW>)
+  VI Server port <PORT>
+  packages       0 installed, 0 not yet relinked
+  LabVIEW        not running on this venv

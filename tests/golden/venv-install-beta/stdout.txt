@@ -1,0 +1,12 @@
+
+resolved 2 packages:
+  alpha 2.0
+  beta 1.0
+
++ alpha 2.0 ... 2 files
++ beta 1.0 ... 2 files
+
+done. 2 files written.
+
+next: `lvpm launch` starts LabVIEW on this venv — a LabVIEW already open on it
+      has to be restarted to see what was just installed

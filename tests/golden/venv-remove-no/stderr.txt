@@ -1,0 +1,1 @@
+delete <WORLD>\work\.lv-venv and everything installed in it? [y/N] Error: not removed

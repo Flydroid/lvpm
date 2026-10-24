@@ -1,0 +1,3 @@
+started LabVIEW 2026 (64-bit)  v26.3 on <WORLD>\work\.lv-venv
+  ini            <WORLD>\work\.lv-venv\.lvpm\labview.ini
+  VI Server port <PORT>

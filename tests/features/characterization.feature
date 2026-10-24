@@ -12,18 +12,6 @@ Feature: The current CLI's output is recorded so later changes can be compared a
     Examples:
       | setup                                         | command                                          | name                 |
       | a project using only the loopback feed       | lvpm search a                                    | search-a             |
-
-  # Step 1.2 records these from the pre-split binary and merges them into the
-  # outline above. Until then the first step has no definition, so cucumber
-  # reports each row as skipped, never as passed.
-  Scenario Outline: a command's output matches its recording (recorded in Step 1.2)
-    Given the recording "<name>" was captured from the pre-split binary
-    And <setup>
-    When I run "<command>"
-    Then stdout, stderr and the exit code equal the recording "<name>"
-
-    Examples:
-      | setup                                         | command                                          | name                 |
       | a project using only the loopback feed       | lvpm search zzz                                  | search-none          |
       | a project using only the loopback feed       | lvpm install beta --dry-run --prefix dest        | install-dry-run      |
       | a project using only the loopback feed       | lvpm install beta --prefix dest                  | install-beta         |
@@ -37,7 +25,6 @@ Feature: The current CLI's output is recorded so later changes can be compared a
       | no project                                   | lvpm config set venv.dir .venv                   | config-set           |
       | venv.dir set to .venv                        | lvpm config get venv.dir                         | config-get           |
       | a folder with alpha 1.0                      | lvpm cache add folder                            | cache-add            |
-      | no project                                   | lvpm targets                                     | targets              |
       | no project, seeded default feeds             | lvpm search a                                    | search-a-noproject   |
       | no project, seeded default feeds             | lvpm install beta --prefix dest                  | install-beta-noproject |
       | no project, beta installed in dest           | lvpm list --prefix dest                          | list-beta-noproject  |
@@ -53,22 +40,30 @@ Feature: The current CLI's output is recorded so later changes can be compared a
     When the "search-a" comparison runs
     Then the comparison fails
 
+  # `lvpm targets` lists the host's LabVIEW installations, so its recording
+  # belongs to a LabVIEW machine. Every other row works inside a venv in the
+  # world, never on the installation itself. `run-hooks`, `refresh` and
+  # `start` name no destination here, so they record the refusal; passing
+  # --labview-version would act on the installation, which no row does.
   @labview
   Scenario Outline: LabVIEW-bound command output matches its recording
+    Given <setup>
     When I run "<command>"
+    And I close any LabVIEW the command started on the venv
     Then stdout, stderr and the exit code equal the recording "<name>"
 
     Examples:
-      | command                                   | name              |
-      | lvpm venv create --labview-version 2026   | venv-create       |
-      | lvpm venv status                          | venv-status       |
-      | lvpm install beta (into the venv)         | venv-install-beta |
-      | lvpm relink --all                         | relink-all        |
-      | lvpm run-hooks hooked                     | run-hooks         |
-      | lvpm refresh                              | refresh           |
-      | lvpm start                                | start             |
-      | lvpm launch                               | launch            |
-      | lvpm venv remove --yes                    | venv-remove-yes   |
+      | setup                                         | command                                   | name              |
+      | no project                                    | lvpm targets                              | targets           |
+      | a project requiring LabVIEW 2026              | lvpm venv create --labview-version 2026   | venv-create       |
+      | a venv for LabVIEW 2026                       | lvpm venv status                          | venv-status       |
+      | a venv for LabVIEW 2026                       | lvpm install beta                         | venv-install-beta |
+      | a venv with beta installed                    | lvpm relink --all                         | relink-all        |
+      | a venv with hooked installed                  | lvpm run-hooks hooked                     | run-hooks         |
+      | a venv for LabVIEW 2026                       | lvpm refresh                              | refresh           |
+      | a venv for LabVIEW 2026                       | lvpm start                                | start             |
+      | a venv for LabVIEW 2026                       | lvpm launch                               | launch            |
+      | a venv for LabVIEW 2026                       | lvpm venv remove --yes                    | venv-remove-yes   |
 
   @labview
   Scenario Outline: the venv remove prompt is recorded
