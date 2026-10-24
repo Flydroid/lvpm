@@ -406,6 +406,10 @@ pub struct Conflict {
 pub enum Fact {
     /// `lvpm.toml` asks for `package` within `wanted`.
     Manifest { package: String, wanted: String },
+    /// An upgrade asked for `package` at exactly `version`, which the
+    /// manifest does not say. The solver never produces it: `ops::lock` swaps
+    /// it in for the `Manifest` fact of a version it pinned.
+    Pinned { package: String, version: String },
     /// `package` at `versions` requires `needs` within `wanted`.
     Requires {
         package: String,
@@ -430,7 +434,7 @@ impl Fact {
     /// Where the fact sits in a report: what was asked, then why it fails.
     fn rank(&self) -> u8 {
         match self {
-            Fact::Manifest { .. } => 0,
+            Fact::Manifest { .. } | Fact::Pinned { .. } => 0,
             Fact::Requires { .. } => 1,
             Fact::NeedsLabview { .. } => 2,
             Fact::NoVersion { .. } => 3,
@@ -444,6 +448,9 @@ impl fmt::Display for Fact {
         match self {
             Fact::Manifest { package, wanted } => {
                 write!(f, "lvpm.toml requires {package} {wanted}")
+            }
+            Fact::Pinned { package, version } => {
+                write!(f, "the upgrade chose {package} {version}")
             }
             Fact::Requires {
                 package,

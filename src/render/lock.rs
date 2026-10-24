@@ -192,6 +192,7 @@ fn fact_line(fact: &Fact) -> String {
         Fact::Manifest { package, wanted } => {
             format!("lvpm.toml: {package} = \"{}\"", manifest_constraint(wanted))
         }
+        Fact::Pinned { package, version } => format!("--upgrade-package {package}@{version}"),
         other => other.to_string(),
     }
 }
@@ -481,6 +482,23 @@ mod tests {
              \x20 lvpm.toml: D = \">=2.0\"\n\
              \x20 A = 2.0 requires C >= 2.0\n\
              next: change one of these in lvpm.toml, then run `lvpm lock` again"
+        );
+    }
+
+    #[test]
+    fn a_pinned_version_is_named_as_the_flag_that_asked_for_it() {
+        let text = error(&LockError::Conflict(Conflict {
+            facts: vec![
+                manifest("alpha", "= 1.0"),
+                Fact::Pinned {
+                    package: "beta".into(),
+                    version: "2.0".into(),
+                },
+            ],
+        }));
+        assert!(
+            text.contains("\n  lvpm.toml: alpha = \"1.0\"\n  --upgrade-package beta@2.0\n"),
+            "{text}"
         );
     }
 

@@ -16,7 +16,7 @@ use crate::index::{self, Entry, Index};
 use crate::lockfile::{self, Inputs, LockedPackage, LockedUnresolved, Lockfile};
 use crate::manifest_edit::{self, DependencyTable};
 use crate::project::{Constraint, Project};
-use crate::solve::{self, Resolution, SolveError};
+use crate::solve::{self, Conflict, Fact, Resolution, SolveError};
 use crate::version::Version;
 use anyhow::Context;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -451,9 +451,48 @@ fn resolve(
         .collect();
     solve::solve(&constraints, index, preferences, Some(gate), &env.cancel).map_err(|why| match why
     {
-        SolveError::Conflict(conflict) => LockError::Conflict(conflict),
+        SolveError::Conflict(conflict) => LockError::Conflict(name_pins(conflict, project, pins)),
         SolveError::Cancelled => LockError::Cancelled,
     })
+}
+
+/// `conflict` with each fact that only a pin asked for named as one. The
+/// solver reads a pin as one more manifest line; a fact stays a manifest fact
+/// when `project` has a line that says the same.
+fn name_pins(mut conflict: Conflict, project: &Project, pins: &[(String, Constraint)]) -> Conflict {
+    for fact in &mut conflict.facts {
+        let Fact::Manifest { package, wanted } = fact else {
+            continue;
+        };
+        let is_pin = |(name, constraint): &(String, Constraint)| {
+            name.eq_ignore_ascii_case(package) && wanted_by(constraint) == *wanted
+        };
+        let says_so = project
+            .dependencies
+            .iter()
+            .chain(&project.dev_dependencies)
+            .any(|(name, constraint)| {
+                name.eq_ignore_ascii_case(package) && wanted_by(constraint) == *wanted
+            });
+        if let Some((name, Constraint::Exact(version))) = pins.iter().find(|pin| is_pin(pin))
+            && !says_so
+        {
+            *fact = Fact::Pinned {
+                package: name.clone(),
+                version: version.raw.clone(),
+            };
+        }
+    }
+    conflict
+}
+
+/// The version set a manifest constraint is, as a conflict fact spells it.
+fn wanted_by(constraint: &Constraint) -> String {
+    match constraint {
+        Constraint::Exact(version) => format!("= {version}"),
+        Constraint::AtLeast(version) => format!(">= {version}"),
+        Constraint::Any => "*".to_string(),
+    }
 }
 
 /// The SHA-256 of every chosen archive, by lowercased name. Each archive
@@ -1275,6 +1314,59 @@ mod tests {
         );
         assert_eq!(updates(text, "any", "0.1"), []);
         assert_eq!(updates(text, "transitive", "2.0"), []);
+    }
+
+    #[test]
+    fn a_conflict_names_the_version_an_upgrade_asked_for_as_a_pin_and_manifest_lines_as_lines() {
+        let manifest = "[project]\nlabview = \"2023\"\n\n[sources]\ndefaults = false\n\n\
+                        [dependencies]\nalpha = \"1.0\"\nbeta = \">=1.0\"\n";
+        let project = ProjectDir::new(
+            "upgrade-conflict",
+            manifest,
+            &[
+                ("alpha", "1.0", "23.0", ""),
+                ("beta", "1.0", "23.0", "alpha>=1.0"),
+            ],
+        );
+        lock(&project.env(&Recorder::default())).unwrap();
+        write_vip(
+            &project.root.join("packages/beta-2.0.vip"),
+            ("beta", "2.0", "23.0", "alpha>=2.0"),
+        );
+        write_vip(
+            &project.root.join("packages/alpha-2.0.vip"),
+            ("alpha", "2.0", "23.0", ""),
+        );
+
+        let why = upgrade(
+            &project.env(&Recorder::default()),
+            &Upgrade::Packages(vec![target("beta@2.0")]),
+        )
+        .unwrap_err();
+        let LockError::Conflict(conflict) = why else {
+            panic!("expected a conflict, got {why:?}");
+        };
+        assert!(
+            conflict.facts.contains(&Fact::Pinned {
+                package: "beta".into(),
+                version: "2.0".into()
+            }),
+            "{conflict}"
+        );
+        assert!(
+            conflict.facts.contains(&Fact::Manifest {
+                package: "alpha".into(),
+                wanted: "= 1.0".into()
+            }),
+            "{conflict}"
+        );
+        assert!(
+            conflict
+                .facts
+                .iter()
+                .all(|fact| !matches!(fact, Fact::Manifest { package, .. } if package == "beta")),
+            "beta's manifest line `>=1.0` does not conflict: {conflict}"
+        );
     }
 
     const PINNED_GAMMA: &str = "[project]\nlabview = \"2023\"\n\n[sources]\ndefaults = false\n\n\
