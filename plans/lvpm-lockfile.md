@@ -1949,8 +1949,10 @@ and version.
   - [x] Step 7.2: Split into `resolve_greedy` / `InstallSession` / `apply` / `finish`
   - [x] Step 7.3: `ops::uninstall` on the same session
 
-  - Commits c84c66d, 46f7b40, 3f348b1. Plan premise corrected: install manifests now record `archive_sha256`, which changes the hashed manifests in `tests/golden/*/tree.txt`; the harness normaliser drops that one field before comparing (pending user acceptance). Unrecorded output changes: relink progress lines start on their own line; a stderr event during an open stdout line ends that line first. `finish` takes `InstallOptions`; the `begin_unpack` seam is the top of `unpack()` in `ops/install.rs`. Dropped the unreachable dry-run hook listing. `reqwest` left the CLI crate, `zip` moved to dev-dependencies. For Slice 10: `InstallPlan` is `entries: Vec<Entry>` and `apply` checks no hash yet. For Slice 14: `cmd_relink` duplicates `finish`'s relink block.
+  - Commits c84c66d, 46f7b40, 3f348b1. Plan premise corrected: install manifests now record `archive_sha256`, which changes the hashed manifests in `tests/golden/*/tree.txt`; the harness normaliser drops that one field before comparing (accepted by the user 2026-10-24). Unrecorded output changes: relink progress lines start on their own line; a stderr event during an open stdout line ends that line first. `finish` takes `InstallOptions`; the `begin_unpack` seam is the top of `unpack()` in `ops/install.rs`. Dropped the unreachable dry-run hook listing. `reqwest` left the CLI crate, `zip` moved to dev-dependencies. For Slice 10: `InstallPlan` is `entries: Vec<Entry>` and `apply` checks no hash yet. For Slice 14: `cmd_relink` duplicates `finish`'s relink block.
 #### Wave 6
+- [ ] Slice 7b (inserted 2026-10-24 by user decision): version comparison fixes before locking
+  - Prerelease tails compare (`1.0alpha1 < 1.0alpha2`, no dedup merge); a prerelease sorts below its release even with a revision suffix; a `>` requirement is strict. May change which version the greedy CLI picks when prereleases are involved.
 - [ ] Slice 8: `lvpm lock`
   - [ ] Step 8.1: Lock format
   - [ ] Step 8.2: `ops::lock` and `lvpm lock`
