@@ -147,7 +147,7 @@ impl CliWorld {
         self.sandbox.work_dir().join(DEST_DIR)
     }
 
-    fn manifest_bytes(&self) -> Vec<u8> {
+    pub(super) fn manifest_bytes(&self) -> Vec<u8> {
         std::fs::read(self.sandbox.work_dir().join(MANIFEST_FILE)).expect("read the manifest")
     }
 

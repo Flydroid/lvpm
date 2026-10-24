@@ -5,7 +5,7 @@
 #![allow(clippy::disallowed_methods)]
 
 use lvpm_core::ops::install::InstallOptions;
-use lvpm_core::ops::lock::Upgrade;
+use lvpm_core::ops::lock::{Upgrade, UpgradeTarget};
 use lvpm_core::ops::relink::RelinkOptions;
 use lvpm_core::ops::route::{self, InstallMode, InstallRequest};
 use lvpm_core::ops::sync::{LockFlags, SyncOptions, strictness};
@@ -325,11 +325,18 @@ enum Cmd {
         /// Move every package to the newest version the constraints allow.
         #[arg(long, conflicts_with_all = ["check", "upgrade_package"])]
         upgrade: bool,
-        /// Move this package to the newest version the constraints allow, and
-        /// leave the rest where lvpm.lock has them unless they cannot stay.
-        /// Repeat it for more than one package.
-        #[arg(long, value_name = "PACKAGE", conflicts_with = "check")]
-        upgrade_package: Vec<String>,
+        /// Move this package to the newest version the constraints allow, or
+        /// to VERSION, and leave the rest where lvpm.lock has them unless they
+        /// cannot stay. If a manifest constraint excludes VERSION it is
+        /// rewritten, keeping its kind; "*" is never rewritten. Repeat it for
+        /// more than one package.
+        #[arg(
+            long,
+            value_name = "PACKAGE[@VERSION]",
+            value_parser = UpgradeTarget::parse,
+            conflicts_with = "check"
+        )]
+        upgrade_package: Vec<UpgradeTarget>,
     },
     /// Show what lvpm has installed into the selected target.
     List,
@@ -1167,10 +1174,19 @@ mod tests {
 
     #[test]
     fn upgrade_package_repeats() {
-        let cli = lock_args(&["--upgrade-package", "beta", "--upgrade-package", "alpha"]).unwrap();
+        let cli = lock_args(&[
+            "--upgrade-package",
+            "beta@1.5",
+            "--upgrade-package",
+            "alpha",
+        ])
+        .unwrap();
         assert!(matches!(
             cli.cmd,
-            Cmd::Lock { upgrade_package, .. } if upgrade_package == ["beta", "alpha"]
+            Cmd::Lock { upgrade_package, .. } if upgrade_package == [
+                UpgradeTarget::parse("beta@1.5").unwrap(),
+                UpgradeTarget::parse("alpha").unwrap(),
+            ]
         ));
     }
 }

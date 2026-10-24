@@ -31,6 +31,8 @@ pub struct LockState {
     pub(super) published: Vec<&'static FixturePackage>,
     /// `lvpm.lock` as a `Given` found it.
     pub(super) before: Option<Vec<u8>>,
+    /// `lvpm.toml` as a `Given` of an upgrade scenario left it.
+    pub(super) manifest_before: Option<Vec<u8>>,
     /// The second world of a scenario that compares two.
     other: Option<OtherWorld>,
 }

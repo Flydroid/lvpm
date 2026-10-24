@@ -39,6 +39,10 @@ pub(super) fn render(r: &mut Renderer, event: &Event) {
                 if *packages == 1 { "" } else { "s" }
             ),
         ),
+        Event::ManifestUpdated { name, from, to } => r.line(
+            Stream::Out,
+            &format!("lvpm.toml was updated: {name} \"{from}\" -> \"{to}\""),
+        ),
         Event::LockUpToDate { path } => {
             r.line(Stream::Out, &format!("{} is up to date", path.display()))
         }
@@ -120,6 +124,23 @@ pub fn error(error: &LockError) -> String {
         LockError::Stale(reason) => format!(
             "lvpm.lock is out of date: {}; run `lvpm lock` to update it",
             stale_reason(reason)
+        ),
+        LockError::NotLocked { .. } => format!(
+            "{error}\n\
+             next: name a package that lvpm.lock lists, then run \
+             `lvpm lock --upgrade-package <package>` again"
+        ),
+        LockError::NoSuchVersion { name, .. } => format!(
+            "{error}\n\
+             next: look for the versions there are with `lvpm search {name}`, then run \
+             `lvpm lock --upgrade-package {name}@<version>` again"
+        ),
+        LockError::NeedsNewerLabview {
+            name, project_year, ..
+        } => format!(
+            "{error}\n\
+             next: pick a version that runs on LabVIEW {project_year}, or raise labview in \
+             lvpm.toml, then run `lvpm lock --upgrade-package {name}@<version>` again"
         ),
         LockError::Cancelled => {
             format!("{error}; lvpm.lock is unchanged\nnext: run `lvpm lock` again")
@@ -293,6 +314,60 @@ mod tests {
             "no changes, nothing newer; lvpm.lock is as it was\n"
         );
         assert_eq!(err.text(), "");
+    }
+
+    #[test]
+    fn a_rewritten_constraint_is_a_line_on_stdout_with_both_constraints() {
+        let (mut renderer, out, err) = renderer();
+        renderer.render(&Event::ManifestUpdated {
+            name: "beta".into(),
+            from: ">=1.0".into(),
+            to: ">=0.9".into(),
+        });
+        assert_eq!(
+            out.text(),
+            "lvpm.toml was updated: beta \">=1.0\" -> \">=0.9\"\n"
+        );
+        assert_eq!(err.text(), "");
+    }
+
+    #[test]
+    fn a_refused_upgrade_says_why_and_ends_with_the_command_to_try_again() {
+        for (error, why, again) in [
+            (
+                LockError::NotLocked {
+                    name: "zeta".into(),
+                },
+                "zeta is not in lvpm.lock",
+                "`lvpm lock --upgrade-package <package>` again",
+            ),
+            (
+                LockError::NoSuchVersion {
+                    name: "beta".into(),
+                    version: "9.9".into(),
+                },
+                "no beta 9.9 is in any source",
+                "`lvpm lock --upgrade-package beta@<version>` again",
+            ),
+            (
+                LockError::NeedsNewerLabview {
+                    name: "beta".into(),
+                    version: "2.0".into(),
+                    needs_year: 2026,
+                    project_year: 2024,
+                },
+                "beta 2.0 requires LabVIEW 2026; this project is locked for 2024",
+                "`lvpm lock --upgrade-package beta@<version>` again",
+            ),
+        ] {
+            let text = super::error(&error);
+            assert!(text.starts_with(why), "{text}");
+            let last = text.lines().last().unwrap();
+            assert!(
+                last.starts_with("next: ") && last.ends_with(again),
+                "{text}"
+            );
+        }
     }
 
     #[test]

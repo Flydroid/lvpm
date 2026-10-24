@@ -106,6 +106,7 @@ impl Renderer {
             | Event::LockChanged { .. }
             | Event::LockWritten { .. }
             | Event::LockUpToDate { .. }
+            | Event::ManifestUpdated { .. }
             | Event::LockNothingNewer { .. }
             | Event::LockWouldChange { .. } => lock::render(self, event),
             Event::SyncLockMissing { .. }

@@ -11,6 +11,7 @@ pub mod refresh;
 pub mod relink;
 pub mod route;
 pub mod session;
+pub mod snapshot;
 pub mod sync;
 pub mod uninstall;
 

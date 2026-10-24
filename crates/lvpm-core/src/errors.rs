@@ -38,6 +38,23 @@ pub enum LockError {
     /// The lock no longer represents the manifest.
     #[error("lvpm.lock is out of date")]
     Stale(StaleReason),
+    /// An upgrade names a package that the lock does not hold.
+    #[error("{name} is not in lvpm.lock")]
+    NotLocked { name: String },
+    /// An upgrade names a version that no source lists.
+    #[error("no {name} {version} is in any source")]
+    NoSuchVersion { name: String, version: String },
+    /// An upgrade names a version that needs a newer LabVIEW than the
+    /// project's.
+    #[error(
+        "{name} {version} requires LabVIEW {needs_year}; this project is locked for {project_year}"
+    )]
+    NeedsNewerLabview {
+        name: String,
+        version: String,
+        needs_year: u32,
+        project_year: u32,
+    },
     /// The operation's token was cancelled; nothing was written.
     #[error("locking was cancelled")]
     Cancelled,

@@ -204,6 +204,10 @@ pub const ALPHA_3_NEEDING_LABVIEW_2026: FixturePackage = text_package("alpha", "
 pub const BETA_2_NEEDING_ALPHA_2: FixturePackage =
     text_package("beta", "2.0", &[("alpha", "2.0")], "20.0");
 
+/// The same beta 2.0, now needing LabVIEW 2026.
+pub const BETA_2_NEEDING_LABVIEW_2026: FixturePackage =
+    text_package("beta", "2.0", &[("alpha", "1.0")], "26.0");
+
 /// The same beta 1.0, also requiring a package that no source lists.
 pub const BETA_NEEDING_A_MISSING_PACKAGE: FixturePackage = text_package(
     "beta",
@@ -512,10 +516,11 @@ mod tests {
     #[test]
     fn the_upgrade_fixtures_are_built_the_same_every_time_and_no_two_are_alike() {
         let mut archives = std::collections::HashSet::new();
-        for pkg in UPGRADE_PACKAGES
-            .iter()
-            .chain([&ALPHA_3_NEEDING_LABVIEW_2026, &BETA_2_NEEDING_ALPHA_2])
-        {
+        for pkg in UPGRADE_PACKAGES.iter().chain([
+            &ALPHA_3_NEEDING_LABVIEW_2026,
+            &BETA_2_NEEDING_ALPHA_2,
+            &BETA_2_NEEDING_LABVIEW_2026,
+        ]) {
             assert_eq!(pkg.build_vip(), pkg.build_vip(), "{} differs", pkg.id());
             assert!(archives.insert(pkg.build_vip()), "{} repeats", pkg.id());
         }

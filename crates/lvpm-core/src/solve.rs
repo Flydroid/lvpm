@@ -178,9 +178,9 @@ fn root_version() -> Version {
 
 /// Why a listed version cannot be chosen.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Gated {
-    needs_year: u32,
-    project_year: u32,
+pub(crate) struct Gated {
+    pub(crate) needs_year: u32,
+    pub(crate) project_year: u32,
 }
 
 impl fmt::Display for Gated {
@@ -266,14 +266,19 @@ impl Provider<'_> {
         self.catalog.versions(&key(name)).is_empty()
     }
 
-    /// The LabVIEW year `entry` needs, when that is newer than the project's.
     fn gated(&self, entry: &Entry) -> Option<Gated> {
-        let (gate, needs) = (self.lv_gate?, entry.lv_min?);
-        (gate + 1e-9 < needs).then(|| Gated {
-            needs_year: lv_year(needs),
-            project_year: lv_year(gate),
-        })
+        gated(entry, self.lv_gate?)
     }
+}
+
+/// The LabVIEW year `entry` needs, when that is newer than the project's
+/// (`gate`, in the index's own units).
+pub(crate) fn gated(entry: &Entry, gate: f64) -> Option<Gated> {
+    let needs = entry.lv_min?;
+    (gate + 1e-9 < needs).then(|| Gated {
+        needs_year: lv_year(needs),
+        project_year: lv_year(gate),
+    })
 }
 
 /// LabVIEW's marketing year from its internal version (26.0 is 2026).

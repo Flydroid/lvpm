@@ -247,6 +247,14 @@ pub enum Event {
     LockChanged { changes: Vec<LockChange> },
     /// The lock is on disk, holding `packages` packages.
     LockWritten { path: PathBuf, packages: usize },
+    /// An upgrade rewrote the constraint of a manifest entry, to admit the
+    /// version it moved the package to: `from` and `to` are the constraint as
+    /// the manifest writes it.
+    ManifestUpdated {
+        name: String,
+        from: String,
+        to: String,
+    },
     /// The lock on disk still represents the manifest, so it was left alone.
     LockUpToDate { path: PathBuf },
     /// An upgrade found nothing newer than the lock holds, so it was left

@@ -8,12 +8,14 @@
 
 use super::env::OpEnv;
 use super::session::Downloads;
+use super::snapshot::restoring_on_failure;
 use crate::cache::sha256_hex;
 use crate::errors::{ArchiveFailure, LockError};
 use crate::events::{Event, LockChange};
 use crate::index::{self, Entry, Index};
 use crate::lockfile::{self, Inputs, LockedPackage, LockedUnresolved, Lockfile};
-use crate::project::Project;
+use crate::manifest_edit::{self, DependencyTable};
+use crate::project::{Constraint, Project};
 use crate::solve::{self, Resolution, SolveError};
 use crate::version::Version;
 use anyhow::Context;
@@ -40,8 +42,37 @@ pub fn lock(env: &OpEnv) -> Result<Lockfile, LockError> {
     }
 
     let (lock, changes) = relock(env, &found, previous.as_ref())?;
-    write_lock(env, &lock_path, &lock, changes)?;
+    write_atomically(&lock_path, &lock.to_toml()?)?;
+    announce_written(env, lock_path, &lock, changes);
     Ok(lock)
+}
+
+/// A package an upgrade moves, and the version to move it to when the caller
+/// chose one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpgradeTarget {
+    pub name: String,
+    /// The version as the caller wrote it.
+    pub version: Option<String>,
+}
+
+impl UpgradeTarget {
+    /// `name`, or `name@version`.
+    pub fn parse(text: &str) -> Result<UpgradeTarget, String> {
+        let (name, version) = match text.split_once('@') {
+            Some((name, version)) => (name.trim(), Some(version.trim())),
+            None => (text.trim(), None),
+        };
+        match (name, version) {
+            ("", _) | (_, Some("")) => {
+                Err(format!("{text:?} is not a package name or name@version"))
+            }
+            _ => Ok(UpgradeTarget {
+                name: name.to_string(),
+                version: version.map(str::to_string),
+            }),
+        }
+    }
 }
 
 /// What an upgrade lets move off the versions the lock holds.
@@ -49,55 +80,91 @@ pub fn lock(env: &OpEnv) -> Result<Lockfile, LockError> {
 pub enum Upgrade {
     /// Every package, to the newest version the constraints allow.
     Everything,
-    /// Only these packages, by name, and whatever they force along.
-    Packages(Vec<String>),
+    /// Only these packages, and whatever they force along: each to its newest
+    /// version, or to the one the caller chose.
+    Packages(Vec<UpgradeTarget>),
 }
 
-/// Re-lock, letting the packages `which` names move to the newest versions the
-/// constraints allow; every other package stays where the lock has it unless
-/// the new set cannot hold it there. A lock with nothing newer to move to is
-/// left as it is.
+/// Re-lock, letting the packages `which` names move; every other package
+/// stays where the lock has it unless the new set cannot hold it there. A lock
+/// with nothing newer to move to is left as it is.
+///
+/// A package moved to a version its manifest constraint excludes has that
+/// constraint rewritten, keeping its kind (`1.0` stays exact, `>=1.0` stays a
+/// floor, `*` is never rewritten); a package the manifest does not list is
+/// never added to it. Nothing is written until the whole new lock is made, and
+/// if writing the manifest and the lock fails, both are put back as they were.
 pub fn upgrade(env: &OpEnv, which: &Upgrade) -> Result<Lockfile, LockError> {
     let found = find_manifest(env)?;
-    let lock_path = found.0.with_file_name(lockfile::FILE_NAME);
-    let previous = Lockfile::read(&lock_path).ok();
-    let moving = match which {
-        Upgrade::Everything => Moving::Everything,
-        Upgrade::Packages(names) => Moving::Only(names),
+    let (manifest_path, project) = &found;
+    let gate = lv_gate(project.labview.as_deref().ok_or(LockError::NoLabview)?)?;
+    let lock_path = manifest_path.with_file_name(lockfile::FILE_NAME);
+    let (previous, moving) = match which {
+        Upgrade::Everything => (Lockfile::read(&lock_path).ok(), Moving::Everything),
+        Upgrade::Packages(targets) => {
+            let held = read_lock(&lock_path)?;
+            check_locked(&held, targets)?;
+            (Some(held), Moving::Only(targets))
+        }
     };
-    let (lock, changes) = relock_moving(env, &found, previous.as_ref(), &moving)?;
-    if previous.as_ref() == Some(&lock) {
-        env.sink.emit(Event::LockNothingNewer { path: lock_path });
+    let index = env.load_index(Some(&found))?;
+    let pins = Pins::of(&found, moving.targets(), &index, gate)?;
+    let project = pins
+        .rewrite
+        .as_ref()
+        .map_or(project, |rewrite| &rewrite.project);
+    let (lock, changes) = relock_in(
+        env,
+        project,
+        &index,
+        previous.as_ref(),
+        &moving,
+        &pins.constraints,
+    )?;
+
+    if pins.rewrite.is_none() && previous.as_ref() == Some(&lock) {
+        env.sink.emit(match pins.constraints.is_empty() {
+            true => Event::LockNothingNewer { path: lock_path },
+            false => Event::LockUpToDate { path: lock_path },
+        });
         return Ok(lock);
     }
-    write_lock(env, &lock_path, &lock, changes)?;
+    let text = lock.to_toml()?;
+    restoring_on_failure(&[manifest_path, &lock_path], || {
+        if let Some(rewrite) = &pins.rewrite {
+            std::fs::write(manifest_path, &rewrite.text)
+                .with_context(|| format!("writing {}", manifest_path.display()))?;
+        }
+        write_atomically(&lock_path, &text)
+    })?;
+    for update in pins.rewrite.iter().flat_map(|rewrite| &rewrite.updates) {
+        env.sink.emit(Event::ManifestUpdated {
+            name: update.name.clone(),
+            from: update.from.clone(),
+            to: update.to.clone(),
+        });
+    }
+    announce_written(env, lock_path, &lock, changes);
     Ok(lock)
 }
 
-/// `lock` on disk, then what changed and that it was written.
-fn write_lock(
-    env: &OpEnv,
-    lock_path: &Path,
-    lock: &Lockfile,
-    changes: Vec<LockChange>,
-) -> Result<(), LockError> {
-    write_atomically(lock_path, &lock.to_toml()?)?;
+/// What changed in the lock just written, and that it is on disk.
+fn announce_written(env: &OpEnv, lock_path: PathBuf, lock: &Lockfile, changes: Vec<LockChange>) {
     if !changes.is_empty() {
         env.sink.emit(Event::LockChanged { changes });
     }
     env.sink.emit(Event::LockWritten {
-        path: lock_path.to_path_buf(),
+        path: lock_path,
         packages: lock.packages.len(),
     });
-    Ok(())
 }
 
 /// Which locked versions a new resolution may leave.
 enum Moving<'a> {
     /// None: every one that still fits is kept.
     Nothing,
-    /// Only the packages with these names (any case).
-    Only(&'a [String]),
+    /// Only the packages these name (in any case).
+    Only(&'a [UpgradeTarget]),
     /// All of them.
     Everything,
 }
@@ -106,8 +173,17 @@ impl Moving<'_> {
     fn moves(&self, name: &str) -> bool {
         match self {
             Moving::Nothing => false,
-            Moving::Only(names) => names.iter().any(|moving| moving.eq_ignore_ascii_case(name)),
+            Moving::Only(targets) => targets
+                .iter()
+                .any(|target| target.name.eq_ignore_ascii_case(name)),
             Moving::Everything => true,
+        }
+    }
+
+    fn targets(&self) -> &[UpgradeTarget] {
+        match self {
+            Moving::Only(targets) => targets,
+            Moving::Nothing | Moving::Everything => &[],
         }
     }
 }
@@ -123,6 +199,149 @@ fn preferences(previous: Option<&Lockfile>, moving: &Moving) -> Vec<(String, Ver
         .collect()
 }
 
+/// Every target is a package `held` locks, or the first one that is not is the
+/// error.
+fn check_locked(held: &Lockfile, targets: &[UpgradeTarget]) -> Result<(), LockError> {
+    match targets.iter().find(|target| {
+        !held
+            .packages
+            .iter()
+            .any(|package| package.name.eq_ignore_ascii_case(&target.name))
+    }) {
+        Some(target) => Err(LockError::NotLocked {
+            name: target.name.clone(),
+        }),
+        None => Ok(()),
+    }
+}
+
+/// What the versions an upgrade chose ask of the solver and of the manifest.
+struct Pins {
+    /// Each chosen version as an exact constraint on top of the manifest's.
+    constraints: Vec<(String, Constraint)>,
+    /// The manifest once it admits them; `None` when it already does.
+    rewrite: Option<Rewrite>,
+}
+
+/// The manifest after an upgrade: its new text, what that reads as, and the
+/// entries that changed.
+struct Rewrite {
+    text: String,
+    project: Project,
+    updates: Vec<ManifestUpdate>,
+}
+
+/// One manifest entry whose constraint an upgrade rewrites.
+struct ManifestUpdate {
+    table: DependencyTable,
+    /// The entry's name as the manifest spells it.
+    name: String,
+    /// The constraint before and after, as the manifest writes it.
+    from: String,
+    to: String,
+}
+
+impl Pins {
+    /// The versions `targets` choose, each checked against `index` and the
+    /// LabVIEW `gate`, and the manifest at `found` changed to admit them.
+    fn of(
+        found: &(PathBuf, Project),
+        targets: &[UpgradeTarget],
+        index: &Index,
+        gate: f64,
+    ) -> Result<Pins, LockError> {
+        let mut constraints = Vec::new();
+        let mut updates = Vec::new();
+        for target in targets {
+            let Some(raw) = &target.version else {
+                continue;
+            };
+            let version = Version::parse(raw);
+            let entry = index
+                .versions_of(&target.name)
+                .into_iter()
+                .find(|entry| entry.version == version)
+                .ok_or_else(|| LockError::NoSuchVersion {
+                    name: target.name.clone(),
+                    version: raw.clone(),
+                })?;
+            if let Some(gated) = solve::gated(entry, gate) {
+                return Err(LockError::NeedsNewerLabview {
+                    name: entry.name.clone(),
+                    version: raw.clone(),
+                    needs_year: gated.needs_year,
+                    project_year: gated.project_year,
+                });
+            }
+            updates.extend(constraint_updates(&found.1, &target.name, raw, &version));
+            constraints.push((target.name.clone(), Constraint::Exact(version)));
+        }
+        let rewrite = match updates.is_empty() {
+            true => None,
+            false => Some(Rewrite::of(&found.0, updates)?),
+        };
+        Ok(Pins {
+            constraints,
+            rewrite,
+        })
+    }
+}
+
+impl Rewrite {
+    /// The manifest at `path` with every update applied and nothing else
+    /// changed, not yet written.
+    fn of(path: &Path, updates: Vec<ManifestUpdate>) -> anyhow::Result<Rewrite> {
+        let mut text = std::fs::read_to_string(path)
+            .with_context(|| format!("reading manifest {}", path.display()))?;
+        for update in &updates {
+            text = manifest_edit::set(&text, update.table, &update.name, &update.to)?;
+        }
+        let project = crate::project::parse(&text)
+            .with_context(|| format!("parsing the new manifest for {}", path.display()))?;
+        Ok(Rewrite {
+            text,
+            project,
+            updates,
+        })
+    }
+}
+
+/// The entries of `project` named `name` whose constraint excludes `version`
+/// (written `raw`), each with the constraint that admits it and is of the same
+/// kind: an exact one becomes `raw`, a floor becomes `>=raw`. `*` admits every
+/// version and is never rewritten.
+fn constraint_updates(
+    project: &Project,
+    name: &str,
+    raw: &str,
+    version: &Version,
+) -> Vec<ManifestUpdate> {
+    [
+        (DependencyTable::Dependencies, &project.dependencies),
+        (DependencyTable::DevDependencies, &project.dev_dependencies),
+    ]
+    .into_iter()
+    .flat_map(|(table, entries)| {
+        entries
+            .iter()
+            .filter(|(entry, _)| entry.eq_ignore_ascii_case(name))
+            .filter_map(move |(entry, constraint)| {
+                let to = match constraint {
+                    Constraint::Exact(pinned) if pinned != version => raw.to_string(),
+                    Constraint::AtLeast(floor) if version < floor => format!(">={raw}"),
+                    _ => return None,
+                };
+                Some(ManifestUpdate {
+                    table,
+                    name: entry.clone(),
+                    from: lockfile::constraint_text(constraint),
+                    to,
+                })
+            })
+    })
+    .collect()
+}
+
 /// The lock the manifest resolves to now, and how it differs from `previous`,
 /// with nothing written. Resolving keeps the versions `previous` chose where
 /// they still fit; every chosen archive is fetched and hashed.
@@ -131,20 +350,25 @@ pub(super) fn relock(
     found: &(PathBuf, Project),
     previous: Option<&Lockfile>,
 ) -> Result<(Lockfile, Vec<LockChange>), LockError> {
-    relock_moving(env, found, previous, &Moving::Nothing)
+    let index = env.load_index(Some(found))?;
+    relock_in(env, &found.1, &index, previous, &Moving::Nothing, &[])
 }
 
-fn relock_moving(
+/// [`relock`] for `project` against `index`, with `moving` letting some
+/// locked versions move, and `pins` naming versions the solver must choose on
+/// top of the manifest's own constraints.
+fn relock_in(
     env: &OpEnv,
-    found: &(PathBuf, Project),
+    project: &Project,
+    index: &Index,
     previous: Option<&Lockfile>,
     moving: &Moving,
+    pins: &[(String, Constraint)],
 ) -> Result<(Lockfile, Vec<LockChange>), LockError> {
-    let project = &found.1;
     let labview = project.labview.as_deref().ok_or(LockError::NoLabview)?;
     let gate = lv_gate(labview)?;
-    let index = env.load_index(Some(found))?;
-    let resolution = resolve(env, project, &index, &preferences(previous, moving), gate)?;
+    let preferences = preferences(previous, moving);
+    let resolution = resolve(env, project, index, &preferences, pins, gate)?;
     let hashes = hash_archives(env, &resolution)?;
     let feeds = index::feeds(&project.resolved_sources()?, project.default_sources);
     let lock = build(project, labview, &resolution, &hashes, &feeds);
@@ -207,19 +431,22 @@ fn lv_gate(labview: &str) -> Result<f64, LockError> {
     }
 }
 
-/// The solver's answer for the manifest's direct and dev dependencies,
-/// keeping the versions in `preferences` where they still fit.
+/// The solver's answer for the manifest's direct and dev dependencies and the
+/// versions in `pins`, keeping the versions in `preferences` where they still
+/// fit.
 fn resolve(
     env: &OpEnv,
     project: &Project,
     index: &Index,
     preferences: &[(String, Version)],
+    pins: &[(String, Constraint)],
     gate: f64,
 ) -> Result<Resolution, LockError> {
     let constraints: Vec<_> = project
         .dependencies
         .iter()
         .chain(&project.dev_dependencies)
+        .chain(pins)
         .cloned()
         .collect();
     solve::solve(&constraints, index, preferences, Some(gate), &env.cancel).map_err(|why| match why
@@ -927,7 +1154,7 @@ mod tests {
             preferred(&Moving::Nothing),
             [pair("alpha"), pair("Beta"), pair("gamma")]
         );
-        let beta = ["beta".to_string()];
+        let beta = [target("beta")];
         assert_eq!(
             preferred(&Moving::Only(&beta)),
             [pair("alpha"), pair("gamma")],
@@ -966,7 +1193,7 @@ mod tests {
         let sink = Recorder::default();
         let again = upgrade(
             &project.env(&sink),
-            &Upgrade::Packages(vec!["Gamma".into()]),
+            &Upgrade::Packages(vec![target("Gamma")]),
         )
         .unwrap();
         assert_eq!(again, moved);
@@ -979,6 +1206,130 @@ mod tests {
             sink.events()
         );
         assert_eq!(std::fs::read(project.lock_path()).unwrap(), written);
+    }
+
+    fn target(text: &str) -> UpgradeTarget {
+        UpgradeTarget::parse(text).unwrap()
+    }
+
+    #[test]
+    fn an_upgrade_target_is_a_name_with_or_without_a_version() {
+        assert_eq!(
+            target("beta"),
+            UpgradeTarget {
+                name: "beta".into(),
+                version: None
+            }
+        );
+        assert_eq!(
+            target(" beta @ 1.5 "),
+            UpgradeTarget {
+                name: "beta".into(),
+                version: Some("1.5".into())
+            }
+        );
+        for not_a_target in ["", "@1.5", "beta@", " @ "] {
+            assert!(
+                UpgradeTarget::parse(not_a_target).is_err(),
+                "{not_a_target:?}"
+            );
+        }
+    }
+
+    fn updates(manifest_text: &str, name: &str, version: &str) -> Vec<(String, String, String)> {
+        constraint_updates(
+            &manifest(manifest_text),
+            name,
+            version,
+            &Version::parse(version),
+        )
+        .into_iter()
+        .map(|update| (update.name, update.from, update.to))
+        .collect()
+    }
+
+    #[test]
+    fn a_constraint_is_rewritten_only_when_it_excludes_the_version_and_keeps_its_kind() {
+        let text = "[dependencies]\nBeta = \">=1.0\"\ngamma = \"1.0\"\nany = \"*\"\n\n\
+                    [dev-dependencies]\nbeta = \"1.2\"\n";
+        // A floor above the version moves down to it; an exact pin moves to it.
+        assert_eq!(
+            updates(text, "beta", "0.9"),
+            [
+                ("Beta".into(), ">=1.0".into(), ">=0.9".into()),
+                ("beta".into(), "1.2".into(), "0.9".into())
+            ],
+            "every table, the name as the manifest spells it"
+        );
+        assert_eq!(
+            updates(text, "gamma", "2.0"),
+            [("gamma".into(), "1.0".into(), "2.0".into())]
+        );
+        // What the constraint admits stays: a floor at or below, the same
+        // exact version (however it is written), and `*`.
+        assert_eq!(updates(text, "gamma", "1.0.0"), []);
+        assert_eq!(
+            updates(text, "beta", "1.2"),
+            [],
+            "a floor admits it and the exact pin is it"
+        );
+        assert_eq!(updates(text, "any", "0.1"), []);
+        assert_eq!(updates(text, "transitive", "2.0"), []);
+    }
+
+    const PINNED_GAMMA: &str = "[project]\nlabview = \"2023\"\n\n[sources]\ndefaults = false\n\n\
+                                [dependencies]\ngamma = \"1.0\"\n";
+
+    #[test]
+    fn a_failed_write_after_the_manifest_was_rewritten_puts_the_manifest_and_the_lock_back() {
+        let project = ProjectDir::new(
+            "upgrade-restore",
+            PINNED_GAMMA,
+            &[("gamma", "1.0", "23.0", ""), ("gamma", "1.5", "23.0", "")],
+        );
+        lock(&project.env(&Recorder::default())).unwrap();
+        let manifest_path = project.root.join(crate::project::FILE_NAME);
+        let (manifest_before, lock_before) = (
+            std::fs::read(&manifest_path).unwrap(),
+            std::fs::read(project.lock_path()).unwrap(),
+        );
+        let upgrade_gamma = Upgrade::Packages(vec![target("gamma@1.5")]);
+
+        // The new lock is staged beside the old one: a folder in that place
+        // fails the write, after the manifest has been written.
+        let staged = project.root.join("lvpm.lock.tmp");
+        std::fs::create_dir(&staged).unwrap();
+        let sink = Recorder::default();
+        let why = upgrade(&project.env(&sink), &upgrade_gamma).unwrap_err();
+        assert!(matches!(why, LockError::Other(_)), "{why:?}");
+        assert_eq!(std::fs::read(&manifest_path).unwrap(), manifest_before);
+        assert_eq!(std::fs::read(project.lock_path()).unwrap(), lock_before);
+        assert!(
+            sink.events()
+                .iter()
+                .all(|event| matches!(event, Event::LockHashing { .. })),
+            "nothing is reported as done: {:?}",
+            sink.events()
+        );
+
+        // The same upgrade, with the write able to succeed, does what the
+        // failed one would have.
+        std::fs::remove_dir(&staged).unwrap();
+        let sink = Recorder::default();
+        upgrade(&project.env(&sink), &upgrade_gamma).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&manifest_path).unwrap(),
+            std::str::from_utf8(&manifest_before)
+                .unwrap()
+                .replace("gamma = \"1.0\"", "gamma = \"1.5\"")
+        );
+        assert!(
+            sink.events().iter().any(|event| matches!(event,
+                Event::ManifestUpdated { name, from, to }
+                    if name == "gamma" && from == "1.0" && to == "1.5")),
+            "{:?}",
+            sink.events()
+        );
     }
 
     // ---- check ----
