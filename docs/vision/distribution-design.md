@@ -11,6 +11,16 @@ The workflow it serves:
 3. publish it to a folder, a hosted feed (GitHub, GitLab, Azure) or a public index;
 4. use it to develop library B or an application.
 
+## Terms
+
+| Term | Meaning here |
+|---|---|
+| **kind** | what a package contains: `source` or `ppl` |
+| **format** | the container: `.lvpkg` or `.vip` |
+| **feed** | any place packages are resolved from (folder, index, OCI registry, GitHub repo); the existing `[sources]` table and `sources.local` setting configure feeds |
+| `lvpm.toml` | the project manifest a developer edits; its `[package]` table describes what to build |
+| `package.toml` | the metadata file `lvpm build` writes inside each `.lvpkg`, generated from `lvpm.toml` |
+
 ## 1. Package: two axes, not one
 
 A package has a **kind** (what is inside) and a **format** (the container).
@@ -19,7 +29,7 @@ They are chosen independently.
 | Kind | Contents | Tag | Python analogue |
 |---|---|---|---|
 | `source` (default) | VIs saved at the declared minimum LabVIEW version, separate compiled code | `lv2021-any` | pure wheel (`py3-none-any`) |
-| `binary` | PPLs, DLLs, .NET assemblies | `lv2024-x64` | platform wheel |
+| `ppl` | PPLs, DLLs, .NET assemblies | `lv2024-x64` | platform wheel |
 
 A LabVIEW source package needs no build step on the consumer's machine, so it is a
 pure wheel rather than an sdist.
@@ -67,7 +77,10 @@ version-map  = "{major}.{minor}.{patch}.{build}"
 What `build` does, in order:
 
 1. Collect files by library membership; stray test VIs do not ship.
-2. Validate without LabVIEW, using the linker-table reader (the `deptree.py` port):
+2. Validate without LabVIEW, using the linker-table reader that
+   [`lvpm check`](../roadmap.md#dependency-analysis-lvpm-check--lvpm-tree)
+   is planned to bring (a Rust port of `tools/deptree.py`, which is not in
+   this repository):
    - every VI is saved at or below `labview`, with compiled code separated;
    - there are no broken links;
    - every external link resolves to `vi.lib`, the package itself, or a declared dependency.
@@ -157,6 +170,8 @@ min-release-age    = "3d"         # cf. uv --exclude-newer
   are never merged, so dependency confusion has nowhere to start.
 - **One version per name per LabVIEW instance**, because LabVIEW has one global namespace.
 - `lvpm.lock` records name, version, feed, SHA-256, signer and provenance subject.
+  This supersedes the roadmap's MD5-based lock; MD5 is kept only to check
+  legacy packages against their index.
   `lvpm sync --locked` and `lvpm lock --check` make CI refuse drift.
 - Credentials come from the platform's own credential chain
   (`gh auth token`, `az acr login`, `CI_JOB_TOKEN`, Docker credential helpers).
@@ -189,6 +204,23 @@ min-release-age    = "3d"         # cf. uv --exclude-newer
 - **NIPM:** drivers and toolkits are machine software. They are declared in
   `[nipm.dependencies]` and checked (**exists**). Installing them could be handed to
   `nipkg` as an explicit, machine-wide opt-in.
+
+## References
+
+External facts this design relies on, as of 2026-10:
+
+- GitHub Packages registries (npm, NuGet, Maven, RubyGems, containers; no
+  generic feed): <https://docs.github.com/en/packages/working-with-a-github-packages-registry>
+- Azure Artifacts feed types: <https://learn.microsoft.com/en-us/azure/devops/artifacts/>
+- OCI artifacts with ORAS: <https://oras.land/>
+- Registry/storage split: Julia's General registry
+  <https://github.com/JuliaRegistries/General>, crates.io index
+  <https://doc.rust-lang.org/cargo/reference/registry-index.html>
+- Trusted Publishing: <https://docs.pypi.org/trusted-publishers/>
+- Sigstore: <https://www.sigstore.dev/>; SLSA provenance: <https://slsa.dev/>
+- GitHub artifact attestations: <https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations>
+- uv `exclude-newer`: <https://docs.astral.sh/uv/reference/settings/#exclude-newer>
+- OSV advisory format: <https://ossf.github.io/osv-schema/>
 
 ## Open questions
 

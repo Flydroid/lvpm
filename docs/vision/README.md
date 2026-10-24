@@ -13,18 +13,19 @@ This folder is this fork's direction. The upstream author's plan stays in
 
 | Step | Command | Where it is |
 |---|---|---|
-| 1. Start a library or app | `lvpm init` | gap |
-| 2. Add dependencies | `lvpm add @org/libA@^1.4` | planned |
-| 3. Develop in an isolated env | `lvpm sync` → `lvpm launch` | **works** (`install` + venv + `launch`) |
-| 4. Build packages | `lvpm build` → `.lvpkg` and/or `.vip` | proposed |
-| 5. Publish | tag → CI signs and publishes | proposed |
-| 6. Build the application | `lvpm build app` + SBOM | gap |
+| 1. Start a library or app | `lvpm init` | planned (M1) |
+| 2. Add dependencies | `lvpm add @org/libA@^1.4` | planned (M1) |
+| 3. Develop in an isolated env | `lvpm install` → `lvpm launch` | **works** (venv + overlay); `sync` planned (M1) |
+| 4. Build packages | `lvpm build` → `.lvpkg` and/or `.vip` | proposed (M2) |
+| 5. Publish | tag → CI signs and publishes | proposed (M3) |
+| 6. Build the application | `lvpm build` with a `.lvproj` build spec, + SBOM | proposed (M2) |
 
 ## Principles
 
 1. **Per project, not per machine.** Every project has its own `.lv-venv`
    and its own LabVIEW process; two projects can use different versions of
-   the same package at the same time.
+   the same package at the same time. (Today a global install of the same
+   package still shadows the venv copy, without a warning.)
 2. **Registry ≠ storage.** Names and hashes live in indexes anyone can host
    or fork; files live wherever the author releases them.
 3. **Verify, don't trust.** SHA-256 pinned in the lock, signatures and
@@ -40,7 +41,7 @@ This folder is this fork's direction. The upstream author's plan stays in
 Each one is usable on its own. Ticks mean done.
 
 **M0 — consume (done)**
-- [x] Install from VIPM/NI indexes and folders, hooks off by default
+- [x] Install from VIPM/NI indexes and folders; hooks run on a developer machine, are skipped in a venv and headless (`--hooks` opts in)
 - [x] Per-project venvs, `lvpm launch`, relink, refresh, headless
 - [x] NIPM dependencies checked
 
