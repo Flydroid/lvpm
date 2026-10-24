@@ -9,6 +9,8 @@ use lvpm_core::{
     version, viserver,
 };
 
+mod render;
+
 use anyhow::{Context, Result, bail, ensure};
 use clap::{Parser, Subcommand};
 use std::collections::HashSet;
@@ -561,6 +563,7 @@ fn load_index(cli: &Cli, manifest: Option<&(PathBuf, project::Project)>) -> Resu
         &repos,
         &config.local_sources,
         defaults,
+        render::sink(),
     )
 }
 

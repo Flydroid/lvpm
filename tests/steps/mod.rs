@@ -1,6 +1,8 @@
 //! The cucumber steps of the characterization features, grouped by what they
-//! do: set a scenario up, work with a venv, run a command, check a recording.
+//! do: set a scenario up, work with a venv, run a command, check a recording,
+//! call core in-process.
 
+pub mod in_process;
 pub mod installation;
 pub mod recording;
 pub mod run;

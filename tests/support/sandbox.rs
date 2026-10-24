@@ -7,7 +7,7 @@
 //! plus an allow-list, so nothing about the machine or its user leaks in.
 
 use super::feed::{Feed, PROJECT_FEED_DIR};
-use super::fixtures::FixturePackage;
+use super::fixtures::{FixturePackage, PACKAGES};
 use super::global;
 use super::golden::Output;
 use super::normalise::{Anchors, normalise};
@@ -18,7 +18,7 @@ use super::venv::{self, LabviewInstall, VENV_DIR};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{LazyLock, Mutex, MutexGuard, PoisonError};
+use std::sync::{LazyLock, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
 use tempfile::TempDir;
 
@@ -116,7 +116,7 @@ struct Learned {
 #[derive(Debug)]
 pub struct Sandbox {
     dir: TempDir,
-    feed: Option<Feed>,
+    feed: OnceLock<Feed>,
     learned: Mutex<Learned>,
 }
 
@@ -125,7 +125,7 @@ impl Sandbox {
         let dir = create_dir_avoiding(&FOREIGN_LISTENERS);
         let sandbox = Sandbox {
             dir,
-            feed: None,
+            feed: OnceLock::new(),
             learned: Mutex::new(Learned::default()),
         };
         for name in [
@@ -170,11 +170,13 @@ impl Sandbox {
     }
 
     pub fn serve_feed(&mut self, packages: &[FixturePackage]) {
-        self.feed = Some(Feed::start(packages));
+        self.feed = OnceLock::from(Feed::start(packages));
     }
 
+    /// The loopback feed: the fixture packages, started on first use unless
+    /// `serve_feed` started another.
     pub fn feed(&self) -> &Feed {
-        self.feed.as_ref().expect("start the loopback feed first")
+        self.feed.get_or_init(|| Feed::start(PACKAGES))
     }
 
     /// Make the working directory a project whose only source is the feed of
@@ -316,7 +318,7 @@ impl Sandbox {
     /// `text` with this sandbox's own paths, address and clock readings
     /// replaced.
     pub fn normalised_text(&self, text: &str) -> String {
-        let origin = self.feed.as_ref().map(Feed::origin);
+        let origin = self.feed.get().map(Feed::origin);
         let temp_dir = std::env::temp_dir();
         let learned = self.learned();
         let mut anchors = Anchors::new(self.root());

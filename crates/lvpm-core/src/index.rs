@@ -8,6 +8,7 @@
 //! and indexes itself from each package's own spec.
 
 use crate::cache::{Cache, LocalEntry, SourceState};
+use crate::events::{Event, EventSink, FeedOutcome};
 use crate::version::{Version, split_id};
 use anyhow::{Context, Result};
 use md5::{Digest, Md5};
@@ -150,7 +151,13 @@ pub(crate) fn is_local_url(url: &str) -> bool {
 }
 
 /// Index every `.vip` in a local package directory from each package's spec.
-fn scan_local_repo(cache: &Cache, dir: &Path, refresh: bool, out: &mut Vec<Entry>) -> Result<()> {
+fn scan_local_repo(
+    cache: &Cache,
+    dir: &Path,
+    refresh: bool,
+    out: &mut Vec<Entry>,
+    sink: &dyn EventSink,
+) -> Result<()> {
     let mut vips: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
         .with_context(|| format!("reading repo directory {}", dir.display()))?
         .flatten()
@@ -184,7 +191,10 @@ fn scan_local_repo(cache: &Cache, dir: &Path, refresh: bool, out: &mut Vec<Entry
             }
             Err(error) => {
                 cache.forget_local(&path)?;
-                eprintln!("  ! ignoring {}: {error:#}", path.display());
+                sink.emit(Event::LocalPackageIgnored {
+                    path,
+                    error: format!("{error:#}"),
+                });
             }
         }
     }
@@ -304,6 +314,7 @@ pub fn load(
     extra: &[String],
     local_sources: &[PathBuf],
     defaults: bool,
+    sink: &dyn EventSink,
 ) -> Result<Index> {
     let mut entries = Vec::new();
     let cache = Cache::open(cache_dir)?;
@@ -319,7 +330,7 @@ pub fn load(
         if !dir.is_dir() {
             anyhow::bail!("local source {} is not a directory", dir.display());
         }
-        scan_local_repo(&cache, dir, refresh, &mut entries)?;
+        scan_local_repo(&cache, dir, refresh, &mut entries, sink)?;
     }
 
     let mut sources: Vec<(String, String)> = match defaults {
@@ -345,7 +356,7 @@ pub fn load(
         .user_agent(concat!("lvpm/", env!("CARGO_PKG_VERSION")))
         .build()?;
     for (url, base) in &sources {
-        let body = feed_body(&cache, &client, url, base, refresh)?;
+        let body = feed_body(&cache, &client, url, base, refresh, sink)?;
         parse_into(&body, base, &mut entries);
     }
 
@@ -363,6 +374,7 @@ fn feed_body(
     url: &str,
     base: &str,
     refresh: bool,
+    sink: &dyn EventSink,
 ) -> Result<String> {
     let st = cache.state(url)?.unwrap_or_default();
     let cached = match &st.sha256 {
@@ -387,20 +399,24 @@ fn feed_body(
             req = req.header(IF_MODIFIED_SINCE, lm);
         }
     }
-    // A cold feed is a few seconds of silence otherwise, and the line has to
-    // reach the terminal before the wait, not after it.
+    // A cold feed is a few seconds of silence otherwise, so the start is
+    // reported before the wait, not after it.
     let started = std::time::Instant::now();
-    match cached.is_some() {
-        true => eprint!("  checking feed {url} ... "),
-        false => eprint!("  downloading feed {url} (first run) ... "),
-    }
-    std::io::Write::flush(&mut std::io::stderr()).ok();
+    sink.emit(Event::FeedCheckStart {
+        url: url.to_string(),
+        first_run: cached.is_none(),
+    });
     let mut resp = req.send().with_context(|| format!("fetching {url}"))?;
 
     if resp.status() == StatusCode::NOT_MODIFIED {
         match cached {
             Some(bytes) => {
-                eprintln!("unchanged ({:.1}s)", started.elapsed().as_secs_f32());
+                sink.emit(Event::FeedChecked {
+                    url: url.to_string(),
+                    outcome: FeedOutcome::Unchanged,
+                    bytes: 0,
+                    elapsed: started.elapsed(),
+                });
                 return Ok(String::from_utf8_lossy(&bytes).into_owned());
             }
             // A 304 carries no body, so one we have nothing cached for (a
@@ -428,11 +444,12 @@ fn feed_body(
         sha256: None,
     };
     let bytes = resp.bytes()?;
-    eprintln!(
-        "{:.1} MB in {:.1}s",
-        bytes.len() as f32 / 1_048_576.0,
-        started.elapsed().as_secs_f32()
-    );
+    sink.emit(Event::FeedChecked {
+        url: url.to_string(),
+        outcome: FeedOutcome::Downloaded,
+        bytes: bytes.len() as u64,
+        elapsed: started.elapsed(),
+    });
     let sha = cache.store(&bytes)?;
     cache.record(
         url,
@@ -533,6 +550,7 @@ fn parse_lv_gate(s: &str) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::events::NullSink;
     use std::io::{Read, Write};
     use std::sync::{Arc, Mutex};
 
@@ -602,6 +620,7 @@ mod tests {
             &[],
             std::slice::from_ref(&packages),
             false,
+            &NullSink,
         )
         .unwrap();
         assert_eq!(idx.entries.len(), 1);
@@ -631,7 +650,8 @@ mod tests {
                 false,
                 &[],
                 std::slice::from_ref(&packages),
-                false
+                false,
+                &NullSink,
             )
             .unwrap()
             .entries
@@ -644,6 +664,7 @@ mod tests {
             &[],
             std::slice::from_ref(&packages),
             false,
+            &NullSink,
         )
         .unwrap();
         assert_eq!(
@@ -665,6 +686,7 @@ mod tests {
             &[],
             std::slice::from_ref(&packages),
             false,
+            &NullSink,
         )
         .unwrap();
         assert_eq!(cached.entries[0].name, "local_thing");
@@ -674,6 +696,7 @@ mod tests {
             &[],
             std::slice::from_ref(&packages),
             false,
+            &NullSink,
         )
         .unwrap();
         assert!(refreshed.entries.is_empty());
@@ -683,6 +706,7 @@ mod tests {
             &[],
             std::slice::from_ref(&packages),
             false,
+            &NullSink,
         )
         .unwrap();
         assert!(invalidated.entries.is_empty());
@@ -694,7 +718,8 @@ mod tests {
                 false,
                 &[],
                 std::slice::from_ref(&packages),
-                false
+                false,
+                &NullSink,
             )
             .unwrap()
             .entries
@@ -702,10 +727,17 @@ mod tests {
         );
         std::fs::write(packages.join("new.vip"), &valid_bytes).unwrap();
         assert_eq!(
-            load(&root.join("cache"), false, &[], &[packages], false)
-                .unwrap()
-                .entries
-                .len(),
+            load(
+                &root.join("cache"),
+                false,
+                &[],
+                &[packages],
+                false,
+                &NullSink,
+            )
+            .unwrap()
+            .entries
+            .len(),
             1
         );
 
@@ -753,7 +785,7 @@ mod tests {
             1
         );
         std::fs::remove_dir_all(&packages).unwrap();
-        let index = load(&root, false, &[], &[], false).unwrap();
+        let index = load(&root, false, &[], &[], false, &NullSink).unwrap();
         let entry = index.best("imported_library", None, None).unwrap();
         assert_eq!(entry.url, format!("cache:{}", imports[0].sha256));
         assert_eq!(
@@ -785,7 +817,7 @@ mod tests {
         let changed = cache_add(&root, &source, false).unwrap();
         assert!(!changed[0].reused);
         assert_ne!(changed[0].sha256, *sha);
-        let index = load(&root, false, &[], &[], false).unwrap();
+        let index = load(&root, false, &[], &[], false, &NullSink).unwrap();
         assert_eq!(
             index
                 .best("imported_library", None, None)
@@ -823,11 +855,11 @@ mod tests {
         let client = Client::new();
 
         assert_eq!(
-            feed_body(&cache, &client, &s.url, "http://b/", false).unwrap(),
+            feed_body(&cache, &client, &s.url, "http://b/", false, &NullSink).unwrap(),
             BODY
         );
         assert_eq!(
-            feed_body(&cache, &client, &s.url, "http://b/", true).unwrap(),
+            feed_body(&cache, &client, &s.url, "http://b/", true, &NullSink).unwrap(),
             BODY
         );
 
@@ -851,7 +883,15 @@ mod tests {
         let s = stub(&[NOT_MODIFIED, OK]);
         let (root, cache) = test_cache("unsolicited-304");
 
-        let body = feed_body(&cache, &Client::new(), &s.url, "http://b/", false).unwrap();
+        let body = feed_body(
+            &cache,
+            &Client::new(),
+            &s.url,
+            "http://b/",
+            false,
+            &NullSink,
+        )
+        .unwrap();
 
         assert_eq!(body, BODY);
         assert_eq!(

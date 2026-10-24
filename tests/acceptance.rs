@@ -26,6 +26,7 @@ use support::sandbox::Sandbox;
 /// add theirs here.
 const FEATURE_FILES: &[&str] = &[
     "tests/features/lvpm-lockfile/slice-1-characterization-harness-and-recorded-cli-output.feature",
+    "tests/features/lvpm-lockfile/slice-3-event-sink-replaces-printing-in-the-moved-modules.feature",
 ];
 const LABVIEW_TAG: &str = "labview";
 const TEST_LABVIEW_ENV_VAR: &str = "LVPM_TEST_LABVIEW";
@@ -41,6 +42,11 @@ pub struct CliWorld {
     /// The first run's output, when a scenario runs a command twice.
     pub first_output: Option<Output>,
     pub comparison: Option<Result<(), String>>,
+    /// The recordings a scenario named, and what their rows printed, in order.
+    pub recordings: Vec<String>,
+    pub row_outputs: Vec<Output>,
+    /// What core reported to the recording sink of an `@core` scenario.
+    pub core_events: Vec<lvpm_core::events::Event>,
 }
 
 impl CliWorld {
@@ -50,6 +56,9 @@ impl CliWorld {
             last_output: None,
             first_output: None,
             comparison: None,
+            recordings: Vec::new(),
+            row_outputs: Vec::new(),
+            core_events: Vec::new(),
         }
     }
 

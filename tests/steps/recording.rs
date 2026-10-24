@@ -85,3 +85,45 @@ async fn comparison_fails(world: &mut CliWorld) {
         "failed for another reason: {message}"
     );
 }
+
+/// The rows of the characterization table that other features re-run, by the
+/// recording each has: the command, as the table of
+/// `slice-1-characterization-harness-and-recorded-cli-output.feature` has it.
+/// A feature that names several runs them in the order it names them, in one
+/// sandbox, so a later row sees what the earlier ones left in the cache.
+const FEED_ROWS: &[(&str, &str)] = &[
+    ("feed-first-run", "lvpm search a"),
+    ("feed-unchanged", "lvpm search a --refresh"),
+];
+
+#[given(expr = "the recordings {string} and {string}")]
+async fn the_recordings(world: &mut CliWorld, first: String, second: String) {
+    world.recordings = vec![first, second];
+}
+
+/// Each row is run in a project using only the loopback feed and an empty cache.
+#[when("those characterization rows run")]
+async fn rows_run(world: &mut CliWorld) {
+    world.sandbox.use_loopback_project();
+    for name in world.recordings.clone() {
+        let (_, command) = FEED_ROWS
+            .iter()
+            .find(|(recording, _)| *recording == name)
+            .unwrap_or_else(|| panic!("no characterization row is recorded as {name}"));
+        world.run(command, None);
+        let output = world.last_output.clone().expect("the row ran");
+        world.row_outputs.push(output);
+    }
+}
+
+// Always a comparison: these rows were recorded by the slice-1 scenarios, and
+// re-running them must never rewrite a recording.
+#[then("both still match")]
+async fn both_still_match(world: &mut CliWorld) {
+    assert_eq!(world.recordings.len(), 2, "two recordings were named");
+    assert_eq!(world.row_outputs.len(), 2, "both rows ran");
+    let golden = Golden::new(golden_dir(), Mode::Compare);
+    for (name, output) in world.recordings.iter().zip(&world.row_outputs) {
+        check_or_panic(&golden, name, output);
+    }
+}

@@ -2,6 +2,7 @@
 //! (the unit tests of this code). Each target uses a different subset.
 #![allow(dead_code, unused_imports)]
 
+pub mod events;
 pub mod feed;
 pub mod fixtures;
 pub mod global;
