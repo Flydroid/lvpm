@@ -95,10 +95,9 @@ Reference and `vipm.toml` comparison: [manifest.md](manifest.md).
 - `[venv]` overrides: `dir`, `vi-server-port`, `bitness`.
 - **`vipm.toml` conversion** — done for `--manifest vipm.toml`
   (`src/vipm_interop.rs`: `labview-version`, exact `[dependencies]`,
-  `[nipm.dependencies]`, a note naming what was not used). Not discovered;
-  whether it should be is an open decision in
-  [manifest.md](manifest.md#to-do). Remaining: `[dev-dependencies]` once
-  groups exist. Mapping in
+  `[dev-dependencies]` as group `dev`, `[nipm.dependencies]`, a note naming
+  what was not used). Not discovered; whether it should be is an open
+  decision in [manifest.md](manifest.md#to-do). Mapping in
   [manifest.md](manifest.md#reading-a-vipmtoml-with-lvpm).
 
 ## Configuration

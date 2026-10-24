@@ -227,16 +227,18 @@ an `lvpm.toml`. Every command that reads one says so:
 
 ```console
 manifest: C:\proj\vipm.toml (VIPM format, converted)
-  not used: project.labview-bitness, dev-dependencies, build.lib
+  not used: project.labview-bitness, build.lib
   labview-version "2024" read as minimum labview = "2024"
+  [dev-dependencies] read as group "dev" (install with --with dev)
 ```
 
-The `not used` line appears only when something was dropped; the last line
-only when the file sets `labview-version`.
+The `not used` line appears only when something was dropped; the last two
+only when the file sets `labview-version` or `[dev-dependencies]`.
 
 ```console
 $ lvpm venv create --manifest vipm.toml        # venv beside it, bound to labview-version or newer
 $ lvpm install --manifest vipm.toml            # its [dependencies], into that venv
+$ lvpm install --manifest vipm.toml --with dev # plus its [dev-dependencies], as `vipm install --dev` does
 ```
 
 `venv create --manifest` writes no `lvpm.toml` skeleton: a skeleton is
@@ -249,7 +251,7 @@ written only when `venv create` has no manifest to read.
 | `[project] labview-bitness`                          | Not used. lvpm takes bitness from the selected LabVIEW installation.                            |
 | `[project] description`, `authors`, `license`, ...   | Not used.                                                                                        |
 | `[dependencies] name = "1.2.3.4"`                    | Read as an exact pin. Empty versions and operators (`>=`, `*`, ...) are rejected, as VIPM does. |
-| `[dev-dependencies]`                                 | **Not used**: those packages are not installed. Planned as group `dev`, see below.             |
+| `[dev-dependencies]`                                 | Read as the dependency group `dev`, exact pins; installed with `--with dev`.                   |
 | `[nipm.dependencies]` (string or `{ version, feed }`) | Names reported, not installed.                                                                   |
 | `[nipm.dev-dependencies]`, `[nipm.feeds]`            | Not used.                                                                                        |
 | `[build.*]`                                          | Not used. Building is out of lvpm's scope.                                                      |
@@ -364,8 +366,7 @@ Tracked in [roadmap.md](roadmap.md#the-manifest-and-the-lockfile---wip):
     packages that only unselected groups need.
 - **Per-dependency tables**: `{ version = "...", hooks = "run", source = "..." }`.
 - **`[venv]` overrides**: `dir`, `vi-server-port`, `bitness`.
-- **`vipm.toml` conversion, remaining fields**: `[dev-dependencies]` becomes
-  `[dependency-groups.dev]` once groups exist; `labview-bitness` is checked
+- **`vipm.toml` conversion, remaining fields**: `labview-bitness` is checked
   against the selected target once `[venv] bitness` exists. Writing an
   `lvpm.toml` from the converted result (a one-off migration command) is a
   possible follow-up.

@@ -6,13 +6,16 @@
 //! in docs/manifest.md. Every conversion is announced on stderr, naming the
 //! fields with no lvpm equivalent rather than dropping them silently.
 
-use crate::project::{Constraint, Project};
+use crate::project::{Constraint, Group, Project};
 use crate::version::Version;
 use anyhow::{Context, Result, bail};
 use std::path::Path;
 
 /// VIPM's manifest file name.
 pub const TOML_FILE_NAME: &str = "vipm.toml";
+
+/// The lvpm dependency group VIPM's `[dev-dependencies]` becomes.
+pub const DEV_GROUP: &str = "dev";
 
 /// A converted `vipm.toml`.
 #[derive(Debug)]
@@ -40,6 +43,9 @@ pub fn read_toml(path: &Path) -> Result<Project> {
     if let Some(lv) = &c.project.labview {
         eprintln!("  labview-version {lv:?} read as minimum labview = {lv:?}");
     }
+    if c.project.groups.iter().any(|(n, _)| n == DEV_GROUP) {
+        eprintln!("  [dev-dependencies] read as group {DEV_GROUP:?} (install with --with {DEV_GROUP})");
+    }
     Ok(c.project)
 }
 
@@ -65,6 +71,14 @@ pub fn parse_toml(text: &str) -> Result<Converted> {
                     let s = string(&key, &name, v)?;
                     project.dependencies.push((name, exact(&key, &s)?));
                 }
+            }
+            "dev-dependencies" => {
+                let mut dev = Group::default();
+                for (name, v) in table(&key, value)? {
+                    let s = string(&key, &name, v)?;
+                    dev.dependencies.push((name, exact(&key, &s)?));
+                }
+                project.groups.push((DEV_GROUP.to_string(), dev));
             }
             "nipm" => {
                 for (k, v) in table(&key, value)? {
@@ -158,6 +172,16 @@ path = "InstrumentControl.vipb"
             ]
         );
         assert_eq!(p.nipm, ["ni-daqmx", "ni-visa"]);
+        assert_eq!(
+            p.groups,
+            vec![(
+                "dev".to_string(),
+                Group {
+                    include: vec![],
+                    dependencies: vec![("caraya".into(), Constraint::Exact(Version::parse("1.4.5.165")))],
+                }
+            )]
+        );
         assert!(p.sources.is_empty());
         assert!(p.default_sources);
         assert_eq!(
@@ -165,13 +189,24 @@ path = "InstrumentControl.vipb"
             [
                 "project.labview-bitness",
                 "project.description",
-                "dev-dependencies",
                 "nipm.feeds",
                 "nipm.dev-dependencies",
                 "build.main_library",
                 "build.package",
             ]
         );
+    }
+
+    #[test]
+    fn dev_dependencies_are_selected_like_any_lvpm_group() {
+        let c = parse_toml("[dependencies]\na = \"1.0\"\n[dev-dependencies]\nb = \"2.0\"\n").unwrap();
+        let none: Vec<String> = Vec::new();
+        let names = |s: crate::project::Selection| -> Vec<String> {
+            s.dependencies.into_iter().map(|(n, _)| n).collect()
+        };
+        assert_eq!(names(c.project.select(&none, &none, &none).unwrap()), ["a"]);
+        assert_eq!(names(c.project.select(&["dev".into()], &none, &none).unwrap()), ["a", "b"]);
+        assert!(parse_toml("[dev-dependencies]\nb = \">=2.0\"\n").is_err(), "exact only");
     }
 
     #[test]
