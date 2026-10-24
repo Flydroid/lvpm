@@ -1944,11 +1944,12 @@ and version.
 
   - Commits 085d29b, 2b8a900. `render::sink()` is gone; `main()` builds one `OpEnv`. Behaviour change to watch (AC-N1): config and targets now load eagerly for every command, so a malformed config fails commands that never read it before (`targets`, `start`, `list --prefix`). Out-of-list edits: `venv.rs` (probe/locate/find/load take `venv_dir` and `targets`), `events.rs` (`VenvSelected`, `HeadlessInstallationChosen`), `config.rs` (`get(&Config)`), test step visibility. The untagged Slice 6 `targets` row needs a real LabVIEW 2026.
 #### Wave 5
-- [ ] Slice 7: Install and uninstall in core with reusable seams
-  - [ ] Step 7.1: Pure move of install into `ops::install`
-  - [ ] Step 7.2: Split into `resolve_greedy` / `InstallSession` / `apply` / `finish`
-  - [ ] Step 7.3: `ops::uninstall` on the same session
+- [x] Slice 7: Install and uninstall in core with reusable seams
+  - [x] Step 7.1: Pure move of install into `ops::install`
+  - [x] Step 7.2: Split into `resolve_greedy` / `InstallSession` / `apply` / `finish`
+  - [x] Step 7.3: `ops::uninstall` on the same session
 
+  - Commits c84c66d, 46f7b40, 3f348b1. Plan premise corrected: install manifests now record `archive_sha256`, which changes the hashed manifests in `tests/golden/*/tree.txt`; the harness normaliser drops that one field before comparing (pending user acceptance). Unrecorded output changes: relink progress lines start on their own line; a stderr event during an open stdout line ends that line first. `finish` takes `InstallOptions`; the `begin_unpack` seam is the top of `unpack()` in `ops/install.rs`. Dropped the unreachable dry-run hook listing. `reqwest` left the CLI crate, `zip` moved to dev-dependencies. For Slice 10: `InstallPlan` is `entries: Vec<Entry>` and `apply` checks no hash yet. For Slice 14: `cmd_relink` duplicates `finish`'s relink block.
 #### Wave 6
 - [ ] Slice 8: `lvpm lock`
   - [ ] Step 8.1: Lock format
