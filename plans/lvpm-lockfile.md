@@ -1938,10 +1938,11 @@ and version.
 
   - Commits add2df1, e24a3dc, 9fd3d0c. Cancellation is `SolveError::Cancelled` until Slice 15 adds the typed error. Open, pre-existing (in `version.rs`/`index.rs`, not the solver): prerelease tails are discarded so `1.0alpha1 == 1.0alpha2` and dedup can lock the wrong archive; `1.0.0alpha1-1` sorts above `1.0.0`; a `>` requirement is stored as `>=`. Gate messages truncate LabVIEW minor versions (`25.3` shows as 2025). Decide before Slice 8 writes locks.
 #### Wave 4
-- [ ] Slice 6: `OpEnv` and query operations in core
-  - [ ] Step 6.1: `OpEnv`, destination and index loading
-  - [ ] Step 6.2: Query commands return data
+- [x] Slice 6: `OpEnv` and query operations in core
+  - [x] Step 6.1: `OpEnv`, destination and index loading
+  - [x] Step 6.2: Query commands return data
 
+  - Commits 085d29b, 2b8a900. `render::sink()` is gone; `main()` builds one `OpEnv`. Behaviour change to watch (AC-N1): config and targets now load eagerly for every command, so a malformed config fails commands that never read it before (`targets`, `start`, `list --prefix`). Out-of-list edits: `venv.rs` (probe/locate/find/load take `venv_dir` and `targets`), `events.rs` (`VenvSelected`, `HeadlessInstallationChosen`), `config.rs` (`get(&Config)`), test step visibility. The untagged Slice 6 `targets` row needs a real LabVIEW 2026.
 #### Wave 5
 - [ ] Slice 7: Install and uninstall in core with reusable seams
   - [ ] Step 7.1: Pure move of install into `ops::install`
