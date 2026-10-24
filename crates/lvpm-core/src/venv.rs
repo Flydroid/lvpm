@@ -78,12 +78,6 @@ impl Venv {
     pub(crate) fn ini_path(&self) -> PathBuf {
         self.dir.join(".lvpm").join("labview.ini")
     }
-
-    /// The one line every venv-mode command prints first, so an implicit
-    /// lookup is never silent about what it found.
-    pub fn banner(&self) -> String {
-        format!("venv: {}  [{}]", self.dir.display(), self.target.label())
-    }
 }
 
 /// What the nearest project at or above a directory amounts to.
@@ -99,12 +93,8 @@ pub enum Found {
 }
 
 /// Walk up from `cwd` to the first venv or manifest, whichever comes first.
-pub fn probe(cwd: &Path) -> Result<Found> {
-    let venv_dir = config::load()?.venv_dir;
-    Ok(probe_in(cwd, &venv_dir))
-}
-
-fn probe_in(cwd: &Path, venv_dir: &Path) -> Found {
+/// `venv_dir` is the configured venv directory, relative to a project.
+pub fn probe(cwd: &Path, venv_dir: &Path) -> Found {
     for dir in cwd.ancestors() {
         if binding_path(&dir.join(venv_dir)).is_file() {
             return Found::Venv(dir.to_path_buf());
@@ -121,8 +111,8 @@ fn probe_in(cwd: &Path, venv_dir: &Path) -> Found {
 /// rather than a fall-through to the installation — installing globally when
 /// the user believes they are installing into a project is the one outcome
 /// that must never happen quietly.
-pub(crate) fn locate(cwd: &Path) -> Result<Option<PathBuf>> {
-    match probe(cwd)? {
+pub(crate) fn locate(cwd: &Path, venv_dir: &Path) -> Result<Option<PathBuf>> {
+    match probe(cwd, venv_dir) {
         Found::Venv(dir) => Ok(Some(dir)),
         Found::ManifestOnly(dir) => bail!(
             "{} has a {} but no venv\n\
@@ -135,21 +125,27 @@ pub(crate) fn locate(cwd: &Path) -> Result<Option<PathBuf>> {
 }
 
 /// The venv a command means, if any: `--project` names the repo outright,
-/// otherwise it is looked up from `cwd`.
-pub fn find(project: Option<&Path>, cwd: &Path) -> Result<Option<Venv>> {
+/// otherwise it is looked up from `cwd`. `targets` are the LabVIEW
+/// installations detected on this machine.
+pub fn find(
+    project: Option<&Path>,
+    cwd: &Path,
+    venv_dir: &Path,
+    targets: &[LvTarget],
+) -> Result<Option<Venv>> {
     match project {
-        Some(repo) => load(repo).map(Some),
-        None => match locate(cwd)? {
-            Some(repo) => load(&repo).map(Some),
+        Some(repo) => load(repo, venv_dir, targets).map(Some),
+        None => match locate(cwd, venv_dir)? {
+            Some(repo) => load(&repo, venv_dir, targets).map(Some),
             None => Ok(None),
         },
     }
 }
 
-/// Read a venv's binding and find the LabVIEW it names on this machine.
-pub(crate) fn load(repo: &Path) -> Result<Venv> {
+/// Read a venv's binding and find the LabVIEW it names among `targets`.
+pub(crate) fn load(repo: &Path, venv_dir: &Path, targets: &[LvTarget]) -> Result<Venv> {
     let repo = std::path::absolute(repo)?;
-    let dir = repo.join(config::load()?.venv_dir);
+    let dir = repo.join(venv_dir);
     let bp = binding_path(&dir);
     let text = std::fs::read_to_string(&bp).with_context(|| {
         format!(
@@ -160,9 +156,10 @@ pub(crate) fn load(repo: &Path) -> Result<Venv> {
     let b: Binding =
         serde_json::from_str(&text).with_context(|| format!("reading {}", bp.display()))?;
 
-    let target = target::detect()?
-        .into_iter()
+    let target = targets
+        .iter()
         .find(|t| t.key() == b.target_key && t.path == Path::new(&b.target_path))
+        .cloned()
         .ok_or_else(|| {
             anyhow!(
                 "this venv is bound to {} at {}, which is not installed here\n\
@@ -337,23 +334,28 @@ mod tests {
         std::fs::create_dir_all(&deep).unwrap();
 
         // Neither manifest nor venv anywhere above: not a project.
-        assert!(locate(&deep).unwrap().is_none());
+        let venv_dir = Path::new(config::DEFAULT_VENV_DIR);
+        assert!(locate(&deep, venv_dir).unwrap().is_none());
 
         // A manifest with no venv is a project that has not been set up —
         // an error, never a silent fall-through to the global install. The
         // probe underneath still names the repo, for the headless case.
         std::fs::write(repo.join(project::FILE_NAME), "[project]\n").unwrap();
-        assert!(locate(&deep).is_err());
-        assert!(
-            matches!(probe_in(&deep, Path::new(config::DEFAULT_VENV_DIR)), Found::ManifestOnly(ref d) if d == &repo)
-        );
+        assert!(locate(&deep, venv_dir).is_err());
+        assert!(matches!(probe(&deep, venv_dir), Found::ManifestOnly(ref d) if d == &repo));
 
         // Once created, found from anywhere below.
-        let venv_dir = repo.join(config::DEFAULT_VENV_DIR);
-        std::fs::create_dir_all(venv_dir.join(".lvpm")).unwrap();
-        std::fs::write(binding_path(&venv_dir), "{}").unwrap();
-        assert_eq!(locate(&deep).unwrap().as_deref(), Some(repo.as_path()));
-        assert_eq!(locate(&repo).unwrap().as_deref(), Some(repo.as_path()));
+        let created = repo.join(venv_dir);
+        std::fs::create_dir_all(created.join(".lvpm")).unwrap();
+        std::fs::write(binding_path(&created), "{}").unwrap();
+        assert_eq!(
+            locate(&deep, venv_dir).unwrap().as_deref(),
+            Some(repo.as_path())
+        );
+        assert_eq!(
+            locate(&repo, venv_dir).unwrap().as_deref(),
+            Some(repo.as_path())
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }

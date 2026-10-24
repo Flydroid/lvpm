@@ -62,6 +62,14 @@ pub enum Event {
     // ---- viserver ----
     /// A LabVIEW is being started on an installation, to get its VI Server.
     LabviewStarting { labview: String, port: u16 },
+
+    // ---- ops::env ----
+    /// A command that named no destination found a venv and uses it, so an
+    /// implicit lookup is never silent about what it found.
+    VenvSelected { dir: PathBuf, labview: String },
+    /// A headless machine's project has a manifest and no venv, so the
+    /// installation itself is used. `repo` is the project's directory.
+    HeadlessInstallationChosen { repo: PathBuf, labview: String },
 }
 
 /// How a feed answered.

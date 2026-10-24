@@ -10,7 +10,7 @@ const VI_FIXTURE: &str = "lvpm_vi_fixture";
 use cucumber::{given, then};
 
 #[given("a LabVIEW 2026 installation")]
-async fn labview_installation(world: &mut CliWorld) {
+pub(super) async fn labview_installation(world: &mut CliWorld) {
     world.sandbox.detect_labview();
 }
 

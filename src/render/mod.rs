@@ -6,6 +6,7 @@
 //! the wording of that module's events; this file routes events to them and
 //! owns the two streams.
 
+mod env;
 mod index;
 mod launch;
 mod relink;
@@ -14,7 +15,7 @@ mod viserver;
 
 use lvpm_core::events::{Event, EventSink};
 use std::io::Write;
-use std::sync::{LazyLock, Mutex, PoisonError};
+use std::sync::{Mutex, PoisonError};
 
 /// The stream an event is written to. Each event goes to exactly one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +53,9 @@ impl Renderer {
             }
             Event::VenvLabviewStarting { .. } => launch::render(self, event),
             Event::LabviewStarting { .. } => viserver::render(self, event),
+            Event::VenvSelected { .. } | Event::HeadlessInstallationChosen { .. } => {
+                env::render(self, event)
+            }
         }
     }
 
@@ -105,6 +109,17 @@ impl Renderer {
 /// The sink the CLI hands to core: a renderer on the process's own streams.
 pub struct CliSink(Mutex<Renderer>);
 
+impl CliSink {
+    /// The CLI has one terminal, so it makes one sink and hands it to
+    /// everything, through the `OpEnv`.
+    pub fn stdio() -> CliSink {
+        CliSink(Mutex::new(Renderer::new(
+            Box::new(std::io::stdout()),
+            Box::new(std::io::stderr()),
+        )))
+    }
+}
+
 impl EventSink for CliSink {
     fn emit(&self, event: Event) {
         self.0
@@ -112,17 +127,6 @@ impl EventSink for CliSink {
             .unwrap_or_else(PoisonError::into_inner)
             .render(&event);
     }
-}
-
-/// The CLI has one terminal, so it has one sink.
-pub fn sink() -> &'static CliSink {
-    static SINK: LazyLock<CliSink> = LazyLock::new(|| {
-        CliSink(Mutex::new(Renderer::new(
-            Box::new(std::io::stdout()),
-            Box::new(std::io::stderr()),
-        )))
-    });
-    &SINK
 }
 
 #[cfg(test)]

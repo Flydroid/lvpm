@@ -26,7 +26,7 @@ async fn loopback_feed(world: &mut CliWorld) {
 }
 
 #[given("a project using only the loopback feed")]
-async fn loopback_project(world: &mut CliWorld) {
+pub(super) async fn loopback_project(world: &mut CliWorld) {
     world.sandbox.use_loopback_project();
 }
 
@@ -41,7 +41,7 @@ async fn catalog_project(world: &mut CliWorld) {
 }
 
 #[given("no project")]
-async fn no_project(world: &mut CliWorld) {
+pub(super) async fn no_project(world: &mut CliWorld) {
     let manifest = world
         .sandbox
         .work_dir()
@@ -50,7 +50,7 @@ async fn no_project(world: &mut CliWorld) {
 }
 
 #[given("beta installed in dest")]
-async fn beta_installed_in_loopback_project(world: &mut CliWorld) {
+pub(super) async fn beta_installed_in_loopback_project(world: &mut CliWorld) {
     world.sandbox.use_loopback_project();
     world
         .sandbox
@@ -58,19 +58,19 @@ async fn beta_installed_in_loopback_project(world: &mut CliWorld) {
 }
 
 #[given("an empty dest")]
-async fn empty_dest(world: &mut CliWorld) {
+pub(super) async fn empty_dest(world: &mut CliWorld) {
     world.sandbox.make_empty_dest();
 }
 
 #[given("venv.dir set to .venv")]
-async fn venv_dir_set(world: &mut CliWorld) {
+pub(super) async fn venv_dir_set(world: &mut CliWorld) {
     world
         .sandbox
         .setup_lvpm(&["config", "set", "venv.dir", ".venv"]);
 }
 
 #[given("a folder with alpha 1.0")]
-async fn folder_with_alpha(world: &mut CliWorld) {
+pub(super) async fn folder_with_alpha(world: &mut CliWorld) {
     world.sandbox.make_folder_with_alpha();
 }
 

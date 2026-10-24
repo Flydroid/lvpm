@@ -2,6 +2,7 @@
 //! do: set a scenario up, work with a venv, run a command, check a recording,
 //! call core in-process.
 
+pub mod destination;
 pub mod in_process;
 pub mod installation;
 pub mod manifest;

@@ -33,6 +33,7 @@ const FEATURE_FILES: &[&str] = &[
     "tests/features/lvpm-lockfile/slice-3-event-sink-replaces-printing-in-the-moved-modules.feature",
     "tests/features/lvpm-lockfile/slice-4-manifest-editing-and-dev-dependencies.feature",
     "tests/features/lvpm-lockfile/slice-5-pubgrub-solver.feature",
+    "tests/features/lvpm-lockfile/slice-6-openv-and-query-operations-in-core.feature",
 ];
 const LABVIEW_TAG: &str = "labview";
 const TEST_LABVIEW_ENV_VAR: &str = "LVPM_TEST_LABVIEW";
@@ -57,6 +58,8 @@ pub struct CliWorld {
     pub manifest: steps::manifest::ManifestState,
     /// What an `@core` solver scenario has set up and seen.
     pub solver: steps::solver::SolverState,
+    /// What an `@core` destination scenario has set up and seen.
+    pub destination: steps::destination::DestinationState,
 }
 
 impl CliWorld {
@@ -71,6 +74,7 @@ impl CliWorld {
             core_events: Vec::new(),
             manifest: Default::default(),
             solver: Default::default(),
+            destination: Default::default(),
         }
     }
 

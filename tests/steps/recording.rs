@@ -1,5 +1,6 @@
 //! Steps that compare what a command did with a recording.
 
+use super::{setup, venv};
 use crate::CliWorld;
 use crate::support::golden::{Golden, Mode, Output};
 use crate::support::sandbox::ALTERED_RECORDINGS_DIR;
@@ -35,23 +36,26 @@ async fn both_equal_recordings(world: &mut CliWorld, first: String, second: Stri
 
 /// For output that lists things the machine decides, such as `lvpm targets`:
 /// only the lines about what the scenario cares for are recorded.
-#[then(expr = "the output lines mentioning {string} equal the recording {string}")]
-async fn lines_mentioning_equal_recording(world: &mut CliWorld, mention: String, name: String) {
-    let output = world.last_output.as_ref().expect("a command was run");
+fn only_lines_mentioning(output: &Output, mention: &str) -> Output {
     let kept: String = output
         .stdout
         .lines()
-        .filter(|line| line.contains(&mention))
+        .filter(|line| line.contains(mention))
         .map(|line| format!("{line}\n"))
         .collect();
-    let filtered = Output {
+    Output {
         stdout: kept,
         ..output.clone()
-    };
+    }
+}
+
+#[then(expr = "the output lines mentioning {string} equal the recording {string}")]
+async fn lines_mentioning_equal_recording(world: &mut CliWorld, mention: String, name: String) {
+    let output = world.last_output.as_ref().expect("a command was run");
     check_or_panic(
         &Golden::new(golden_dir(), Mode::from_env()),
         &name,
-        &filtered,
+        &only_lines_mentioning(output, &mention),
     );
 }
 
@@ -136,4 +140,101 @@ async fn output_equals_recording(world: &mut CliWorld, name: String) {
     if let Err(why) = Golden::new(golden_dir(), Mode::Compare).check_streams(&name, output) {
         panic!("{why}");
     }
+}
+
+/// How a row's setup is written in the characterization table.
+#[derive(Clone, Copy)]
+enum Setup {
+    LoopbackProject,
+    BetaInstalledInDest,
+    EmptyDest,
+    NoProject,
+    NoProjectWithLabview,
+    VenvDirSet,
+    FolderWithAlpha,
+}
+
+/// A row of the characterization table that later features re-run: the setup
+/// and command it has there, the recording it is compared with, and the lines
+/// of the output the recording keeps (all of them when none is named).
+struct Row {
+    name: &'static str,
+    setup: Setup,
+    command: &'static str,
+    only_lines_mentioning: Option<&'static str>,
+}
+
+const fn row(name: &'static str, setup: Setup, command: &'static str) -> Row {
+    Row {
+        name,
+        setup,
+        command,
+        only_lines_mentioning: None,
+    }
+}
+
+/// The rows with no file listing, as
+/// `slice-1-characterization-harness-and-recorded-cli-output.feature` has them.
+const ROWS: &[Row] = &[
+    Row {
+        only_lines_mentioning: Some("LabVIEW 2026"),
+        ..row("targets", Setup::NoProjectWithLabview, "lvpm targets")
+    },
+    row("search-a", Setup::LoopbackProject, "lvpm search a"),
+    row("search-none", Setup::LoopbackProject, "lvpm search zzz"),
+    row(
+        "list-beta",
+        Setup::BetaInstalledInDest,
+        "lvpm list --prefix dest",
+    ),
+    row("list-empty", Setup::EmptyDest, "lvpm list --prefix dest"),
+    row(
+        "flags-conflict",
+        Setup::NoProject,
+        "lvpm list --labview-version 2026 --prefix dest",
+    ),
+    row(
+        "config-set",
+        Setup::NoProject,
+        "lvpm config set venv.dir .venv",
+    ),
+    row("config-get", Setup::VenvDirSet, "lvpm config get venv.dir"),
+    row("cache-add", Setup::FolderWithAlpha, "lvpm cache add folder"),
+];
+
+#[when(expr = "the characterization row {string} runs")]
+async fn row_runs(world: &mut CliWorld, name: String) {
+    let row = ROWS
+        .iter()
+        .find(|row| row.name == name)
+        .unwrap_or_else(|| panic!("no characterization row is recorded as {name}"));
+    match row.setup {
+        Setup::LoopbackProject => setup::loopback_project(world).await,
+        Setup::BetaInstalledInDest => setup::beta_installed_in_loopback_project(world).await,
+        Setup::EmptyDest => setup::empty_dest(world).await,
+        Setup::NoProject => setup::no_project(world).await,
+        Setup::NoProjectWithLabview => {
+            setup::no_project(world).await;
+            venv::labview_installation(world).await;
+        }
+        Setup::VenvDirSet => setup::venv_dir_set(world).await,
+        Setup::FolderWithAlpha => setup::folder_with_alpha(world).await,
+    }
+    world.run(row.command, None);
+    if let Some(mention) = row.only_lines_mentioning {
+        let output = world.last_output.as_ref().expect("the row ran");
+        world.last_output = Some(only_lines_mentioning(output, mention));
+    }
+    world.recordings = vec![name];
+}
+
+// Always a comparison: the rows were recorded by the slice-1 scenarios, and
+// re-running one must never rewrite a recording.
+#[then("it still matches")]
+async fn it_still_matches(world: &mut CliWorld) {
+    let [name] = world.recordings.as_slice() else {
+        panic!("one characterization row ran: {:?}", world.recordings);
+    };
+    let output = world.last_output.as_ref().expect("the row ran");
+    check_or_panic(&Golden::new(golden_dir(), Mode::Compare), name, output);
 }
