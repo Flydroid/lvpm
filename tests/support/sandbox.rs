@@ -22,6 +22,7 @@ use lvpm_core::target::{self, LvTarget};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
 use tempfile::TempDir;
@@ -47,6 +48,9 @@ const TEMP_DIR_PREFIX: &str = "lvpm-acceptance-";
 
 /// No lvpm command in the characterization set takes this long; a hang is a bug.
 const RUN_TIMEOUT: Duration = Duration::from_secs(120);
+/// The variable that makes lvpm treat the machine as headless. A child has it
+/// only when its sandbox was told so.
+const HEADLESS_ENV_VAR: &str = "LV_RTE_HEADLESS";
 /// The only variables a child inherits from the test process: enough for
 /// Windows and the Rust runtime to work, and nothing that names a person, a
 /// machine or a configuration.
@@ -129,16 +133,19 @@ fn flag_value<'a>(
 /// own installation.
 ///
 /// The destination is found the way `lvpm` finds it: core's own settling of the
-/// flags, the project's venv and `targets`, which are the machine's. The child
-/// is never headless (it inherits nothing that says so), which is the other way
-/// a project without a venv reaches an installation. The one exception is the
-/// fixture scenario that has proved the installation clean: it may install and
-/// uninstall the fixture package, and nothing else.
+/// flags, the project's venv and `targets`, which are the machine's. A child
+/// is headless only when the sandbox says so (`Sandbox::set_headless`, which
+/// `headless` here must repeat): it inherits nothing that says so. A headless
+/// child is how a project without a venv reaches an installation, so it is
+/// settled that way here too. The one exception is the fixture scenario that
+/// has proved the installation clean: it may install and uninstall the fixture
+/// package, and nothing else.
 pub fn real_installation_risk(
     args: &[&str],
     cwd: &Path,
     targets: &[LvTarget],
     fixture_armed: bool,
+    headless: bool,
 ) -> Option<String> {
     let mut positional: Vec<&str> = Vec::new();
     let mut flags = DestinationFlags::default();
@@ -168,6 +175,7 @@ pub fn real_installation_risk(
     };
     let mut env = OpEnv::new(&sink, config, targets.to_vec(), cwd.to_path_buf());
     env.flags = flags;
+    env.headless = headless;
     // Where it does not resolve, the command fails before it changes anything.
     let Ok(Destination::Global(roots)) = env.destination() else {
         return None;
@@ -210,6 +218,9 @@ pub struct Sandbox {
     learned: Mutex<Learned>,
     /// Folders configured as local sources after the sandbox's own.
     more_local_sources: Mutex<Vec<PathBuf>>,
+    /// Whether the children run with `LV_RTE_HEADLESS` set: only the scenarios
+    /// that ask for it, and only their own children.
+    headless: AtomicBool,
 }
 
 impl Sandbox {
@@ -220,6 +231,7 @@ impl Sandbox {
             feed: OnceLock::new(),
             learned: Mutex::new(Learned::default()),
             more_local_sources: Mutex::new(Vec::new()),
+            headless: AtomicBool::new(false),
         };
         for name in [
             WORK_DIR,
@@ -391,6 +403,16 @@ impl Sandbox {
         self.write_manifest(&manifest);
     }
 
+    /// From now on, run the sandbox's children with `LV_RTE_HEADLESS` set (or
+    /// not). The test process's own environment is never touched.
+    pub fn set_headless(&self, headless: bool) {
+        self.headless.store(headless, Ordering::SeqCst);
+    }
+
+    fn is_headless(&self) -> bool {
+        self.headless.load(Ordering::SeqCst)
+    }
+
     /// Run `lvpm` as a scenario's setup, which must succeed.
     pub fn setup_lvpm(&self, args: &[&str]) {
         let output = self.run_lvpm(args, None);
@@ -419,7 +441,10 @@ impl Sandbox {
     /// (see `real_installation_risk`), whatever scenario asked for it.
     fn refuse_a_real_installation(&self, args: &[&str], targets: &[LvTarget]) {
         let fixture_armed = self.learned().global_fixture_armed;
-        if let Some(why) = real_installation_risk(args, &self.work_dir(), targets, fixture_armed) {
+        let headless = self.is_headless();
+        if let Some(why) =
+            real_installation_risk(args, &self.work_dir(), targets, fixture_armed, headless)
+        {
             panic!("{why}");
         }
     }
@@ -457,6 +482,9 @@ impl Sandbox {
         }
         for name in NO_PROXY_ENV_VARS {
             command.env(name, "");
+        }
+        if self.is_headless() {
+            command.env(HEADLESS_ENV_VAR, "1");
         }
     }
 
@@ -681,7 +709,20 @@ mod tests {
     fn risky(command_line: &str, fixture_armed: bool) -> bool {
         let args: Vec<&str> = command_line.split_whitespace().collect();
         let cwd = tempfile::tempdir().expect("a working directory");
-        real_installation_risk(&args, cwd.path(), &[labview_2026()], fixture_armed).is_some()
+        real_installation_risk(&args, cwd.path(), &[labview_2026()], fixture_armed, false).is_some()
+    }
+
+    /// Would `command_line`, run headless in a project that has a manifest for
+    /// LabVIEW 2026 and no venv, change a real installation?
+    fn risky_headless_in_a_project(command_line: &str) -> bool {
+        let args: Vec<&str> = command_line.split_whitespace().collect();
+        let cwd = tempfile::tempdir().expect("a working directory");
+        std::fs::write(
+            cwd.path().join(MANIFEST_FILE),
+            "[project]\nname = \"demo\"\nlabview = \"2026\"\n",
+        )
+        .expect("write a manifest");
+        real_installation_risk(&args, cwd.path(), &[labview_2026()], false, true).is_some()
     }
 
     #[test]
@@ -771,6 +812,38 @@ mod tests {
                 .iter()
                 .any(|name| name.eq_ignore_ascii_case("LV_RTE_HEADLESS"))
         );
+    }
+
+    #[test]
+    fn a_headless_sync_that_settles_on_the_installation_is_refused_and_one_into_a_prefix_is_not() {
+        // The headless rule sends a project with no venv to the installation.
+        for command in [
+            "sync",
+            "install",
+            "sync --no-locked",
+            "install --labview-version 2026",
+        ] {
+            assert!(risky_headless_in_a_project(command), "{command}");
+        }
+        for command in [
+            "sync --prefix dest",
+            "install --prefix dest",
+            "sync --no-locked --prefix dest",
+        ] {
+            assert!(!risky_headless_in_a_project(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn a_child_has_the_headless_switch_only_when_its_sandbox_was_told_to() {
+        let sandbox = Sandbox::new();
+        let has_switch =
+            |sandbox: &Sandbox| variable(&child_environment(sandbox), HEADLESS_ENV_VAR).is_some();
+        assert!(!has_switch(&sandbox));
+        sandbox.set_headless(true);
+        assert!(has_switch(&sandbox));
+        sandbox.set_headless(false);
+        assert!(!has_switch(&sandbox));
     }
 
     #[test]

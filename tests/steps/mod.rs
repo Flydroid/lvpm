@@ -3,6 +3,7 @@
 //! call core in-process.
 
 pub mod destination;
+pub mod headless;
 pub mod in_process;
 pub mod install;
 pub mod installation;

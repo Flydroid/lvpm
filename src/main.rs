@@ -7,7 +7,7 @@
 use lvpm_core::ops::install::InstallOptions;
 use lvpm_core::ops::relink::RelinkOptions;
 use lvpm_core::ops::route::{self, InstallMode, InstallRequest};
-use lvpm_core::ops::sync::{LockPolicy, SyncOptions};
+use lvpm_core::ops::sync::{LockFlags, SyncOptions, strictness};
 use lvpm_core::ops::{self, Destination, DestinationFlags, OpEnv};
 use lvpm_core::{config, install, launch, project, relink, target, venv, viserver};
 
@@ -115,13 +115,18 @@ impl ApplyArgs {
 /// How `sync`, and `install` with no package in a project, treat lvpm.lock.
 #[derive(clap::Args, Clone)]
 struct SyncArgs {
-    /// Fail, and change nothing, if lvpm.lock is missing or out of date.
-    #[arg(long, conflicts_with = "frozen")]
+    /// Fail, and change nothing, if lvpm.lock is missing or out of date. Where
+    /// LabVIEW runs headless (LV_RTE_HEADLESS is set) this is the default.
+    #[arg(long, conflicts_with_all = ["frozen", "no_locked"])]
     locked: bool,
     /// Sync lvpm.lock as it is, even out of date, without making a new one.
     /// Fails if there is no lock.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "no_locked")]
     frozen: bool,
+    /// Make a new lvpm.lock first if it is missing or out of date, even where
+    /// LabVIEW runs headless (LV_RTE_HEADLESS is set) and --locked is the default.
+    #[arg(long)]
+    no_locked: bool,
     /// Leave out the packages that only dev dependencies need, and uninstall
     /// them if they are installed.
     #[arg(long)]
@@ -129,13 +134,18 @@ struct SyncArgs {
 }
 
 impl SyncArgs {
-    fn options(&self, apply: &ApplyArgs) -> SyncOptions {
-        SyncOptions {
-            lock: match (self.locked, self.frozen) {
-                (true, _) => LockPolicy::Locked,
-                (_, true) => LockPolicy::Frozen,
-                _ => LockPolicy::Update,
+    fn options(&self, apply: &ApplyArgs, headless: bool) -> SyncOptions {
+        let strictness = strictness(
+            headless,
+            LockFlags {
+                locked: self.locked,
+                frozen: self.frozen,
+                no_locked: self.no_locked,
             },
+        );
+        SyncOptions {
+            lock: strictness.policy,
+            headless_implied: strictness.implied_by_headless,
             no_dev: self.no_dev,
             install: apply.options(false, false),
         }
@@ -157,7 +167,7 @@ enum Cmd {
     /// package, it syncs the project to lvpm.lock, as `lvpm sync` does.
     Install {
         /// Package to install. Omit it in a project to sync the project.
-        #[arg(conflicts_with_all = ["locked", "frozen", "no_dev"])]
+        #[arg(conflicts_with_all = ["locked", "frozen", "no_locked", "no_dev"])]
         package: Option<String>,
         /// Not supported with a lock: lvpm.lock always holds the full set.
         #[arg(long, value_name = "FILE", conflicts_with = "package")]
@@ -393,7 +403,7 @@ fn main() -> Result<()> {
             match route::install_mode(&env, &request)
                 .map_err(|why| anyhow!(render::sync::route_error(&why)))?
             {
-                InstallMode::Sync => cmd_sync(&env, &sync.options(apply)),
+                InstallMode::Sync => cmd_sync(&env, &sync.options(apply, env.headless)),
                 InstallMode::Additive => ops::install::install(
                     &env,
                     package.as_deref(),
@@ -401,7 +411,7 @@ fn main() -> Result<()> {
                 ),
             }
         }
-        Cmd::Sync { apply, sync } => cmd_sync(&env, &sync.options(apply)),
+        Cmd::Sync { apply, sync } => cmd_sync(&env, &sync.options(apply, env.headless)),
         Cmd::Relink {
             package,
             all,
@@ -479,7 +489,12 @@ fn main() -> Result<()> {
 }
 
 fn cmd_sync(env: &OpEnv, options: &SyncOptions) -> Result<()> {
-    ops::sync::sync(env, options).map_err(|why| anyhow!(render::sync::error(&why)))
+    ops::sync::sync(env, options).map_err(|why| {
+        anyhow!(match options.headless_implied {
+            true => render::sync::headless_error(&why),
+            false => render::sync::error(&why),
+        })
+    })
 }
 
 fn cmd_start(env: &OpEnv, wait: u64) -> Result<()> {

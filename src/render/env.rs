@@ -5,15 +5,9 @@ use lvpm_core::events::Event;
 
 pub(super) fn render(r: &mut Renderer, event: &Event) {
     match event {
-        Event::VenvSelected { dir, labview } => {
-            r.line(Stream::Err, &format!("venv: {}  [{labview}]", dir.display()))
-        }
-        Event::HeadlessInstallationChosen { repo, labview } => r.line(
+        Event::VenvSelected { dir, labview } => r.line(
             Stream::Err,
-            &format!(
-                "headless (LV_RTE_HEADLESS): {} has a manifest and no venv — using {labview} itself",
-                repo.display()
-            ),
+            &format!("venv: {}  [{labview}]", dir.display()),
         ),
         _ => unreachable!("routed here by Renderer::render: {event:?}"),
     }
@@ -36,24 +30,6 @@ mod tests {
         assert_eq!(
             err.text(),
             format!("venv: {}  [LabVIEW 2026 (64-bit)  v26.3]\n", dir.display())
-        );
-        assert_eq!(out.text(), "");
-    }
-
-    #[test]
-    fn a_headless_installation_choice_is_announced_on_stderr() {
-        let (mut renderer, out, err) = renderer();
-        let repo = PathBuf::from("proj");
-        renderer.render(&Event::HeadlessInstallationChosen {
-            repo: repo.clone(),
-            labview: "LabVIEW 2026 (64-bit)  v26.3".into(),
-        });
-        assert_eq!(
-            err.text(),
-            format!(
-                "headless (LV_RTE_HEADLESS): {} has a manifest and no venv — using LabVIEW 2026 (64-bit)  v26.3 itself\n",
-                repo.display()
-            )
         );
         assert_eq!(out.text(), "");
     }

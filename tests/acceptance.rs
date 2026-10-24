@@ -38,8 +38,12 @@ const FEATURE_FILES: &[&str] = &[
     "tests/features/lvpm-lockfile/slice-8-lvpm-lock.feature",
     "tests/features/lvpm-lockfile/slice-9-staleness-and-lvpm-lock-check.feature",
     "tests/features/lvpm-lockfile/slice-10-exact-sync.feature",
+    "tests/features/lvpm-lockfile/slice-11-headless-implies-locked.feature",
 ];
 const LABVIEW_TAG: &str = "labview";
+/// A scenario that needs a later slice, tagged `@pending-<slice>`. It is not
+/// run until that slice removes the tag.
+const PENDING_TAG_PREFIX: &str = "pending-";
 /// A scenario that would change the user's own LabVIEW installation: a sync
 /// takes out every package its lock does not list, so none may run against
 /// one. The harness never runs these, whatever else is set.
@@ -125,11 +129,19 @@ fn has_unsafe_tag(scenario: &Scenario) -> bool {
     scenario.tags.iter().any(|tag| tag == UNSAFE_TAG)
 }
 
+fn has_pending_tag(scenario: &Scenario) -> bool {
+    scenario
+        .tags
+        .iter()
+        .any(|tag| tag.starts_with(PENDING_TAG_PREFIX))
+}
+
 /// How many scenarios of a feature the harness did not run, and why.
 #[derive(Default)]
 struct NotRun {
     labview: usize,
     unsafe_to_run: usize,
+    pending: usize,
 }
 
 /// Whatever a scenario started on its venv is stopped, whether it passed or not.
@@ -151,7 +163,12 @@ fn after_scenario<'a>(
 fn run_feature(path: PathBuf, mode: Mode) -> (NotRun, Result<(), String>) {
     let labview_not_run = Arc::new(AtomicUsize::new(0));
     let unsafe_not_run = Arc::new(AtomicUsize::new(0));
-    let (counted_labview, counted_unsafe) = (labview_not_run.clone(), unsafe_not_run.clone());
+    let pending_not_run = Arc::new(AtomicUsize::new(0));
+    let (counted_labview, counted_unsafe, counted_pending) = (
+        labview_not_run.clone(),
+        unsafe_not_run.clone(),
+        pending_not_run.clone(),
+    );
     let writer = futures::executor::block_on(
         CliWorld::cucumber()
             // `cargo test <filter>` and `cargo test -- --list` hand every test
@@ -170,6 +187,10 @@ fn run_feature(path: PathBuf, mode: Mode) -> (NotRun, Result<(), String>) {
             .filter_run(path, move |_, _, scenario| {
                 if has_unsafe_tag(scenario) {
                     counted_unsafe.fetch_add(1, Ordering::SeqCst);
+                    return false;
+                }
+                if has_pending_tag(scenario) {
+                    counted_pending.fetch_add(1, Ordering::SeqCst);
                     return false;
                 }
                 let runs = runs_labview_scenarios() || !has_labview_tag(scenario);
@@ -191,6 +212,7 @@ fn run_feature(path: PathBuf, mode: Mode) -> (NotRun, Result<(), String>) {
     let not_run = NotRun {
         labview: labview_not_run.load(Ordering::SeqCst),
         unsafe_to_run: unsafe_not_run.load(Ordering::SeqCst),
+        pending: pending_not_run.load(Ordering::SeqCst),
     };
     (not_run, outcome)
 }
@@ -220,12 +242,13 @@ fn run_features() {
         eprintln!("{banner}");
     }
     let mut failures = Vec::new();
-    let (mut labview_not_run, mut unsafe_not_run) = (0, 0);
+    let (mut labview_not_run, mut unsafe_not_run, mut pending_not_run) = (0, 0, 0);
     for feature in FEATURE_FILES {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(feature);
         let (not_run, outcome) = run_feature(path, mode);
         labview_not_run += not_run.labview;
         unsafe_not_run += not_run.unsafe_to_run;
+        pending_not_run += not_run.pending;
         if let Err(why) = outcome {
             failures.push(format!("{feature}: {why}"));
         }
@@ -239,6 +262,11 @@ fn run_features() {
         println!(
             "{unsafe_not_run} @{UNSAFE_TAG} scenarios never run: each would change a real \
              LabVIEW installation"
+        );
+    }
+    if pending_not_run > 0 {
+        println!(
+            "{pending_not_run} @{PENDING_TAG_PREFIX}* scenarios not run: they wait for a later slice"
         );
     }
     if !failures.is_empty() {

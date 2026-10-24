@@ -12,11 +12,11 @@ Feature: On a headless machine a missing or outdated lock fails the job
     And dest and lvpm.lock are unchanged
 
     Examples:
-      | state   | command      | hint                                                  |
+      | state   | command      | hint                                                                   |
       | missing | lvpm sync    | no lvpm.lock: run lvpm lock locally and commit it, or pass --no-locked |
       | missing | lvpm install | no lvpm.lock: run lvpm lock locally and commit it, or pass --no-locked |
-      | stale   | lvpm sync    | lvpm.lock is out of date                              |
-      | stale   | lvpm install | lvpm.lock is out of date                              |
+      | stale   | lvpm sync    | lvpm.lock is out of date                                               |
+      | stale   | lvpm install | lvpm.lock is out of date                                               |
 
   Scenario: a current lock syncs and still prints the note
     Given a current lock
@@ -46,7 +46,12 @@ Feature: On a headless machine a missing or outdated lock fails the job
     Then it succeeds and lvpm.lock is current afterwards
 
     Examples:
+      | command   |
+      | lvpm lock |
+
+    # `add` and `remove` arrive with Slice 13, which removes this tag.
+    @pending-13
+    Examples:
       | command                        |
-      | lvpm lock                      |
       | lvpm add gamma --prefix dest   |
       | lvpm remove beta --prefix dest |

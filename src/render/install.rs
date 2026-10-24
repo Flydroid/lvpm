@@ -1,6 +1,7 @@
 //! The wording of the install's events: what it reads, what it resolved, what
 //! each package did, and the phases that did not run.
 
+use super::headless;
 use super::hooks::hook_names;
 use super::{Renderer, Stream};
 use lvpm_core::events::{Event, Phase, PlannedFile, SkipReason};
@@ -209,23 +210,13 @@ fn phase_skipped(r: &mut Renderer, phase: Phase, reason: SkipReason, skipped: us
         (Phase::Relink, SkipReason::ScratchDestination) => {
             "\nrelink: skipped — a scratch tree has no LabVIEW to relink with"
         }
-        (Phase::Relink, SkipReason::Headless) => {
-            "\nrelink: skipped — LabVIEW runs headless here (LV_RTE_HEADLESS); a compile or build\n      \
-             resolves the links as it loads. --relink forces the pass, `lvpm relink --all` runs it later."
-        }
+        (phase, SkipReason::Headless) => return headless::phase_skipped(r, phase),
         (Phase::Relink, SkipReason::Declined) => {
             "\nrelink: skipped (--no-relink). These VIs still declare the paths their\n      \
              build machine wrote, so run `lvpm relink <package>` before using them."
         }
         (Phase::Hooks, SkipReason::ScratchDestination) => {
             "\npost-install hooks: skipped — a scratch tree has no LabVIEW to run them"
-        }
-        (Phase::Hooks, SkipReason::Headless) => {
-            "\nhooks: skipped — LabVIEW runs headless here (LV_RTE_HEADLESS). Install hooks mostly add\n      \
-             palettes, menus or markers for the IDE; a package whose hook does real setup needs --hooks."
-        }
-        (Phase::Refresh, SkipReason::Headless) => {
-            "\npalettes and menus: not refreshed — LabVIEW runs headless here (`lvpm refresh` if wanted)"
         }
         _ => return,
     };
@@ -400,6 +391,36 @@ mod tests {
             out,
             "\nrelink: skipped — a scratch tree has no LabVIEW to relink with\n\
              \npost-install hooks: skipped — a scratch tree has no LabVIEW to run them\n"
+        );
+        assert_eq!(err, "");
+    }
+
+    #[test]
+    fn a_phase_skipped_because_labview_runs_headless_says_what_to_do_instead() {
+        let (out, err) = text_of(&[
+            Event::PhaseSkipped {
+                phase: Phase::Relink,
+                reason: SkipReason::Headless,
+                skipped: 1,
+            },
+            Event::PhaseSkipped {
+                phase: Phase::Hooks,
+                reason: SkipReason::Headless,
+                skipped: 1,
+            },
+            Event::PhaseSkipped {
+                phase: Phase::Refresh,
+                reason: SkipReason::Headless,
+                skipped: 1,
+            },
+        ]);
+        assert_eq!(
+            out,
+            "\nrelink: skipped — LabVIEW runs headless here (LV_RTE_HEADLESS); a compile or build\n      \
+             resolves the links as it loads. --relink forces the pass, `lvpm relink --all` runs it later.\n\
+             \nhooks: skipped — LabVIEW runs headless here (LV_RTE_HEADLESS). Install hooks mostly add\n      \
+             palettes, menus or markers for the IDE; a package whose hook does real setup needs --hooks.\n\
+             \npalettes and menus: not refreshed — LabVIEW runs headless here (`lvpm refresh` if wanted)\n"
         );
         assert_eq!(err, "");
     }

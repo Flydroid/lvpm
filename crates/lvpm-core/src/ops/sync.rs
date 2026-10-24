@@ -39,10 +39,51 @@ pub enum LockPolicy {
     Frozen,
 }
 
+/// The lock flags a front end was given.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LockFlags {
+    pub locked: bool,
+    pub frozen: bool,
+    /// Re-lock where a headless machine would otherwise refuse to.
+    pub no_locked: bool,
+}
+
+/// How strictly a sync treats the lock, and whether the machine decided it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Strictness {
+    pub policy: LockPolicy,
+    /// `policy` is [`LockPolicy::Locked`] because LabVIEW runs headless here,
+    /// and no flag asked for it.
+    pub implied_by_headless: bool,
+}
+
+/// What a sync does about the lock, given where it runs and what it was told.
+/// An explicit flag wins: `--frozen`, then `--locked`, then `--no-locked`. With
+/// none, a headless machine is strict, since nobody is there to read a diff of
+/// a lock that changed under a CI job, and a workstation re-locks.
+pub fn strictness(headless: bool, flags: LockFlags) -> Strictness {
+    let (policy, implied_by_headless) = match flags {
+        LockFlags { frozen: true, .. } => (LockPolicy::Frozen, false),
+        LockFlags { locked: true, .. } => (LockPolicy::Locked, false),
+        LockFlags {
+            no_locked: true, ..
+        } => (LockPolicy::Update, false),
+        _ if headless => (LockPolicy::Locked, true),
+        _ => (LockPolicy::Update, false),
+    };
+    Strictness {
+        policy,
+        implied_by_headless,
+    }
+}
+
 /// What a sync is asked, without the flags a front end spells it as.
 #[derive(Debug, Clone, Default)]
 pub struct SyncOptions {
     pub lock: LockPolicy,
+    /// `lock` is [`LockPolicy::Locked`] only because LabVIEW runs headless
+    /// here (see [`strictness`]): the sync says so before anything else.
+    pub headless_implied: bool,
     /// Leave out the packages that only dev dependencies need, and take them
     /// out when they are installed.
     pub no_dev: bool,
@@ -61,6 +102,9 @@ pub struct SyncOptions {
 /// archive fails the sync with the destination as it was. A dry run reports
 /// the plan, and changes nothing.
 pub fn sync(env: &OpEnv, opts: &SyncOptions) -> Result<(), SyncError> {
+    if opts.headless_implied {
+        env.sink.emit(Event::HeadlessImpliesLocked);
+    }
     let found = locking::find_manifest(env)?;
     let (manifest_path, project) = &found;
     env.sink.emit(Event::PhaseStarted {
@@ -1286,6 +1330,113 @@ mod tests {
     fn locking_lock(project: &Scratch) -> Lockfile {
         let sink = Recorder::default();
         locking::lock(&project.sync_env(&sink)).unwrap()
+    }
+
+    #[test]
+    fn strictness_is_set_by_a_flag_and_otherwise_by_where_the_sync_runs() {
+        let flags = |locked, frozen, no_locked| LockFlags {
+            locked,
+            frozen,
+            no_locked,
+        };
+        let is = |policy, implied_by_headless| Strictness {
+            policy,
+            implied_by_headless,
+        };
+        // (headless, locked, frozen, no_locked) -> what the sync does.
+        let matrix = [
+            (
+                false,
+                flags(false, false, false),
+                is(LockPolicy::Update, false),
+            ),
+            (
+                false,
+                flags(true, false, false),
+                is(LockPolicy::Locked, false),
+            ),
+            (
+                false,
+                flags(false, true, false),
+                is(LockPolicy::Frozen, false),
+            ),
+            (
+                false,
+                flags(false, false, true),
+                is(LockPolicy::Update, false),
+            ),
+            (
+                true,
+                flags(false, false, false),
+                is(LockPolicy::Locked, true),
+            ),
+            (
+                true,
+                flags(true, false, false),
+                is(LockPolicy::Locked, false),
+            ),
+            (
+                true,
+                flags(false, true, false),
+                is(LockPolicy::Frozen, false),
+            ),
+            (
+                true,
+                flags(false, false, true),
+                is(LockPolicy::Update, false),
+            ),
+        ];
+        for (headless, given, expected) in matrix {
+            assert_eq!(
+                strictness(headless, given),
+                expected,
+                "{headless} {given:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_flag_that_contradicts_another_loses_to_the_stricter_one() {
+        // The CLI refuses these combinations; core still answers them.
+        let both = |locked, frozen, no_locked| {
+            strictness(
+                true,
+                LockFlags {
+                    locked,
+                    frozen,
+                    no_locked,
+                },
+            )
+            .policy
+        };
+        assert_eq!(both(true, true, false), LockPolicy::Frozen);
+        assert_eq!(both(true, false, true), LockPolicy::Locked);
+        assert_eq!(both(false, true, true), LockPolicy::Frozen);
+    }
+
+    #[test]
+    fn a_sync_that_headless_made_strict_says_so_before_anything_else() {
+        let project = project("headless-note", &["beta"]);
+        let (outcome, events) = project.sync(&SyncOptions {
+            headless_implied: true,
+            ..with(LockPolicy::Locked)
+        });
+        assert!(
+            matches!(outcome, Err(SyncError::Lock(LockError::NoLock { .. }))),
+            "{outcome:?}"
+        );
+        assert_eq!(events.first(), Some(&Event::HeadlessImpliesLocked));
+    }
+
+    #[test]
+    fn a_sync_nothing_made_strict_by_the_machine_says_nothing_about_headless() {
+        let project = project("no-headless-note", &["beta"]);
+        let (outcome, events) = project.sync(&with(LockPolicy::Locked));
+        assert!(outcome.is_err());
+        assert!(
+            !events.contains(&Event::HeadlessImpliesLocked),
+            "{events:?}"
+        );
     }
 
     #[test]

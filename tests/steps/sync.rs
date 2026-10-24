@@ -85,7 +85,7 @@ fn installed_in(dest: &Path) -> Vec<Installed> {
     packages
 }
 
-fn sorted(mut pairs: Vec<(String, String)>) -> Vec<(String, String)> {
+pub(super) fn sorted(mut pairs: Vec<(String, String)>) -> Vec<(String, String)> {
     pairs.sort();
     pairs
 }
@@ -151,7 +151,7 @@ impl CliWorld {
         std::fs::read(self.sandbox.work_dir().join(MANIFEST_FILE)).expect("read the manifest")
     }
 
-    fn installed(&self) -> Vec<(String, String)> {
+    pub(super) fn installed(&self) -> Vec<(String, String)> {
         installed_in(&self.dest_dir())
             .into_iter()
             .map(|package| (package.name, package.version))
@@ -165,7 +165,7 @@ impl CliWorld {
     }
 
     /// `lvpm lock` as setup, remembering the lock it wrote.
-    fn lock_the_project(&mut self) {
+    pub(super) fn lock_the_project(&mut self) {
         self.sandbox.setup_lvpm(&["lock"]);
         self.lock.before = self.lock_bytes();
     }
@@ -184,7 +184,7 @@ impl CliWorld {
     }
 
     /// Remember the destination, the lock and the manifest as they are.
-    fn note_the_project(&mut self) {
+    pub(super) fn note_the_project(&mut self) {
         self.lock.before = self.lock_bytes();
         self.sync.before = Some(Before {
             dest: snapshot(&self.dest_dir()),
@@ -921,7 +921,7 @@ async fn warns_about_an_unresolved_requirement(
 // ---- failures ----
 
 /// What the command printed, without the backticks a hint wraps a command in.
-fn printed_plain(world: &CliWorld) -> String {
+pub(super) fn printed_plain(world: &CliWorld) -> String {
     world.printed().replace('`', "")
 }
 

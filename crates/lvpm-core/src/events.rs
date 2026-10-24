@@ -254,6 +254,10 @@ pub enum Event {
     LockWouldChange { changes: Vec<LockChange> },
 
     // ---- ops::sync ----
+    /// LabVIEW runs headless here, so the sync acts as if `--locked` were
+    /// given: it uses the lock only when it is there and current. The first
+    /// thing a sync says.
+    HeadlessImpliesLocked,
     /// There is no lock to sync from. `dry_run`: one would be made from the
     /// manifest, and none is written.
     SyncLockMissing { path: PathBuf, dry_run: bool },

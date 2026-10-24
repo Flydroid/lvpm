@@ -113,6 +113,23 @@ pub fn error(error: &SyncError) -> String {
     }
 }
 
+/// What `lvpm sync` prints when it fails on a headless machine where only
+/// headless made it `--locked`: for a lock that is missing or out of date, the
+/// way out is to lock where a person is, or to pass `--no-locked`.
+pub fn headless_error(error: &SyncError) -> String {
+    match error {
+        SyncError::Lock(LockError::NoLock { .. }) => {
+            "no lvpm.lock: run `lvpm lock` locally and commit it, or pass --no-locked".to_string()
+        }
+        SyncError::Lock(LockError::Stale(reason)) => format!(
+            "lvpm.lock is out of date: {}\n\
+             next: run `lvpm lock` locally and commit lvpm.lock, or pass --no-locked",
+            stale_reason(reason)
+        ),
+        other => self::error(other),
+    }
+}
+
 fn archives_text(problems: &[LockedArchiveProblem]) -> String {
     let mut text = format!(
         "cannot sync: {} locked archive{} could not be had, and nothing was changed:",
@@ -186,6 +203,7 @@ pub fn route_error(error: &RouteError) -> String {
 mod tests {
     use super::super::tests::renderer;
     use super::*;
+    use lvpm_core::lockfile::StaleReason;
     use std::path::PathBuf;
 
     fn install(name: &str, version: &str) -> SyncStep {
@@ -275,6 +293,35 @@ mod tests {
             out.text(),
             "nothing to do: the destination already matches lvpm.lock\n"
         );
+    }
+
+    #[test]
+    fn a_lock_a_headless_machine_refuses_says_to_lock_locally_or_pass_no_locked() {
+        let missing = headless_error(&SyncError::Lock(LockError::NoLock {
+            path: PathBuf::from("lvpm.lock"),
+        }));
+        assert_eq!(
+            missing,
+            "no lvpm.lock: run `lvpm lock` locally and commit it, or pass --no-locked"
+        );
+        let stale = headless_error(&SyncError::Lock(LockError::Stale(
+            StaleReason::LabviewChanged,
+        )));
+        assert_eq!(
+            stale,
+            "lvpm.lock is out of date: labview changed\n\
+             next: run `lvpm lock` locally and commit lvpm.lock, or pass --no-locked"
+        );
+    }
+
+    #[test]
+    fn a_failure_headless_did_not_cause_reads_as_it_does_anywhere() {
+        let failure = SyncError::Incomplete {
+            done: vec![],
+            left: vec![install("beta", "1.0")],
+            cause: "it broke".into(),
+        };
+        assert_eq!(headless_error(&failure), error(&failure));
     }
 
     #[test]

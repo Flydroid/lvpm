@@ -7,6 +7,7 @@
 //! owns the two streams. `query` words what a query returns instead.
 
 mod env;
+mod headless;
 mod hooks;
 mod index;
 mod install;
@@ -113,8 +114,9 @@ impl Renderer {
             | Event::SyncNothingToDo => sync::render(self, event),
             Event::VenvLabviewStarting { .. } => launch::render(self, event),
             Event::LabviewStarting { .. } => viserver::render(self, event),
-            Event::VenvSelected { .. } | Event::HeadlessInstallationChosen { .. } => {
-                env::render(self, event)
+            Event::VenvSelected { .. } => env::render(self, event),
+            Event::HeadlessInstallationChosen { .. } | Event::HeadlessImpliesLocked => {
+                headless::render(self, event)
             }
         }
     }
