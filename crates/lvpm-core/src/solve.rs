@@ -17,7 +17,7 @@ use pubgrub::{
     Dependencies, DependencyConstraints, DependencyProvider, DerivationTree, External,
     PackageResolutionStatistics, PubGrubError, Ranges,
 };
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::ops::Bound;
 
@@ -240,7 +240,9 @@ impl Provider<'_> {
             })
             .collect();
         unresolved.sort_by_key(|u| (key(&u.name), key(&u.required_by)));
-        unresolved.dedup();
+        // Spellings that differ only in case are one requirement; the first
+        // spelling in file order stays.
+        unresolved.dedup_by_key(|u| (key(&u.name), key(&u.required_by)));
         unresolved
     }
 
@@ -466,18 +468,23 @@ type Tree = DerivationTree<Pkg, Ranges<Version>, Gated>;
 impl Conflict {
     fn explain(tree: &Tree, names: &Names) -> Conflict {
         let mut facts = Vec::new();
-        collect_facts(tree, names, &mut facts);
+        collect_facts(tree, names, &mut HashSet::new(), &mut facts);
         facts.sort_by_key(Fact::rank);
         Conflict { facts }
     }
 }
 
-/// The external incompatibilities at the tree's leaves, once each.
-fn collect_facts(tree: &Tree, names: &Names, facts: &mut Vec<Fact>) {
+/// The external incompatibilities at the tree's leaves, once each. A derived
+/// node that appears more than once in the tree (`shared_id`) is walked the
+/// first time only: its leaves are already collected.
+fn collect_facts(tree: &Tree, names: &Names, walked: &mut HashSet<usize>, facts: &mut Vec<Fact>) {
     let fact = match tree {
         DerivationTree::Derived(derived) => {
-            collect_facts(&derived.cause1, names, facts);
-            collect_facts(&derived.cause2, names, facts);
+            if derived.shared_id.is_some_and(|id| !walked.insert(id)) {
+                return;
+            }
+            collect_facts(&derived.cause1, names, walked, facts);
+            collect_facts(&derived.cause2, names, walked, facts);
             return;
         }
         DerivationTree::External(External::NotRoot(..)) => return,
@@ -774,6 +781,60 @@ mod tests {
                     required_by: "beta".into()
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn requirements_that_differ_only_in_case_are_one_unresolved_entry() {
+        let index = Index {
+            entries: vec![entry("beta", "1.0", &[("Foo", "1.0"), ("foo", "2.0")])],
+        };
+        let resolution = run(&[("beta", "*")], &index, &[], None).expect("solves");
+        assert_eq!(
+            resolution.unresolved,
+            [Unresolved {
+                name: "Foo".into(),
+                required_by: "beta".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn a_shared_subtree_is_walked_once() {
+        use pubgrub::Derived;
+        use std::sync::Arc;
+
+        let index = Index { entries: vec![] };
+        let manifest = manifest(&[("a", "*")]);
+        let names = Names {
+            catalog: &Catalog::new(&index),
+            manifest: &manifest,
+        };
+        let a = || Pkg::Named("a".into());
+        let mut tree = Tree::External(External::FromDependencyOf(
+            Pkg::Root,
+            Ranges::full(),
+            a(),
+            Ranges::full(),
+        ));
+        // Each level uses the level below as both causes: 2^64 walks without
+        // memoisation, 64 with it.
+        for id in 0..64 {
+            let below = Arc::new(tree);
+            tree = Tree::Derived(Derived {
+                terms: Default::default(),
+                shared_id: Some(id),
+                cause1: below.clone(),
+                cause2: below,
+            });
+        }
+        let conflict = Conflict::explain(&tree, &names);
+        assert_eq!(
+            conflict.facts,
+            [Fact::Manifest {
+                package: "a".into(),
+                wanted: "*".into()
+            }]
         );
     }
 
