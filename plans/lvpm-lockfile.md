@@ -1918,9 +1918,10 @@ and version.
   - [x] Step 1.2: Record every CLI output the extraction must preserve
 
 #### Wave 2
-- [ ] Slice 2: Cargo workspace with `lvpm-core`
-  - [ ] Step 2.1: Move the domain modules into `crates/lvpm-core`
-  - [ ] Step 2.2: Dependency-direction and version checks
+- [x] Slice 2: Cargo workspace with `lvpm-core`
+  - [x] Step 2.1: Move the domain modules into `crates/lvpm-core`
+  - [x] Step 2.2: Dependency-direction and version checks
+  - Commits b5be260, 1e67871. Out-of-list edits, justified by the move: `tests/support/fixtures.rs` (VI path), `tests/support/venv.rs` (doc comment). Carried forward: Slice 3.2 must edit `lib.rs` (drop the temporary `disallowed_methods` allow) and `clippy.toml` (add the `std::env` and `Stdio::inherit` entries); Slice 8 adds `errors` to `lib.rs`; Slice 16 fixes the moved `src/*.rs` paths in README.md, PROVENANCE.md and docs/.
 
 #### Wave 3
 - [ ] Slice 3: Event sink replaces printing in the moved modules
