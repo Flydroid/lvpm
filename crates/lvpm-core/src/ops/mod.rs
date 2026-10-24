@@ -5,6 +5,7 @@
 pub mod env;
 pub mod hooks;
 pub mod install;
+pub mod lock;
 pub mod query;
 pub mod refresh;
 pub mod relink;

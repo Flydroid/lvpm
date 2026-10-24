@@ -37,6 +37,7 @@ const HOOK_PLACEHOLDER: &[u8] = b"placeholder for a PostInstall script VI\n";
 const ZIP_ENTRY_MODE: u32 = 0o644;
 
 /// What a package installs.
+#[derive(Debug)]
 pub enum Payload {
     /// One text file, `vi.lib/lvpm_fixture/<name>.txt`.
     Text,
@@ -48,11 +49,13 @@ pub enum Payload {
 }
 
 /// A PostInstall script VI: the path the spec declares, and the file shipped.
+#[derive(Debug)]
 pub struct HookVi {
     pub declared: &'static str,
     pub bytes: &'static [u8],
 }
 
+#[derive(Debug)]
 pub struct FixturePackage {
     pub name: &'static str,
     pub version: &'static str,
@@ -108,6 +111,52 @@ pub const PACKAGES: &[FixturePackage] = &[
             bytes: HOOK_PLACEHOLDER,
         }),
     },
+];
+
+/// What a plain text fixture needs that most do not state: a package with this
+/// name and version, requiring `requires`, for LabVIEW `lv_min` and newer.
+const fn text_package(
+    name: &'static str,
+    version: &'static str,
+    requires: &'static [(&'static str, &'static str)],
+    lv_min: &'static str,
+) -> FixturePackage {
+    FixturePackage {
+        name,
+        version,
+        display_name: name,
+        requires,
+        lv_min,
+        payload: Payload::Text,
+        post_install_hook: None,
+    }
+}
+
+/// What the `lvpm lock` scenarios publish: alpha 1.0 and 2.0, beta 1.0
+/// requiring alpha >= 1.0, gamma 1.0 and 1.5 (which needs LabVIEW 2024), and
+/// caraya 1.0.
+pub const LOCK_PACKAGES: &[FixturePackage] = &[
+    text_package("alpha", "1.0", &[], "20.0"),
+    text_package("alpha", "2.0", &[], "20.0"),
+    text_package("beta", "1.0", &[("alpha", "1.0")], "20.0"),
+    text_package("gamma", "1.0", &[], "20.0"),
+    text_package("gamma", "1.5", &[], "24.0"),
+    text_package("caraya", "1.0", &[], "20.0"),
+];
+
+/// The same beta 1.0, also requiring a package that no source lists.
+pub const BETA_NEEDING_A_MISSING_PACKAGE: FixturePackage = text_package(
+    "beta",
+    "1.0",
+    &[("alpha", "1.0"), ("ni_lib_missing", "1.0")],
+    "20.0",
+);
+
+/// A catalog greedy picking fails on: A 2.0 wants C >= 2.0, and only C 1.0
+/// exists.
+pub const CONFLICTING_PACKAGES: &[FixturePackage] = &[
+    text_package("A", "2.0", &[("C", "2.0")], "20.0"),
+    text_package("C", "1.0", &[], "20.0"),
 ];
 
 /// Packages with real VIs. They are not in any feed: a scenario puts one in
@@ -384,6 +433,42 @@ mod tests {
         assert_ne!(
             package("alpha", "1.0").build_vip(),
             package("alpha", "2.0").build_vip()
+        );
+    }
+
+    #[test]
+    fn the_lock_fixtures_are_built_the_same_every_time_and_no_two_are_alike() {
+        let mut archives = std::collections::HashSet::new();
+        for pkg in LOCK_PACKAGES
+            .iter()
+            .chain(CONFLICTING_PACKAGES)
+            .chain([&BETA_NEEDING_A_MISSING_PACKAGE])
+        {
+            assert_eq!(pkg.build_vip(), pkg.build_vip(), "{} differs", pkg.id());
+            assert!(archives.insert(pkg.build_vip()), "{} repeats", pkg.id());
+        }
+    }
+
+    #[test]
+    fn gamma_1_5_needs_labview_2024_and_the_variant_beta_wants_a_missing_package() {
+        let spec_of = |pkg: &FixturePackage| {
+            let mut archive = ZipArchive::new(Cursor::new(pkg.build_vip())).unwrap();
+            let mut text = String::new();
+            archive
+                .by_name("spec")
+                .unwrap()
+                .read_to_string(&mut text)
+                .unwrap();
+            text
+        };
+        let gamma = LOCK_PACKAGES
+            .iter()
+            .find(|pkg| pkg.name == "gamma" && pkg.version == "1.5")
+            .unwrap();
+        assert!(spec_of(gamma).contains("LabVIEW>=24.0"));
+        assert!(
+            spec_of(&BETA_NEEDING_A_MISSING_PACKAGE)
+                .contains("Requires=\"alpha>=1.0,ni_lib_missing>=1.0\"")
         );
     }
 

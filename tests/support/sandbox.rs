@@ -231,6 +231,35 @@ impl Sandbox {
         std::fs::write(path, package.build_vip()).expect("write the local package");
     }
 
+    /// Take a package out of the folder lvpm reads local packages from.
+    pub fn remove_local_package(&self, package: &FixturePackage) {
+        let path = self
+            .root()
+            .join(LOCAL_PACKAGES_DIR)
+            .join(package.file_name());
+        std::fs::remove_file(path).expect("remove the local package");
+    }
+
+    /// Empty the folder lvpm reads local packages from.
+    pub fn clear_local_packages(&self) {
+        let folder = self.root().join(LOCAL_PACKAGES_DIR);
+        for entry in std::fs::read_dir(&folder).expect("read the local package folder") {
+            std::fs::remove_file(entry.expect("a directory entry").path())
+                .expect("remove a local package");
+        }
+    }
+
+    /// Make the working directory a project that reads only the folder of
+    /// local packages: no hosted source, and not the public feeds. `labview`
+    /// is the oldest LabVIEW it is meant for, if it says.
+    pub fn use_local_project(&self, labview: Option<&str>) {
+        let manifest = match labview {
+            Some(year) => ProjectManifest::new().labview(year),
+            None => ProjectManifest::new(),
+        };
+        self.write_manifest(&manifest);
+    }
+
     /// Run `lvpm` as a scenario's setup, which must succeed.
     pub fn setup_lvpm(&self, args: &[&str]) {
         let output = self.run_lvpm(args, None);
@@ -687,6 +716,34 @@ mod tests {
     #[test]
     fn a_sandbox_without_a_venv_has_a_quiet_port_to_report() {
         assert!(sandbox_with_feed().close_venv_labview());
+    }
+
+    #[test]
+    fn a_local_project_reads_the_local_package_folder_and_no_feed() {
+        let sandbox = sandbox_with_feed();
+        let alpha = FixturePackage::find("alpha", "1.0");
+        let beta = FixturePackage::find("beta", "1.0");
+        sandbox.put_local_package(alpha);
+        sandbox.put_local_package(beta);
+        sandbox.use_local_project(Some("2024"));
+        let manifest = std::fs::read_to_string(sandbox.work_dir().join(MANIFEST_FILE)).unwrap();
+        assert!(manifest.contains("labview = \"2024\""), "{manifest}");
+        let output = sandbox.run_lvpm(&["search", "a"], None);
+        assert_eq!(output.exit_code, 0, "{output:?}");
+        assert!(output.stdout.contains("alpha"), "{output:?}");
+        assert_eq!(sandbox.feed().hits(&index_path(PROJECT_FEED_DIR)), 0);
+        assert_eq!(sandbox.feed().hits(&index_path(NI_FEED_DIR)), 0);
+
+        let folder = sandbox.root().join(LOCAL_PACKAGES_DIR);
+        sandbox.remove_local_package(beta);
+        assert!(!folder.join(beta.file_name()).exists());
+        assert!(folder.join(alpha.file_name()).exists());
+        sandbox.clear_local_packages();
+        assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 0);
+
+        sandbox.use_local_project(None);
+        let manifest = std::fs::read_to_string(sandbox.work_dir().join(MANIFEST_FILE)).unwrap();
+        assert!(!manifest.contains("labview"), "{manifest}");
     }
 
     #[test]

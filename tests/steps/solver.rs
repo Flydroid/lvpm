@@ -109,7 +109,13 @@ fn entries_described(text: &str) -> Vec<Entry> {
     entries
 }
 
-#[given(regex = r#"^(?:the catalog has (?:only )?)?("[^"]+" \d.+)$"#)]
+/// A catalog sentence says only what the clauses say: names, versions and the
+/// few words that join them. Any other word means it is some other step that
+/// merely starts with a name and a version (`"gamma" 1.5 needs LabVIEW 2024
+/// and the project depends on ...`), and it is not this one.
+#[given(
+    regex = r#"^(?:the catalog has (?:only )?)?("[^"]+" \d[\w.\-]*(?:"[^"]*"|\d[\w.\-]*|[\s,<>=]|\b(?:and|requiring|requires|needs|LabVIEW|which|no|source|lists)\b)*)$"#
+)]
 async fn the_catalog(world: &mut CliWorld, text: String) {
     world.solver.entries.extend(entries_described(&text));
 }

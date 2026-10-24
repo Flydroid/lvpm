@@ -6,6 +6,7 @@ pub mod destination;
 pub mod in_process;
 pub mod install;
 pub mod installation;
+pub mod lock;
 pub mod manifest;
 pub mod recording;
 pub mod run;

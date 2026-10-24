@@ -350,6 +350,42 @@ pub fn cache_add(cache_dir: &Path, source: &Path, refresh: bool) -> Result<Vec<I
     Ok(imports)
 }
 
+/// The feeds `load` reads: the public ones unless `defaults` is off, then
+/// each hosted index folder in `extra`, as (index URL, base URL that
+/// `Package.URL` is relative to).
+pub(crate) fn feeds(extra: &[String], defaults: bool) -> Vec<(String, String)> {
+    let mut feeds: Vec<(String, String)> = match defaults {
+        true => SOURCES
+            .iter()
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .collect(),
+        false => Vec::new(),
+    };
+    for repo in extra {
+        let base = if repo.ends_with('/') {
+            repo.clone()
+        } else {
+            format!("{repo}/")
+        };
+        feeds.push((format!("{base}index.vipr"), base));
+    }
+    feeds
+}
+
+/// Where an entry with this `url` came from: the index URL of the feed whose
+/// folder it sits in (the longest match when folders nest), or `local` for a
+/// package folder or an imported archive.
+pub(crate) fn source_of(url: &str, feeds: &[(String, String)]) -> String {
+    if is_local_url(url) {
+        return crate::lockfile::LOCAL_SOURCE.to_string();
+    }
+    feeds
+        .iter()
+        .filter(|(_, base)| url.starts_with(base.as_str()))
+        .max_by_key(|(_, base)| base.len())
+        .map_or_else(|| url.to_string(), |(index_url, _)| index_url.clone())
+}
+
 /// Load public indexes, global local package folders, and hosted manifest sources.
 pub fn load(
     cache_dir: &Path,
@@ -376,22 +412,7 @@ pub fn load(
         scan_local_repo(&cache, dir, refresh, &mut entries, sink)?;
     }
 
-    let mut sources: Vec<(String, String)> = match defaults {
-        true => SOURCES
-            .iter()
-            .map(|(a, b)| (a.to_string(), b.to_string()))
-            .collect(),
-        false => Vec::new(),
-    };
-    for repo in extra {
-        let base = if repo.ends_with('/') {
-            repo.clone()
-        } else {
-            format!("{repo}/")
-        };
-        sources.push((format!("{base}index.vipr"), base));
-    }
-
+    let sources = feeds(extra, defaults);
     if sources.is_empty() {
         return Ok(Index { entries });
     }
@@ -1047,5 +1068,39 @@ Package.Display Name=A Thing
         assert!(restored.requires[0].min_exclusive);
         assert_eq!(restored.requires[0].min.as_ref().unwrap().raw, "1.2");
         assert!(!restored.requires[1].min_exclusive);
+    }
+
+    #[test]
+    fn a_hosted_package_comes_from_the_feed_whose_folder_holds_it() {
+        let feeds = feeds(
+            &[
+                "http://h/feed".to_string(),
+                "http://h/feed/nested/".to_string(),
+            ],
+            false,
+        );
+        assert_eq!(feeds[0].0, "http://h/feed/index.vipr");
+        assert_eq!(
+            source_of("http://h/feed/packages/a-1.0.vip", &feeds),
+            "http://h/feed/index.vipr"
+        );
+        // The deeper folder is the source of what sits in it.
+        assert_eq!(
+            source_of("http://h/feed/nested/packages/a-1.0.vip", &feeds),
+            "http://h/feed/nested/index.vipr"
+        );
+    }
+
+    #[test]
+    fn a_package_folder_and_an_imported_archive_are_both_local() {
+        let feeds = feeds(&[], true);
+        assert_eq!(feeds.len(), SOURCES.len());
+        for url in [
+            r"C:\packages\a-1.0.vip",
+            "/packages/a-1.0.vip",
+            "cache:abcd",
+        ] {
+            assert_eq!(source_of(url, &feeds), "local", "{url}");
+        }
     }
 }

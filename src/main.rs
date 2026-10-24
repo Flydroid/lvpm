@@ -11,7 +11,7 @@ use lvpm_core::{config, install, launch, project, relink, target, venv, viserver
 
 mod render;
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use clap::{Parser, Subcommand};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -236,6 +236,12 @@ enum Cmd {
         /// A `.lvproj` to open in the started LabVIEW.
         lvproj: Option<PathBuf>,
     },
+    /// Resolve lvpm.toml's dependencies and write lvpm.lock: every package, direct
+    /// or transitive, with its exact version, SHA-256 and source.
+    ///
+    /// Commit lvpm.lock with the project. Locking reads the manifest and the
+    /// sources only, never what is installed.
+    Lock,
     /// Show what lvpm has installed into the selected target.
     List,
     /// Search the indexes.
@@ -382,6 +388,9 @@ fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Launch { lvproj } => cmd_launch(&env, lvproj.as_deref()),
+        Cmd::Lock => ops::lock::lock(&env)
+            .map(drop)
+            .map_err(|why| anyhow!(render::lock::error(&why))),
         Cmd::List => {
             print!("{}", render::query::list(&ops::query::list(&env)?));
             Ok(())

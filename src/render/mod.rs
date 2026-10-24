@@ -11,6 +11,7 @@ mod hooks;
 mod index;
 mod install;
 mod launch;
+pub mod lock;
 pub mod query;
 mod refresh;
 mod relink;
@@ -98,6 +99,10 @@ impl Renderer {
             Event::VenvManifestWritten { .. } | Event::VenvRemoved { .. } => {
                 venv::render(self, event)
             }
+            Event::LockHashing { .. }
+            | Event::RequirementUnresolved { .. }
+            | Event::LockChanged { .. }
+            | Event::LockWritten { .. } => lock::render(self, event),
             Event::VenvLabviewStarting { .. } => launch::render(self, event),
             Event::LabviewStarting { .. } => viserver::render(self, event),
             Event::VenvSelected { .. } | Event::HeadlessInstallationChosen { .. } => {

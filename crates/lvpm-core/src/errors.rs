@@ -1,0 +1,43 @@
+//! Errors that carry what went wrong as data.
+//!
+//! The message of each is neutral: it says what failed and names no command or
+//! flag. A front end words the hint that follows, because only it knows what
+//! the user can type.
+
+use crate::solve::Conflict;
+use std::path::PathBuf;
+
+/// Why `lock` wrote no lock.
+#[derive(Debug, thiserror::Error)]
+pub enum LockError {
+    /// There is no `lvpm.toml` at or above `searched_from`.
+    #[error("no lvpm.toml found in {} or above", .searched_from.display())]
+    NoManifest { searched_from: PathBuf },
+    /// The manifest does not say which LabVIEW to lock for.
+    #[error("lvpm.toml has no labview")]
+    NoLabview,
+    /// The manifest's `labview` is not a year.
+    #[error("labview = {value:?} in lvpm.toml is not a year")]
+    LabviewNotAYear { value: String },
+    /// No set of versions satisfies the manifest.
+    #[error("{0}")]
+    Conflict(Conflict),
+    /// Archives that could be neither read from the cache nor fetched, all of
+    /// them: one run reports every one it could not get.
+    #[error("{} archive(s) could not be fetched", .0.len())]
+    ArchivesUnavailable(Vec<ArchiveFailure>),
+    /// The operation's token was cancelled; nothing was written.
+    #[error("locking was cancelled")]
+    Cancelled,
+    /// Anything else that went wrong while reading or writing: its own text.
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+/// One archive that could not be had, and why, in the cause's own words.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchiveFailure {
+    pub name: String,
+    pub version: String,
+    pub reason: String,
+}

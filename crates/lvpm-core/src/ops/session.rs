@@ -21,10 +21,27 @@ use reqwest::blocking::Client;
 use std::path::PathBuf;
 
 /// What fetching an archive needs, opened when the first archive is wanted:
-/// an uninstall never gets here.
-struct Downloads {
+/// an uninstall never gets here. Locking has no destination and so no session;
+/// it fetches through the same thing.
+pub(super) struct Downloads {
     client: Client,
     cache: Cache,
+}
+
+impl Downloads {
+    pub(super) fn open(env: &OpEnv) -> Result<Downloads> {
+        Ok(Downloads {
+            client: Client::builder()
+                .user_agent(concat!("lvpm/", env!("CARGO_PKG_VERSION")))
+                .build()?,
+            cache: Cache::open(&env.config.cache)?,
+        })
+    }
+
+    /// The archive's bytes, from the cache, a local file or the entry's feed.
+    pub(super) fn fetch(&self, entry: &Entry) -> Result<Vec<u8>> {
+        fetch::package(&self.cache, &self.client, entry)
+    }
 }
 
 pub struct InstallSession {
@@ -90,15 +107,9 @@ impl InstallSession {
     /// The archive's bytes, from the cache, a local file or the entry's feed.
     pub fn fetch(&mut self, env: &OpEnv, entry: &Entry) -> Result<Vec<u8>> {
         if self.downloads.is_none() {
-            self.downloads = Some(Downloads {
-                client: Client::builder()
-                    .user_agent(concat!("lvpm/", env!("CARGO_PKG_VERSION")))
-                    .build()?,
-                cache: Cache::open(&env.config.cache)?,
-            });
+            self.downloads = Some(Downloads::open(env)?);
         }
-        let downloads = self.downloads.as_ref().expect("opened above");
-        fetch::package(&downloads.cache, &downloads.client, entry)
+        self.downloads.as_ref().expect("opened above").fetch(entry)
     }
 
     /// Run one hook on the session's VI Server connection, opening it if no

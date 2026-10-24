@@ -7,6 +7,7 @@
 
 pub mod cache;
 pub mod config;
+pub mod errors;
 pub mod fetch;
 pub mod index;
 pub mod install;

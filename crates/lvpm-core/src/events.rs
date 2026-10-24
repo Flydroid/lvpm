@@ -230,6 +230,23 @@ pub enum Event {
         hooks: Vec<String>,
         reason: UnrunReason,
     },
+
+    // ---- ops::lock ----
+    /// An archive is being fetched and hashed for the lock: the `position`th
+    /// of `total` (counting from 1).
+    LockHashing {
+        name: String,
+        version: String,
+        position: usize,
+        total: usize,
+    },
+    /// A requirement of a locked package that no source lists; the lock
+    /// records it as unresolved and goes on.
+    RequirementUnresolved { name: String, required_by: String },
+    /// What the lock written differs by from the one it replaced, by name.
+    LockChanged { changes: Vec<LockChange> },
+    /// The lock is on disk, holding `packages` packages.
+    LockWritten { path: PathBuf, packages: usize },
 }
 
 /// A package at a version, as a plan lists it.
@@ -237,6 +254,25 @@ pub enum Event {
 pub struct PackageRef {
     pub name: String,
     pub version: String,
+}
+
+/// One difference between two locks.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "change", rename_all = "snake_case")]
+pub enum LockChange {
+    Added {
+        name: String,
+        version: String,
+    },
+    Removed {
+        name: String,
+        version: String,
+    },
+    Changed {
+        name: String,
+        from: String,
+        to: String,
+    },
 }
 
 /// A file a dry run would write.

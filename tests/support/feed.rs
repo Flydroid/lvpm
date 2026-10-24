@@ -78,6 +78,8 @@ pub struct Feed {
     addr: SocketAddr,
     hits: Hits,
     stop: Arc<AtomicBool>,
+    /// While set, every archive answers 503 and the listings still answer.
+    archives_refused: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -89,14 +91,16 @@ impl Feed {
         let routes = routes(packages);
         let hits = Hits::default();
         let stop = Arc::new(AtomicBool::new(false));
+        let archives_refused = Arc::new(AtomicBool::new(false));
         let thread = {
-            let (hits, stop) = (hits.clone(), stop.clone());
-            std::thread::spawn(move || serve(listener, &routes, &hits, &stop))
+            let (hits, stop, refused) = (hits.clone(), stop.clone(), archives_refused.clone());
+            std::thread::spawn(move || serve(listener, &routes, &hits, &stop, &refused))
         };
         Feed {
             addr,
             hits,
             stop,
+            archives_refused,
             thread: Some(thread),
         }
     }
@@ -119,6 +123,12 @@ impl Feed {
     /// The value for `HTTP_PROXY`.
     pub fn proxy_url(&self) -> String {
         format!("http://{}", self.addr)
+    }
+
+    /// From now on the feed lists its packages and serves none of them, as a
+    /// source whose archives have gone away does.
+    pub fn refuse_archives(&self) {
+        self.archives_refused.store(true, Ordering::SeqCst);
     }
 
     /// How many requests this path has received, including `304`s.
@@ -238,14 +248,20 @@ fn md5_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
-fn serve(listener: TcpListener, routes: &Routes, hits: &Hits, stop: &AtomicBool) {
+fn serve(
+    listener: TcpListener,
+    routes: &Routes,
+    hits: &Hits,
+    stop: &AtomicBool,
+    archives_refused: &AtomicBool,
+) {
     for stream in listener.incoming() {
         if stop.load(Ordering::SeqCst) {
             break;
         }
         if let Ok(stream) = stream {
             // One bad connection must not take the server down for the rest.
-            handle(stream, routes, hits).ok();
+            handle(stream, routes, hits, archives_refused).ok();
         }
     }
 }
@@ -256,7 +272,12 @@ struct Request {
     if_none_match: Option<String>,
 }
 
-fn handle(mut stream: TcpStream, routes: &Routes, hits: &Hits) -> std::io::Result<()> {
+fn handle(
+    mut stream: TcpStream,
+    routes: &Routes,
+    hits: &Hits,
+    archives_refused: &AtomicBool,
+) -> std::io::Result<()> {
     stream.set_read_timeout(Some(SOCKET_TIMEOUT))?;
     stream.set_write_timeout(Some(SOCKET_TIMEOUT))?;
     let request = read_request(&mut stream)?;
@@ -265,7 +286,11 @@ fn handle(mut stream: TcpStream, routes: &Routes, hits: &Hits) -> std::io::Resul
         .expect("hit counter")
         .entry(request.path.clone())
         .or_default() += 1;
-    let response = respond(&request, routes);
+    let refused = archives_refused.load(Ordering::SeqCst) && request.path.ends_with(".vip");
+    let response = match refused {
+        true => response("503 Service Unavailable", &[], b""),
+        false => respond(&request, routes),
+    };
     stream.write_all(&response)
 }
 
@@ -498,6 +523,24 @@ mod tests {
         assert_eq!(feed.hits("/feed/index.vipr"), 2, "a 304 is still a request");
         assert_eq!(feed.hits("/nope"), 1);
         assert_eq!(feed.hits("/feed/packages/alpha-1.0.vip"), 0);
+    }
+
+    #[test]
+    fn refused_archives_answer_503_while_the_listing_is_still_served() {
+        let feed = Feed::start(PACKAGES);
+        assert_eq!(
+            get(&feed, "/feed/packages/beta-1.0.vip", "").status_line,
+            "HTTP/1.1 200 OK"
+        );
+        feed.refuse_archives();
+        let refused = get(&feed, "/feed/packages/beta-1.0.vip", "");
+        assert_eq!(refused.status_line, "HTTP/1.1 503 Service Unavailable");
+        assert!(refused.body.is_empty());
+        assert_eq!(
+            get(&feed, "/feed/index.vipr", "").status_line,
+            "HTTP/1.1 200 OK"
+        );
+        assert_eq!(feed.hits("/feed/packages/beta-1.0.vip"), 2, "still counted");
     }
 
     #[test]
