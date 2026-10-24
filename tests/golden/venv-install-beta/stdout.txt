@@ -1,8 +1,12 @@
-
-resolved 2 packages:
-  alpha 2.0
-  beta 1.0
-
+adding beta to lvpm.toml and syncing the project to lvpm.lock (to install it without changing the project, pass --prefix, --global or --labview-version)
+no lvpm.lock found: writing one from lvpm.toml (commit lvpm.lock with the project)
+lvpm.toml: added beta = ">=1.0" to [dependencies]
++ alpha 2.0
++ beta 1.0
+wrote <SANDBOX>\work\lvpm.lock (2 packages); commit it with lvpm.toml
+sync: 2 to install
+  install alpha 2.0
+  install beta 1.0
 + alpha 2.0 ... 2 files
 + beta 1.0 ... 2 files
 

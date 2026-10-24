@@ -784,16 +784,18 @@ async fn both_worlds_are_identical(world: &mut CliWorld) {
         "what they print after install's first line"
     );
     assert_eq!(one.stderr, two.stderr);
-    assert_eq!(
-        world.manifest_bytes(),
-        std::fs::read(twin.sandbox.work_dir().join(MANIFEST_FILE)).expect("the manifest"),
-        "the manifests"
-    );
-    assert_eq!(
-        world.lock_bytes(),
-        std::fs::read(twin.sandbox.work_dir().join("lvpm.lock")).ok(),
-        "the locks"
-    );
+    // Each world has a feed of its own, so its address is in both files.
+    let text_of = |sandbox: &Sandbox, file: &str| {
+        let bytes = std::fs::read(sandbox.work_dir().join(file)).expect("a project file");
+        sandbox.normalised_text(&String::from_utf8(bytes).expect("a text file"))
+    };
+    for file in [MANIFEST_FILE, "lvpm.lock"] {
+        assert_eq!(
+            text_of(&world.sandbox, file),
+            text_of(&twin.sandbox, file),
+            "{file}"
+        );
+    }
     assert_eq!(
         world.sandbox.list_files(VENV_DIR),
         twin.sandbox.list_files(VENV_DIR),
