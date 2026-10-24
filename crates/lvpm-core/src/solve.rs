@@ -671,6 +671,24 @@ mod tests {
     }
 
     #[test]
+    fn a_release_is_chosen_over_its_own_prerelease_revision() {
+        let index = Index {
+            entries: vec![
+                entry("foo", "1.0.0alpha1-1", &[]),
+                entry("foo", "1.0.0", &[]),
+            ],
+        };
+        let resolution = run(&[("foo", "*")], &index, &[], None).expect("solves");
+        assert_eq!(chosen(&resolution), [("foo", "1.0.0")]);
+        assert_eq!(
+            index
+                .best("foo", None, None)
+                .map(|e| e.version.raw.as_str()),
+            Some("1.0.0")
+        );
+    }
+
+    #[test]
     fn a_preference_that_no_longer_fits_is_dropped() {
         let index = Index {
             entries: vec![entry("a", "1.0", &[]), entry("a", "2.0", &[])],

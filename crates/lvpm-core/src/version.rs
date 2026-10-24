@@ -3,18 +3,35 @@
 //! Package versions are not semver. OGPT's form is `<version>-<release>`
 //! (`2.3-1`, `1.1-1`, `0.1.0alpha1-1`: release is the packaging revision);
 //! VIPM's is four numeric parts (`1.0.2.3`, `2024.0.3.23`, `6.0.1.20`). Both
-//! live in the public directories.
-//! We normalise to a list of numeric components and compare those, keeping the
-//! original string for display.
+//! live in the public directories. We keep the original string for display.
+//!
+//! The ordering rule. `-` and `.` both separate components, so `-N` is one more
+//! numeric component (`2.3-1` is `2.3.1`). The first component with a
+//! non-numeric tail (`0alpha1` in `0.1.0alpha1-1`) marks a prerelease:
+//!
+//! - the **release numbers** are the components up to and including that one,
+//!   by their leading digits (`0.1.0` for `0.1.0alpha1-1`);
+//! - the **prerelease text** is that component's tail plus every component
+//!   after it, so a `-N` revision after a tail belongs to the prerelease
+//!   (`alpha1-1`), never to the release numbers.
+//!
+//! Versions compare by release numbers first, as integers, a missing trailing
+//! component counting as 0 (`1.0 == 1.0.0`). When those are equal a prerelease
+//! sorts below the release, however many revisions it carries
+//! (`1.0.0alpha1-1 < 1.0.0`), and two prereleases compare by their text, a
+//! letters/digits chunk at a time: letters as text, digits as integers
+//! (`alpha < alpha1 < alpha2 < alpha10 < beta1`), case ignored. A prerelease of
+//! `X` still sorts above anything numerically below `X`, and below `X.1`
+//! (`0.1.0alpha1-1 < 0.1.0.1`).
 
 use std::cmp::Ordering;
 
 #[derive(Debug, Clone, Eq)]
 pub struct Version {
+    /// The release numbers: `[0, 1, 0]` for `0.1.0alpha1-1`.
     parts: Vec<u64>,
-    /// The non-numeric tails (`alpha1` of `0.1.0alpha1`), as comparable chunks.
-    /// `None` is a release. Among versions whose numbers are identical, a
-    /// prerelease sorts below a release and prereleases sort by their chunks.
+    /// The prerelease text (`alpha1-1` of `0.1.0alpha1-1`) as comparable
+    /// chunks; `None` is a release.
     pre: Option<Vec<Chunk>>,
     pub raw: String,
 }
@@ -49,27 +66,36 @@ fn chunks(tail: &str) -> Vec<Chunk> {
     out
 }
 
+fn leading_digits(component: &str) -> &str {
+    &component[..component.bytes().take_while(u8::is_ascii_digit).count()]
+}
+
 impl Version {
     pub fn parse(raw: &str) -> Self {
         let raw = raw.trim();
-        let mut tails: Vec<Chunk> = Vec::new();
-        let mut tailed = false;
-        let parts = raw
-            .replace('-', ".")
-            .split('.')
-            .map(|c| {
-                // take the leading digits: "0alpha1" -> 0, and keep the rest
-                let digits: String = c.chars().take_while(|c| c.is_ascii_digit()).collect();
-                if digits.len() != c.len() {
-                    tailed = true;
-                    tails.extend(chunks(&c[digits.len()..]));
-                }
-                digits.parse::<u64>().unwrap_or(0)
-            })
+        let normalised = raw.replace('-', ".");
+        let components: Vec<&str> = normalised.split('.').collect();
+        // The first component with a tail ends the release numbers.
+        let tailed = components
+            .iter()
+            .position(|c| leading_digits(c).len() != c.len());
+        let release = tailed.map_or(components.len(), |i| i + 1);
+        let parts = components[..release]
+            .iter()
+            .map(|c| leading_digits(c).parse().unwrap_or(0))
             .collect();
+        // Its tail and everything after it (`-1` in `0.1.0alpha1-1`) is the
+        // prerelease's own text, which is why `0.1.0alpha1-1` stays below `0.1.0`.
+        let pre = tailed.map(|i| {
+            let tail = &components[i][leading_digits(components[i]).len()..];
+            std::iter::once(tail)
+                .chain(components[i + 1..].iter().copied())
+                .flat_map(chunks)
+                .collect()
+        });
         Version {
             parts,
-            pre: tailed.then_some(tails),
+            pre,
             raw: raw.to_string(),
         }
     }
@@ -223,6 +249,30 @@ mod tests {
             Version::parse("0.1.0alpha2-1")
         );
         assert!(Version::parse("0.1.0alpha1-1") < Version::parse("0.1.0alpha2-1"));
+    }
+
+    #[test]
+    fn a_prerelease_sorts_below_its_release_even_with_a_revision() {
+        let ladder = [
+            "0.9.9",
+            "1.0.0alpha1",
+            "1.0.0alpha1-1",
+            "1.0.0alpha2-1",
+            "1.0.0",
+            "1.0.0-1",
+            "1.0.1",
+        ]
+        .map(Version::parse);
+        for pair in ladder.windows(2) {
+            assert!(
+                pair[0] < pair[1],
+                "{} should sort below {}",
+                pair[0],
+                pair[1]
+            );
+        }
+        assert!(Version::parse("1.0.0alpha1-1") < Version::parse("1.0.0"));
+        assert!(Version::parse("0.1.0alpha1-1") < Version::parse("0.1.0"));
     }
 
     #[test]
