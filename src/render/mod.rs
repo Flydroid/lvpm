@@ -4,7 +4,8 @@
 //! ended (`  checking feed ... `), so that the end of that line lands on it and
 //! any other output starts on a line of its own. One file per core module holds
 //! the wording of that module's events; this file routes events to them and
-//! owns the two streams. `query` words what a query returns instead.
+//! owns the two streams. `query` words what a query returns instead, and the
+//! `launch`, `venv` and `viserver` files also word what their commands return.
 
 pub mod edit;
 mod env;
@@ -12,15 +13,15 @@ mod headless;
 mod hooks;
 mod index;
 mod install;
-mod launch;
+pub mod launch;
 pub mod lock;
 pub mod query;
 mod refresh;
 mod relink;
 pub mod sync;
 mod uninstall;
-mod venv;
-mod viserver;
+pub mod venv;
+pub mod viserver;
 
 use lvpm_core::events::{Event, EventSink};
 use std::io::Write;
@@ -65,7 +66,8 @@ impl Renderer {
             | Event::RelinkFolderDone { .. }
             | Event::RelinkFolderFailed { .. }
             | Event::RelinkPlanned { .. }
-            | Event::VenvLabviewLeftOpen { .. } => relink::render(self, event),
+            | Event::VenvLabviewLeftOpen { .. }
+            | Event::NothingToRelink { .. } => relink::render(self, event),
             Event::ManifestInUse { .. }
             | Event::InstallTarget { .. }
             | Event::IndexesLoading
@@ -90,7 +92,12 @@ impl Renderer {
             Event::HookStarting { .. }
             | Event::HookRan { .. }
             | Event::HookFailed { .. }
-            | Event::PostInstallHooksStarted { .. } => hooks::render(self, event),
+            | Event::PostInstallHooksStarted { .. }
+            | Event::RerunHooksNothingToDo
+            | Event::RerunHookViGone { .. }
+            | Event::RerunHookStarting { .. }
+            | Event::RerunHookRan { .. }
+            | Event::RerunHookFailed { .. } => hooks::render(self, event),
             Event::RefreshStarted
             | Event::RefreshStepDone { .. }
             | Event::RefreshStepFailed { .. }

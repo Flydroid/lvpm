@@ -9,7 +9,7 @@
 use super::env::{Destination, OpEnv};
 use super::hooks::{HOOK_TIMEOUT_SECS, HookCall, PostInstallHook, hook_action_info};
 use super::refresh::refresh_palettes_and_menus;
-use super::relink::{RelinkOptions, run_relink};
+use super::relink::{RelinkOptions, relink_in_destination};
 use super::session::InstallSession;
 use super::uninstall::uninstall_one;
 use crate::cache::sha256_hex;
@@ -19,11 +19,10 @@ use crate::project::{self, Constraint};
 use crate::spec::Spec;
 use crate::target::Roots;
 use crate::version::Version;
-use crate::{install, launch, relink, spec, viserver};
+use crate::{install, relink, spec};
 use anyhow::{Result, bail, ensure};
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::time::Duration;
 
 type Zip = zip::ZipArchive<std::io::Cursor<Vec<u8>>>;
 
@@ -737,36 +736,14 @@ fn relink_pass(
         env.sink.emit(Event::PhaseStarted {
             phase: Phase::Relink,
         });
-        match session.venv() {
-            // A LabVIEW of the venv's own, started after the files landed so
-            // that it sees them, and closed again unless asked to stay.
-            Some(v) => {
-                let inst = launch::ensure_instance(
-                    v,
-                    true,
-                    Duration::from_secs(180),
-                    env.headless,
-                    env.sink,
-                )?;
-                let outcome = run_relink(env, session.store(), inst.port, &opts.relink, work);
-                if opts.relink.keep_open {
-                    env.sink
-                        .emit(Event::VenvLabviewLeftOpen { port: inst.port });
-                } else {
-                    inst.shutdown_if_spawned();
-                }
-                outcome?;
-            }
-            None => {
-                let port = viserver::ensure_vi_server(
-                    target,
-                    Duration::from_secs(120),
-                    env.headless,
-                    env.sink,
-                )?;
-                run_relink(env, session.store(), port, &opts.relink, work)?;
-            }
-        }
+        relink_in_destination(
+            env,
+            session.venv(),
+            target,
+            session.store(),
+            &opts.relink,
+            work,
+        )?;
     }
     Ok(())
 }

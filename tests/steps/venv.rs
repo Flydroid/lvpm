@@ -15,7 +15,7 @@ pub(super) async fn labview_installation(world: &mut CliWorld) {
 }
 
 #[given("a project requiring LabVIEW 2026")]
-async fn labview_project(world: &mut CliWorld) {
+pub(super) async fn labview_project(world: &mut CliWorld) {
     world.sandbox.detect_labview();
     world.sandbox.use_loopback_project_for_labview(LABVIEW_YEAR);
 }
@@ -52,7 +52,7 @@ fn put_vi_fixture(world: &mut CliWorld, name: &str) {
 /// takes in, instead of an `add` that would write the project's manifest and
 /// lock; the venv wins over the installation it names.
 #[given(expr = "a venv with {word} installed")]
-async fn venv_with_package(world: &mut CliWorld, package: String) {
+pub(super) async fn venv_with_package(world: &mut CliWorld, package: String) {
     venv_for_labview(world).await;
     if FixturePackage::find_vi_package(&package).is_some() {
         put_vi_fixture(world, &package);

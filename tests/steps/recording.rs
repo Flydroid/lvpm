@@ -153,6 +153,9 @@ enum Setup {
     VenvDirSet,
     FolderWithAlpha,
     VenvForLabview,
+    LabviewProject,
+    /// A venv with this package installed, without a relink.
+    VenvWith(&'static str),
 }
 
 /// A row of the characterization table that later features re-run: the setup
@@ -166,6 +169,8 @@ struct Row {
     /// The directory, relative to the project, whose files the row lists after
     /// the command, as the table's `files` column does.
     files: Option<&'static str>,
+    /// What the command's stdin carries: the answer to a prompt.
+    input: Option<&'static str>,
 }
 
 const fn row(name: &'static str, setup: Setup, command: &'static str) -> Row {
@@ -175,6 +180,7 @@ const fn row(name: &'static str, setup: Setup, command: &'static str) -> Row {
         command,
         only_lines_mentioning: None,
         files: None,
+        input: None,
     }
 }
 
@@ -261,6 +267,40 @@ const ROWS: &[Row] = &[
             "lvpm install beta",
         )
     },
+    Row {
+        files: Some(".lv-venv"),
+        ..row("relink-all", Setup::VenvWith("beta"), "lvpm relink --all")
+    },
+    row(
+        "run-hooks",
+        Setup::VenvWith("hooked"),
+        "lvpm run-hooks hooked",
+    ),
+    row("refresh", Setup::VenvForLabview, "lvpm refresh"),
+    row("start", Setup::VenvForLabview, "lvpm start"),
+    row("launch", Setup::VenvForLabview, "lvpm launch"),
+    Row {
+        files: Some(".lv-venv"),
+        ..row(
+            "venv-create",
+            Setup::LabviewProject,
+            "lvpm venv create --labview-version 2026",
+        )
+    },
+    row("venv-status", Setup::VenvForLabview, "lvpm venv status"),
+    Row {
+        files: Some(".lv-venv"),
+        ..row(
+            "venv-remove-yes",
+            Setup::VenvForLabview,
+            "lvpm venv remove --yes",
+        )
+    },
+    Row {
+        files: Some(".lv-venv"),
+        input: Some("n\n"),
+        ..row("venv-remove-no", Setup::VenvForLabview, "lvpm venv remove")
+    },
 ];
 
 #[when(expr = "the characterization row {string} runs")]
@@ -281,8 +321,10 @@ async fn row_runs(world: &mut CliWorld, name: String) {
         Setup::VenvDirSet => setup::venv_dir_set(world).await,
         Setup::FolderWithAlpha => setup::folder_with_alpha(world).await,
         Setup::VenvForLabview => venv::venv_for_labview(world).await,
+        Setup::LabviewProject => venv::labview_project(world).await,
+        Setup::VenvWith(package) => venv::venv_with_package(world, package.to_string()).await,
     }
-    world.run(row.command, None);
+    world.run(row.command, row.input);
     if let Some(files) = row.files {
         run::list_files(world, files.to_string()).await;
     }

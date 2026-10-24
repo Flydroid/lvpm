@@ -41,6 +41,7 @@ const FEATURE_FILES: &[&str] = &[
     "tests/features/lvpm-lockfile/slice-11-headless-implies-locked.feature",
     "tests/features/lvpm-lockfile/slice-12-upgrades.feature",
     "tests/features/lvpm-lockfile/slice-13-lvpm-add-lvpm-remove-install-pkg-routing.feature",
+    "tests/features/lvpm-lockfile/slice-14-remaining-operations-move-to-core.feature",
 ];
 const LABVIEW_TAG: &str = "labview";
 /// A scenario that needs a later slice, tagged `@pending-<slice>`. It is not
@@ -84,6 +85,8 @@ pub struct CliWorld {
     pub sync: steps::sync::SyncState,
     /// What an add or remove scenario has seen of a call into core.
     pub add_remove: steps::add_remove::AddRemoveState,
+    /// What clippy made of core, in the scenario that checks it does no terminal I/O.
+    pub clippy: steps::core_io::ClippyState,
 }
 
 impl CliWorld {
@@ -104,6 +107,7 @@ impl CliWorld {
             staleness: Default::default(),
             sync: Default::default(),
             add_remove: Default::default(),
+            clippy: Default::default(),
         }
     }
 

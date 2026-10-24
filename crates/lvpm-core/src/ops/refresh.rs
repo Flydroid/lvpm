@@ -5,7 +5,18 @@ use super::env::OpEnv;
 use crate::events::Event;
 use crate::refresh;
 use crate::target::LvTarget;
+use anyhow::{Result, bail};
 use std::time::Duration;
+
+/// `lvpm refresh`: rebuild the palettes and menus of the LabVIEW the
+/// destination flags select.
+pub fn refresh(env: &OpEnv, timeout_secs: u64) -> Result<()> {
+    let Some(target) = env.roots()?.target else {
+        bail!("refresh needs a real LabVIEW target, not --prefix");
+    };
+    refresh_palettes_and_menus(env, &target, timeout_secs);
+    Ok(())
+}
 
 /// Rebuild the palettes and the File/Tools/Help menus from what is now on
 /// disk — the last step of an install, after the post-install hooks.
@@ -44,5 +55,20 @@ pub fn refresh_palettes_and_menus(env: &OpEnv, target: &LvTarget, timeout_secs: 
                 error: format!("{e:#}"),
             },
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::testing;
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn a_scratch_prefix_has_no_labview_to_refresh() {
+        let mut env = testing::env(Path::new("."));
+        env.flags.prefix = Some(PathBuf::from("dest"));
+        let why = refresh(&env, 1).unwrap_err().to_string();
+        assert_eq!(why, "refresh needs a real LabVIEW target, not --prefix");
     }
 }

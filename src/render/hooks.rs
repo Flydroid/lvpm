@@ -89,6 +89,23 @@ pub(super) fn render(r: &mut Renderer, event: &Event) {
             error,
             ..
         } => r.line(Stream::Out, &format!("post-uninstall FAILED: {error}")),
+        // `lvpm run-hooks`: the same hook, on a line with no indent.
+        Event::RerunHooksNothingToDo => r.line(
+            Stream::Out,
+            "nothing to do: no package with an extracted PostInstall hook",
+        ),
+        Event::RerunHookViGone { package, vi } => r.line(
+            Stream::Out,
+            &format!(
+                "{package}: extracted hook is gone ({}) — reinstall the package",
+                vi.display()
+            ),
+        ),
+        Event::RerunHookStarting { package } => r.begin(Stream::Out, &format!("{package} ... ")),
+        Event::RerunHookRan { took, .. } => {
+            r.end(Stream::Out, &format!("ok ({:.1}s)", took.as_secs_f64()))
+        }
+        Event::RerunHookFailed { error, .. } => r.end(Stream::Out, &format!("FAILED: {error}")),
         _ => unreachable!("routed here by Renderer::render: {event:?}"),
     }
 }
@@ -164,6 +181,37 @@ mod tests {
              pre-uninstall FAILED: no VI Server — uninstalling anyway\n\
              post-uninstall ok (0.3s)\n\
              post-uninstall FAILED: no VI Server\n"
+        );
+    }
+
+    #[test]
+    fn a_rerun_hook_is_a_line_with_no_indent_begun_before_it_runs_and_ended_after() {
+        let (mut renderer, out, _) = renderer();
+        renderer.render(&Event::RerunHookStarting {
+            package: "alpha".into(),
+        });
+        assert_eq!(out.text(), "alpha ... ");
+        renderer.render(&Event::RerunHookRan {
+            package: "alpha".into(),
+            took: Duration::from_millis(2_000),
+        });
+        renderer.render(&Event::RerunHookStarting {
+            package: "beta".into(),
+        });
+        renderer.render(&Event::RerunHookFailed {
+            package: "beta".into(),
+            error: "no VI Server".into(),
+        });
+        renderer.render(&Event::RerunHookViGone {
+            package: "gamma".into(),
+            vi: std::path::PathBuf::from("gone.vi"),
+        });
+        renderer.render(&Event::RerunHooksNothingToDo);
+        assert_eq!(
+            out.text(),
+            "alpha ... ok (2.0s)\nbeta ... FAILED: no VI Server\n\
+             gamma: extracted hook is gone (gone.vi) — reinstall the package\n\
+             nothing to do: no package with an extracted PostInstall hook\n"
         );
     }
 

@@ -202,6 +202,22 @@ pub enum Event {
     },
     /// The LabVIEW started for a venv relink is left running, as asked.
     VenvLabviewLeftOpen { port: u16 },
+    /// An installed package has no VIs, libraries or LLBs, so `lvpm relink`
+    /// has nothing to do for it.
+    NothingToRelink { package: String, version: String },
+
+    // ---- ops::hooks ----
+    /// `lvpm run-hooks` found no package with an extracted PostInstall hook.
+    RerunHooksNothingToDo,
+    /// A package's extracted PostInstall hook is no longer on disk.
+    RerunHookViGone { package: String, vi: PathBuf },
+    /// `lvpm run-hooks` is about to run a package's PostInstall hook; its line
+    /// ends with [`Event::RerunHookRan`] or [`Event::RerunHookFailed`].
+    RerunHookStarting { package: String },
+    /// The hook ran to the end after `took`.
+    RerunHookRan { package: String, took: Duration },
+    /// The hook could not run or failed. `error` is the cause's own text.
+    RerunHookFailed { package: String, error: String },
 
     // ---- ops::refresh ----
     /// The palettes and menus are being rebuilt.

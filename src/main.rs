@@ -12,14 +12,13 @@ use lvpm_core::ops::relink::RelinkOptions;
 use lvpm_core::ops::route::{self, InstallMode, InstallRequest};
 use lvpm_core::ops::sync::{LockFlags, SyncOptions, strictness};
 use lvpm_core::ops::{self, Destination, DestinationFlags, OpEnv};
-use lvpm_core::{config, install, launch, project, relink, target, venv, viserver};
+use lvpm_core::{config, launch, target, venv, viserver};
 
 mod render;
 
-use anyhow::{Context, Result, anyhow, bail, ensure};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(
@@ -431,7 +430,13 @@ fn main() -> Result<()> {
             print!("{}", render::query::targets(ops::query::targets(&env)));
             Ok(())
         }
-        Cmd::Start { wait } => cmd_start(&env, *wait),
+        Cmd::Start { wait } => {
+            print!(
+                "{}",
+                render::viserver::started(&ops::start::start(&env, *wait)?)
+            );
+            Ok(())
+        }
         Cmd::Install {
             package,
             manifest,
@@ -476,13 +481,13 @@ fn main() -> Result<()> {
             package,
             all,
             relink,
-        } => cmd_relink(&env, package.as_deref(), *all, relink),
+        } => ops::relink::relink(&env, package.as_deref(), *all, &relink.into()),
         Cmd::RunHooks {
             package,
             all,
             timeout,
-        } => cmd_run_hooks(&env, package.as_deref(), *all, *timeout),
-        Cmd::Refresh { timeout } => cmd_refresh(&env, *timeout),
+        } => ops::hooks::run_hooks(&env, package.as_deref(), *all, *timeout),
+        Cmd::Refresh { timeout } => ops::refresh::refresh(&env, *timeout),
         Cmd::Uninstall { package, all } => {
             ops::uninstall::uninstall(&env, package.as_deref(), *all)
         }
@@ -528,7 +533,11 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
-        Cmd::Launch { lvproj } => cmd_launch(&env, lvproj.as_deref()),
+        Cmd::Launch { lvproj } => {
+            let launched = ops::launch_cmd::launch(&env, lvproj.as_deref())?;
+            print!("{}", render::launch::launched(&launched));
+            Ok(())
+        }
         Cmd::Lock {
             check,
             upgrade,
@@ -592,243 +601,19 @@ fn cmd_sync(env: &OpEnv, options: &SyncOptions) -> Result<()> {
     })
 }
 
-fn cmd_start(env: &OpEnv, wait: u64) -> Result<()> {
-    let roots = env.roots()?;
-    let Some(t) = roots.target else {
-        bail!("start needs a real LabVIEW target, not --prefix");
-    };
-    let already = viserver::is_listening(&t);
-    let port = viserver::ensure_vi_server(
-        &t,
-        std::time::Duration::from_secs(wait),
-        env.headless,
-        env.sink,
-    )?;
-    println!(
-        "{} — VI Server answering on port {port}{}",
-        t.label(),
-        if already {
-            " (was already running)"
-        } else {
-            ""
-        }
-    );
-    Ok(())
-}
-
-fn cmd_refresh(env: &OpEnv, timeout: u64) -> Result<()> {
-    let roots = env.roots()?;
-    let Some(t) = roots.target.clone() else {
-        bail!("refresh needs a real LabVIEW target, not --prefix");
-    };
-    ops::refresh::refresh_palettes_and_menus(env, &t, timeout);
-    Ok(())
-}
-
-/// Re-run PostInstall hooks for already-installed packages. The hook VI was
-/// extracted at install time; the package's files are not touched.
-fn cmd_run_hooks(env: &OpEnv, package: Option<&str>, all: bool, timeout: u64) -> Result<()> {
-    let roots = env.roots()?;
-    let Some(t) = roots.target.clone() else {
-        bail!("run-hooks needs a real LabVIEW target, not --prefix");
-    };
-
-    let manifests = if all {
-        install::list_installed(&roots)?
-    } else {
-        let Some(p) = package else {
-            bail!("give a package name, or --all")
-        };
-        vec![install::read_manifest(&roots, p)?]
-    };
-
-    let work: Vec<install::Manifest> = manifests
-        .into_iter()
-        .filter(|m| m.post_install_vi.is_some())
-        .collect();
-    if work.is_empty() {
-        println!("nothing to do: no package with an extracted PostInstall hook");
-        return Ok(());
-    }
-
-    let args = RelinkArgs {
-        timeout,
-        progress: None,
-        keep_open: false,
-    };
-    let mut conn: Option<viserver::Connection> = None;
-    let mut failed = 0usize;
-
-    for m in &work {
-        let vi = PathBuf::from(m.post_install_vi.as_ref().unwrap());
-        if !vi.is_file() {
-            println!(
-                "{}: extracted hook is gone ({}) — reinstall the package",
-                m.name,
-                vi.display()
-            );
-            failed += 1;
-            continue;
-        }
-
-        print!("{} ... ", m.name);
-        std::io::stdout().flush().ok();
-        let info = ops::hooks::hook_action_info(&m.name, m.display_name.as_deref(), &t, &m.files);
-        match ops::hooks::run_hook_vi(env, &mut conn, &t, args.timeout, &vi, &info) {
-            Ok(took) => println!("ok ({:.1}s)", took.as_secs_f64()),
-            Err(e) => {
-                println!("FAILED: {e:#}");
-                failed += 1;
-            }
-        }
-    }
-    if let Some(c) = conn {
-        c.close();
-    }
-    // A hook that writes palette files needs the same refresh an install
-    // gives it, otherwise re-running one by hand fixes nothing visible.
-    ops::refresh::refresh_palettes_and_menus(env, &t, args.timeout);
-    if failed > 0 {
-        bail!("{failed} hook(s) failed");
-    }
-    Ok(())
-}
-
-fn cmd_relink(env: &OpEnv, package: Option<&str>, all: bool, args: &RelinkArgs) -> Result<()> {
-    let dest = env.destination()?;
-    let roots = dest.store();
-    let Some(t) = roots.target.clone() else {
-        bail!("relink needs a real LabVIEW target, not --prefix");
-    };
-    let options = RelinkOptions::from(args);
-    let manifests = match (package, all) {
-        (Some(p), _) => vec![install::read_manifest(&roots, p)?],
-        // Same one pass `install` runs, over everything already installed:
-        // one VI reference, every folder, no package relinked before another
-        // package's files are on disk.
-        (None, true) => install::list_installed(&roots)?,
-        (None, false) => bail!("give a package name, or --all"),
-    };
-    ensure!(
-        !manifests.is_empty(),
-        "no packages are installed in this target"
-    );
-
-    let mut work: Vec<(String, Vec<PathBuf>)> = Vec::new();
-    for m in manifests {
-        // Manifests from before the folders were recorded fall back to the
-        // per-file approximation, which is all they can support.
-        let folders: Vec<PathBuf> = if m.relink_folders.is_empty() {
-            relink::folders_for(&m.files)
-        } else {
-            m.relink_folders.iter().map(PathBuf::from).collect()
-        };
-        if folders.is_empty() {
-            println!(
-                "{} {} installed no VIs, libraries or LLBs — nothing to relink",
-                m.name, m.version
-            );
-            continue;
-        }
-        work.push((m.name, folders));
-    }
-    if work.is_empty() {
-        return Ok(());
-    }
-    match &dest {
-        // Fresh, as on install: a LabVIEW that predates the files on disk
-        // cannot see them, and relinking against what it does see is wrong.
-        Destination::Venv(v) => {
-            let inst = launch::ensure_instance(
-                v,
-                true,
-                std::time::Duration::from_secs(180),
-                env.headless,
-                env.sink,
-            )?;
-            let outcome = ops::relink::run_relink(env, &roots, inst.port, &options, &work);
-            if args.keep_open {
-                println!(
-                    "\nleaving the venv LabVIEW open (--keep-open), VI Server on port {}",
-                    inst.port
-                );
-            } else {
-                inst.shutdown_if_spawned();
-            }
-            outcome
-        }
-        _ => {
-            let port = viserver::ensure_vi_server(
-                &t,
-                std::time::Duration::from_secs(120),
-                env.headless,
-                env.sink,
-            )?;
-            ops::relink::run_relink(env, &roots, port, &options, &work)
-        }
-    }
-}
-
 fn cmd_venv(env: &OpEnv, sub: &VenvCmd) -> Result<()> {
-    let cwd = &env.cwd;
     match sub {
-        VenvCmd::Create => {
-            let start = env.flags.project.clone().unwrap_or_else(|| cwd.clone());
-            let v = venv::create(&start, env.flags.labview_version.as_deref(), env.sink)?;
-            println!("created {}", v.dir.display());
-            println!(
-                "  bound to       {}  ({})",
-                v.target.label(),
-                v.target.path.display()
-            );
-            println!("  VI Server port {}", v.port);
-            println!(
-                "\nnext: `lvpm install` puts {}'s [dependencies] into it, `lvpm launch` starts LabVIEW on it",
-                project::FILE_NAME
-            );
-            Ok(())
-        }
-        VenvCmd::Status => match env.find_venv()? {
-            Some(v) => {
-                let installed = install::list_installed(&v.store())?;
-                println!("{}", v.dir.display());
-                println!("  project        {}", v.repo.display());
-                println!(
-                    "  bound to       {}  ({})",
-                    v.target.label(),
-                    v.target.path.display()
-                );
-                println!("  VI Server port {}", v.port);
-                println!(
-                    "  packages       {} installed, {} not yet relinked",
-                    installed.len(),
-                    installed.iter().filter(|m| !m.relinked).count()
-                );
-                println!(
-                    "  LabVIEW        {}",
-                    if launch::is_listening(v.port) {
-                        "running on this venv"
-                    } else {
-                        "not running on this venv"
-                    }
-                );
-                Ok(())
-            }
-            None => {
-                println!(
-                    "no venv at or above {} — `lvpm venv create` makes one",
-                    cwd.display()
-                );
-                Ok(())
-            }
-        },
+        VenvCmd::Create => print!("{}", render::venv::created(&ops::venv_cmd::create(env)?)),
+        VenvCmd::Status => print!(
+            "{}",
+            render::venv::status(ops::venv_cmd::status(env)?.as_ref(), &env.cwd)
+        ),
         VenvCmd::Remove { yes } => {
-            let Some(v) = env.find_venv()? else {
-                bail!("no venv at or above {}", cwd.display());
-            };
-            venv::remove(&v, *yes || confirm_removal(&v)?, env.sink)
+            let venv = ops::venv_cmd::existing(env)?;
+            ops::venv_cmd::remove(env, &venv, *yes || confirm_removal(&venv)?)?;
         }
     }
+    Ok(())
 }
 
 /// Ask whether to delete the venv: core takes no input of its own (AC-K6).
@@ -840,38 +625,6 @@ fn confirm_removal(v: &venv::Venv) -> Result<bool> {
     let mut line = String::new();
     std::io::stdin().read_line(&mut line)?;
     Ok(line.trim().eq_ignore_ascii_case("y"))
-}
-
-/// Start LabVIEW on the venv. No relinking here — that happened at install —
-/// and no waiting: the IDE is the user's from the moment it appears.
-fn cmd_launch(env: &OpEnv, lvproj: Option<&Path>) -> Result<()> {
-    let Destination::Venv(v) = env.destination()? else {
-        bail!("launch needs a venv: run it inside a project that has one, or pass --project <DIR>");
-    };
-    if launch::is_listening(v.port) {
-        bail!(
-            "a LabVIEW is already running on this venv (VI Server port {}) — open the project from \
-             that window, or close it and launch again",
-            v.port
-        );
-    }
-    let lvproj = match lvproj {
-        Some(p) => {
-            let p = std::path::absolute(p)?;
-            ensure!(p.is_file(), "no such project file: {}", p.display());
-            Some(p)
-        }
-        None => None,
-    };
-    let ini = launch::write_ini(&v)?;
-    launch::spawn(&v, &ini, lvproj.as_deref())?;
-    println!("started {} on {}", v.target.label(), v.dir.display());
-    println!("  ini            {}", ini.display());
-    println!("  VI Server port {}", v.port);
-    if let Some(p) = &lvproj {
-        println!("  opening        {}", p.display());
-    }
-    Ok(())
 }
 
 /// Invoke Application methods by id and print each answer.

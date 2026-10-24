@@ -2,6 +2,20 @@
 
 use super::{Renderer, Stream};
 use lvpm_core::events::Event;
+use lvpm_core::ops::start::Started;
+
+/// What `lvpm start` prints once the VI Server answers.
+pub fn started(started: &Started) -> String {
+    let already = match started.was_running {
+        true => " (was already running)",
+        false => "",
+    };
+    format!(
+        "{} — VI Server answering on port {}{already}\n",
+        started.target.label(),
+        started.port
+    )
+}
 
 pub(super) fn render(r: &mut Renderer, event: &Event) {
     match event {
@@ -17,6 +31,31 @@ pub(super) fn render(r: &mut Renderer, event: &Event) {
 mod tests {
     use super::super::tests::renderer;
     use super::*;
+    use lvpm_core::target::LvTarget;
+    use std::path::PathBuf;
+
+    #[test]
+    fn a_started_labview_is_named_with_its_port_and_whether_it_was_running() {
+        let target = LvTarget {
+            version: 26.3,
+            bitness: 64,
+            path: PathBuf::from("LabVIEW 2026"),
+        };
+        let mut started_labview = Started {
+            target,
+            port: 3364,
+            was_running: false,
+        };
+        assert_eq!(
+            started(&started_labview),
+            "LabVIEW 2026 (64-bit)  v26.3 — VI Server answering on port 3364\n"
+        );
+        started_labview.was_running = true;
+        assert_eq!(
+            started(&started_labview),
+            "LabVIEW 2026 (64-bit)  v26.3 — VI Server answering on port 3364 (was already running)\n"
+        );
+    }
 
     #[test]
     fn starting_an_installations_labview_is_announced_on_stderr() {

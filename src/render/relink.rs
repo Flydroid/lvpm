@@ -71,6 +71,10 @@ pub(super) fn render(r: &mut Renderer, event: &Event) {
             Stream::Out,
             &format!("\nleaving the venv LabVIEW open (--keep-open), VI Server on port {port}"),
         ),
+        Event::NothingToRelink { package, version } => r.line(
+            Stream::Out,
+            &format!("{package} {version} installed no VIs, libraries or LLBs — nothing to relink"),
+        ),
         _ => unreachable!("routed here by Renderer::render: {event:?}"),
     }
 }
@@ -138,6 +142,20 @@ mod tests {
             out.text(),
             "\nrelink: 2 folder(s) across 1 package(s):\n      alpha: x\n      alpha: y\n\nleaving the venv LabVIEW open (--keep-open), VI Server on port 3400\n"
         );
+    }
+
+    #[test]
+    fn a_package_with_nothing_to_relink_is_a_line_on_stdout() {
+        let (mut renderer, out, err) = renderer();
+        renderer.render(&Event::NothingToRelink {
+            package: "docs".into(),
+            version: "1.0".into(),
+        });
+        assert_eq!(
+            out.text(),
+            "docs 1.0 installed no VIs, libraries or LLBs — nothing to relink\n"
+        );
+        assert_eq!(err.text(), "");
     }
 
     #[test]

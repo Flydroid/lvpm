@@ -12,7 +12,6 @@
 //! project uses that project's venv; `--project <DIR>` names one from outside,
 //! and `--global` says the installation itself is meant.
 
-use crate::config;
 use crate::events::{Event, EventSink};
 use crate::project;
 use crate::target::{self, LvTarget, Roots};
@@ -176,18 +175,24 @@ pub(crate) fn load(repo: &Path, venv_dir: &Path, targets: &[LvTarget]) -> Result
     })
 }
 
-/// Create the configured venv directory for the project at or above `start` (or at `start`
-/// itself, with a manifest skeleton, when there is none) and bind it to a
-/// LabVIEW: `--labview-version` if given, else the manifest's own — which is
+/// Create the venv directory `venv_dir` names for the project at or above `start` (or at `start`
+/// itself, with a manifest skeleton, when there is none) and bind it to one of
+/// the `targets`: `labview_version` if given, else the manifest's own — which is
 /// the project's *minimum*, so a newer IDE may be chosen over it, never an
 /// older one. Installs nothing; that is `lvpm install`.
-pub fn create(start: &Path, labview_version: Option<&str>, sink: &dyn EventSink) -> Result<Venv> {
+pub fn create(
+    start: &Path,
+    labview_version: Option<&str>,
+    venv_dir: &Path,
+    targets: &[LvTarget],
+    sink: &dyn EventSink,
+) -> Result<Venv> {
     let start = std::path::absolute(start)?;
     let repo = match project::find_manifest(&start) {
         Some(m) => m.parent().map(Path::to_path_buf).unwrap_or(start),
         None => start,
     };
-    let dir = repo.join(config::load()?.venv_dir);
+    let dir = repo.join(venv_dir);
     if binding_path(&dir).is_file() {
         bail!(
             "{} already has a venv — `lvpm venv remove` first to bind it afresh",
@@ -202,7 +207,6 @@ pub fn create(start: &Path, labview_version: Option<&str>, sink: &dyn EventSink)
     };
     let min_lv = proj.as_ref().and_then(|p| p.labview.as_deref());
 
-    let targets = target::detect()?;
     ensure!(!targets.is_empty(), "no LabVIEW installations detected");
     let want = labview_version.or(min_lv).ok_or_else(|| {
         anyhow!(
@@ -211,7 +215,7 @@ pub fn create(start: &Path, labview_version: Option<&str>, sink: &dyn EventSink)
             manifest_path.display()
         )
     })?;
-    let target = target::select(&targets, want)?;
+    let target = target::select(targets, want)?;
     ensure!(
         target.version >= MIN_LV,
         "{} cannot mount a venv: LVAddons.AdditionalLocations needs LabVIEW 2024 Q1 or later",
@@ -310,6 +314,16 @@ pub(crate) fn port_for(dir: &Path) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config;
+    use crate::events::NullSink;
+
+    fn labview_2026() -> LvTarget {
+        LvTarget {
+            version: 26.3,
+            bitness: 64,
+            path: PathBuf::from("LabVIEW 2026"),
+        }
+    }
 
     fn scratch_dir(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("lvpm-venv-test-{tag}-{}", std::process::id()));
@@ -358,5 +372,37 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn create_uses_the_venv_directory_and_installations_it_is_given() {
+        let repo = scratch_dir("create");
+        let targets = [labview_2026()];
+
+        let v = create(
+            &repo,
+            Some("2026"),
+            Path::new(".given-venv"),
+            &targets,
+            &NullSink,
+        )
+        .unwrap();
+        assert_eq!(
+            v.dir,
+            std::path::absolute(&repo).unwrap().join(".given-venv")
+        );
+        assert_eq!(v.target.path, labview_2026().path);
+        assert!(binding_path(&v.dir).is_file());
+        // Found again through the same two inputs, and no others.
+        let found = find(None, &repo, Path::new(".given-venv"), &targets).unwrap();
+        assert_eq!(found.unwrap().dir, v.dir);
+
+        let none = scratch_dir("create-none");
+        let why = create(&none, Some("2026"), Path::new(".v"), &[], &NullSink).unwrap_err();
+        assert_eq!(why.to_string(), "no LabVIEW installations detected");
+        assert!(!none.join(".v").exists());
+
+        let _ = std::fs::remove_dir_all(&repo);
+        let _ = std::fs::remove_dir_all(&none);
     }
 }
