@@ -127,3 +127,13 @@ async fn both_still_match(world: &mut CliWorld) {
         check_or_panic(&golden, name, output);
     }
 }
+
+/// What a command printed and how it exited; the files it left behind are the
+/// business of the scenario's other steps.
+#[then(expr = "the output equals the recording {string}")]
+async fn output_equals_recording(world: &mut CliWorld, name: String) {
+    let output = world.last_output.as_ref().expect("a command was run");
+    if let Err(why) = Golden::new(golden_dir(), Mode::Compare).check_streams(&name, output) {
+        panic!("{why}");
+    }
+}

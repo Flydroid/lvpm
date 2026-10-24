@@ -15,6 +15,7 @@
 //! added to a mounted addon while LabVIEW runs is invisible to it, which is
 //! why an install insists on an instance of its own rather than reusing one.
 
+use crate::events::{Event, EventSink};
 use crate::venv::Venv;
 use crate::viserver::Connection;
 use anyhow::{Context, Result, bail, ensure};
@@ -136,7 +137,10 @@ pub(crate) fn spawn_detached(cmd: &mut Command) -> std::io::Result<Child> {
 
 #[cfg(windows)]
 mod win {
-    use std::os::windows::io::{AsRawHandle, RawHandle};
+    use std::os::windows::io::RawHandle;
+    use windows_sys::Win32::System::Console::{
+        GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+    };
 
     unsafe extern "system" {
         fn GetHandleInformation(handle: RawHandle, flags: *mut u32) -> i32;
@@ -152,11 +156,12 @@ mod win {
     impl NoInherit {
         pub fn new() -> Self {
             let mut changed = Vec::new();
-            for h in [
-                std::io::stdin().as_raw_handle(),
-                std::io::stdout().as_raw_handle(),
-                std::io::stderr().as_raw_handle(),
-            ] {
+            // The handles are asked of Windows directly: std's stream objects
+            // belong to the front end, and core never touches them.
+            for h in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+                // SAFETY: plain Win32 call; the answer is a handle or an invalid
+                // value, which the calls below reject.
+                let h: RawHandle = unsafe { GetStdHandle(h) };
                 let mut flags = 0u32;
                 // SAFETY: plain Win32 calls on handles this process owns.
                 if unsafe { GetHandleInformation(h, &mut flags) } != 0
@@ -191,8 +196,10 @@ pub fn is_listening(port: u16) -> bool {
 
 /// Wait until the LabVIEW on `port` completes a VI Server handshake. Refused
 /// connections and error 63 both mean "not yet"; only success ends the wait.
-/// Shared by the venv path and `viserver::ensure_vi_server`.
-pub fn wait_ready(port: u16, budget: Duration) -> Result<()> {
+/// Shared by the venv path and `viserver::ensure_vi_server`. `headless` is
+/// whether LabVIEW runs headless here, which changes only the hint a failure
+/// ends with.
+pub fn wait_ready(port: u16, budget: Duration, headless: bool) -> Result<()> {
     let started = Instant::now();
     let mut last = String::from("never connected");
     while started.elapsed() < budget {
@@ -207,7 +214,7 @@ pub fn wait_ready(port: u16, budget: Duration) -> Result<()> {
     }
     // A headless LabVIEW shows no dialogs; what would have been one is in
     // its log instead.
-    let hint = if std::env::var_os("LV_RTE_HEADLESS").is_some() {
+    let hint = if headless {
         "(headless LabVIEW: see %TEMP%\\LabVIEW_*_headless_*_cur.txt for what went wrong)"
     } else {
         "(a dialog may be holding the IDE up — check its window)"
@@ -229,7 +236,13 @@ pub struct Instance {
 /// running before the files landed cannot see them, and reusing it would
 /// relink against a venv it does not know. A launch, by contrast, is happy to
 /// find one already there.
-pub fn ensure_instance(v: &Venv, fresh: bool, wait: Duration) -> Result<Instance> {
+pub fn ensure_instance(
+    v: &Venv,
+    fresh: bool,
+    wait: Duration,
+    headless: bool,
+    sink: &dyn EventSink,
+) -> Result<Instance> {
     if is_listening(v.port) {
         if fresh {
             bail!(
@@ -245,13 +258,12 @@ pub fn ensure_instance(v: &Venv, fresh: bool, wait: Duration) -> Result<Instance
         });
     }
     let ini = write_ini(v)?;
-    eprintln!(
-        "starting {} on the venv and waiting for VI Server on port {}...",
-        v.target.label(),
-        v.port
-    );
+    sink.emit(Event::VenvLabviewStarting {
+        labview: v.target.label(),
+        port: v.port,
+    });
     let child = spawn(v, &ini, None)?;
-    wait_ready(v.port, wait)?;
+    wait_ready(v.port, wait, headless)?;
     Ok(Instance {
         port: v.port,
         child: Some(child),

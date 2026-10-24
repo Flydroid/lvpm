@@ -1,6 +1,10 @@
 //! lvpm's settings, resolved the way npm resolves its own: `LVPM_CONFIG_<KEY>`
 //! in the environment (`lvpm_config_<key>` works too), else the built-in default.
 
+// This is one of the two loaders that read the environment (the other is
+// `target`); the rest of core is handed what it needs.
+#![allow(clippy::disallowed_methods)]
+
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;

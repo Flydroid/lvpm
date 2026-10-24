@@ -501,7 +501,12 @@ fn cmd_start(cli: &Cli, wait: u64) -> Result<()> {
         bail!("start needs a real LabVIEW target, not --prefix");
     };
     let already = viserver::is_listening(&t);
-    let port = viserver::ensure_vi_server(&t, std::time::Duration::from_secs(wait))?;
+    let port = viserver::ensure_vi_server(
+        &t,
+        std::time::Duration::from_secs(wait),
+        headless(),
+        render::sink(),
+    )?;
     println!(
         "{} — VI Server answering on port {port}{}",
         t.label(),
@@ -1208,7 +1213,13 @@ fn cmd_install(
             // A LabVIEW of the venv's own, started after the files landed so
             // that it sees them, and closed again unless asked to stay.
             Some(v) => {
-                let inst = launch::ensure_instance(v, true, std::time::Duration::from_secs(180))?;
+                let inst = launch::ensure_instance(
+                    v,
+                    true,
+                    std::time::Duration::from_secs(180),
+                    headless(),
+                    render::sink(),
+                )?;
                 let outcome = run_relink(&store, inst.port, relink_args, &relink_work);
                 if relink_args.keep_open {
                     println!(
@@ -1222,7 +1233,12 @@ fn cmd_install(
             }
             None => {
                 let t = target.as_ref().expect("a real target, checked above");
-                let port = viserver::ensure_vi_server(t, std::time::Duration::from_secs(120))?;
+                let port = viserver::ensure_vi_server(
+                    t,
+                    std::time::Duration::from_secs(120),
+                    headless(),
+                    render::sink(),
+                )?;
                 run_relink(&store, port, relink_args, &relink_work)?;
             }
         }
@@ -1400,7 +1416,12 @@ running {} post-install hook(s)",
 /// refresh that fails costs the user a restart, not the package.
 fn refresh_palettes_and_menus(target: &target::LvTarget, timeout_secs: u64) {
     println!("\nrefreshing palettes and menus");
-    let outcomes = match refresh::run(target, std::time::Duration::from_secs(timeout_secs)) {
+    let outcomes = match refresh::run(
+        target,
+        std::time::Duration::from_secs(timeout_secs),
+        headless(),
+        render::sink(),
+    ) {
         Ok(o) => o,
         Err(e) => {
             println!("  SKIPPED: {e:#}");
@@ -1474,7 +1495,12 @@ fn run_hook_vi(
 ) -> Result<std::time::Duration> {
     let timeout = std::time::Duration::from_secs(timeout_secs);
     if conn.is_none() {
-        let port = viserver::ensure_vi_server(target, std::time::Duration::from_secs(120))?;
+        let port = viserver::ensure_vi_server(
+            target,
+            std::time::Duration::from_secs(120),
+            headless(),
+            render::sink(),
+        )?;
         *conn = Some(viserver::Connection::connect("127.0.0.1", port, timeout)?);
     }
     let c = conn.as_mut().unwrap();
@@ -1512,13 +1538,18 @@ fn run_relink(
         print!("  ({} covered by a parent)", asked - plan.len());
     }
     println!();
-    let mut r = relink::Relinker::open(port, &vi, std::time::Duration::from_secs(args.timeout))
-        .with_context(|| {
-            format!(
-                "cannot reach LabVIEW to relink on VI Server port {port}\n\
+    let mut r = relink::Relinker::open(
+        port,
+        &vi,
+        std::time::Duration::from_secs(args.timeout),
+        render::sink(),
+    )
+    .with_context(|| {
+        format!(
+            "cannot reach LabVIEW to relink on VI Server port {port}\n\
                  the files are installed; `lvpm relink <package>` retries just this pass"
-            )
-        })?;
+        )
+    })?;
     r.watch(args.progress.as_deref());
 
     let mut failed: Vec<String> = Vec::new();
@@ -1605,7 +1636,13 @@ fn cmd_relink(cli: &Cli, package: Option<&str>, all: bool, args: &RelinkArgs) ->
         // Fresh, as on install: a LabVIEW that predates the files on disk
         // cannot see them, and relinking against what it does see is wrong.
         Destination::Venv(v) => {
-            let inst = launch::ensure_instance(v, true, std::time::Duration::from_secs(180))?;
+            let inst = launch::ensure_instance(
+                v,
+                true,
+                std::time::Duration::from_secs(180),
+                headless(),
+                render::sink(),
+            )?;
             let outcome = run_relink(&roots, inst.port, args, &work);
             if args.keep_open {
                 println!(
@@ -1618,7 +1655,12 @@ fn cmd_relink(cli: &Cli, package: Option<&str>, all: bool, args: &RelinkArgs) ->
             outcome
         }
         _ => {
-            let port = viserver::ensure_vi_server(&t, std::time::Duration::from_secs(120))?;
+            let port = viserver::ensure_vi_server(
+                &t,
+                std::time::Duration::from_secs(120),
+                headless(),
+                render::sink(),
+            )?;
             run_relink(&roots, port, args, &work)
         }
     }
@@ -1629,7 +1671,7 @@ fn cmd_venv(cli: &Cli, sub: &VenvCmd) -> Result<()> {
     match sub {
         VenvCmd::Create => {
             let start = cli.project.clone().unwrap_or(cwd);
-            let v = venv::create(&start, cli.labview_version.as_deref())?;
+            let v = venv::create(&start, cli.labview_version.as_deref(), render::sink())?;
             println!("created {}", v.dir.display());
             println!(
                 "  bound to       {}  ({})",
@@ -1681,9 +1723,20 @@ fn cmd_venv(cli: &Cli, sub: &VenvCmd) -> Result<()> {
             let Some(v) = venv::find(cli.project.as_deref(), &cwd)? else {
                 bail!("no venv at or above {}", cwd.display());
             };
-            venv::remove(&v, *yes)
+            venv::remove(&v, *yes || confirm_removal(&v)?, render::sink())
         }
     }
+}
+
+/// Ask whether to delete the venv: core takes no input of its own (AC-K6).
+fn confirm_removal(v: &venv::Venv) -> Result<bool> {
+    eprint!(
+        "delete {} and everything installed in it? [y/N] ",
+        v.dir.display()
+    );
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    Ok(line.trim().eq_ignore_ascii_case("y"))
 }
 
 /// Start LabVIEW on the venv. No relinking here — that happened at install —
@@ -1774,7 +1827,13 @@ fn cmd_app_probe(cli: &Cli, ids: &[String]) -> Result<()> {
 fn vi_server_for(cli: &Cli, what: &str) -> Result<(String, u16)> {
     match destination(cli)? {
         Destination::Venv(v) => {
-            let inst = launch::ensure_instance(&v, false, std::time::Duration::from_secs(180))?;
+            let inst = launch::ensure_instance(
+                &v,
+                false,
+                std::time::Duration::from_secs(180),
+                headless(),
+                render::sink(),
+            )?;
             Ok((format!("{} on the venv", v.target.label()), inst.port))
         }
         Destination::Global(r) | Destination::Scratch(r) => {

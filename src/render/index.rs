@@ -39,6 +39,7 @@ pub(super) fn render(r: &mut Renderer, event: &Event) {
             Stream::Err,
             &format!("  ! ignoring {}: {error}", path.display()),
         ),
+        _ => unreachable!("routed here by Renderer::render: {event:?}"),
     }
 }
 

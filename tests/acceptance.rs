@@ -7,6 +7,10 @@
 //! real LabVIEW and run only with `LVPM_TEST_LABVIEW=1`. A failed step fails
 //! the run, and so does a skipped one: every step has a definition.
 
+// Test code builds sandboxes and reads the test process's environment; the
+// workspace-wide `clippy.toml` bars that from `lvpm-core` only.
+#![allow(clippy::disallowed_methods)]
+
 mod steps;
 mod support;
 

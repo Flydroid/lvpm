@@ -25,6 +25,7 @@
 //! Replies pair to requests by `uID`. `ReleaseRef` is fire-and-forget — LabVIEW
 //! sends nothing back, so we must not block waiting for it.
 
+use crate::events::{Event, EventSink};
 use crate::target::LvTarget;
 use anyhow::{Context, Result, bail, ensure};
 use std::io::{Read, Write};
@@ -86,18 +87,23 @@ pub fn is_listening(target: &LvTarget) -> bool {
 /// starting the IDE when it is not, and return the port.
 ///
 /// Starting an IDE is visible to whoever is at the machine — exactly what a
-/// package install needs, and never done silently: the
-/// launch is announced on stderr. The wait is generous because a cold LabVIEW
+/// package install needs, and never done silently: the start is reported with
+/// a `LabviewStarting` event. The wait is generous because a cold LabVIEW
 /// start loads vi.lib before it listens — and listening is not yet serving:
 /// the socket binds first and every handshake until initialisation is done
 /// fails with error 63. An interactive IDE closes that gap in well under two
 /// seconds; a headless LabVIEW 2026 in a container was measured at six to
 /// eight. So a completed handshake is what ends the wait, whether the LabVIEW
 /// found listening is ours or one something else started a moment ago.
-pub fn ensure_vi_server(target: &LvTarget, wait: Duration) -> Result<u16> {
+pub fn ensure_vi_server(
+    target: &LvTarget,
+    wait: Duration,
+    headless: bool,
+    sink: &dyn EventSink,
+) -> Result<u16> {
     let port = check_vi_server(target)?;
     if is_listening(target) {
-        crate::launch::wait_ready(port, wait)?;
+        crate::launch::wait_ready(port, wait, headless)?;
         return Ok(port);
     }
 
@@ -105,16 +111,16 @@ pub fn ensure_vi_server(target: &LvTarget, wait: Duration) -> Result<u16> {
     if !exe.is_file() {
         bail!("no LabVIEW.exe in {}", target.path.display());
     }
-    eprintln!(
-        "starting {} and waiting for VI Server on port {port}...",
-        target.label()
-    );
+    sink.emit(Event::LabviewStarting {
+        labview: target.label(),
+        port,
+    });
     // Detached child: LabVIEW outlives lvpm by design — and must not keep
     // lvpm's own pipes open while it does (see `launch::spawn_detached`).
     crate::launch::spawn_detached(&mut std::process::Command::new(&exe))
         .with_context(|| format!("launching {}", exe.display()))?;
 
-    crate::launch::wait_ready(port, wait)
+    crate::launch::wait_ready(port, wait, headless)
         .with_context(|| format!("started {} but could not reach it", target.label()))?;
     Ok(port)
 }

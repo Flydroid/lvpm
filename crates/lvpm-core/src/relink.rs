@@ -18,6 +18,7 @@
 //! So this module is only plumbing: find the folders a package put on disk,
 //! feed them in one at a time, and wait for `Done`.
 
+use crate::events::{Event, EventSink};
 use crate::spec::Spec;
 use crate::target::Roots;
 use crate::viserver::{self, Connection, LvValue, VIRef};
@@ -235,7 +236,7 @@ pub fn folders_for(files: &[String]) -> Vec<PathBuf> {
 /// folders. Loading it costs a round of link resolution of its own (it pulls in
 /// JSONtext), so paying that once per install rather than once per folder is
 /// worth the reference being held.
-pub struct Relinker {
+pub struct Relinker<'a> {
     /// Kept so the reference can be opened again: saving VIs invalidates it.
     vi: std::path::PathBuf,
     conn: Connection,
@@ -252,6 +253,8 @@ pub struct Relinker {
     /// The log indicator to read after each folder, and false once it turns
     /// out not to be readable.
     log: Option<String>,
+    /// Where the notes and the progress go.
+    sink: &'a dyn EventSink,
 }
 
 /// What one folder's relink did, as far as this side can tell.
@@ -261,12 +264,17 @@ pub struct Outcome {
     pub log: String,
 }
 
-impl Relinker {
+impl<'a> Relinker<'a> {
     /// Load the relink VI into the LabVIEW answering on `port`. Which LabVIEW
     /// that is — the target's own, or one started on a venv — is the caller's
     /// business; making it answer is `viserver::ensure_vi_server` or
     /// `launch::ensure_instance`.
-    pub fn open(port: u16, vi: &Path, timeout: Duration) -> Result<Relinker> {
+    pub fn open(
+        port: u16,
+        vi: &Path,
+        timeout: Duration,
+        sink: &'a dyn EventSink,
+    ) -> Result<Relinker<'a>> {
         // Polling only needs a round trip, but the initial load of the relink
         // VI itself can take a while, so give reads the full budget.
         let mut conn = Connection::connect("127.0.0.1", port, timeout)?;
@@ -286,6 +294,7 @@ impl Relinker {
             can_reset_done: true,
             progress: None,
             log: Some(LOG_INDICATOR.to_string()),
+            sink,
         })
     }
 
@@ -316,9 +325,10 @@ impl Relinker {
                 self.conn
                     .ctrl_val_set(self.vi_ref, DONE_INDICATOR, LvValue::Bool(false))
         {
-            eprintln!(
-                "      note: cannot clear {DONE_INDICATOR} ({e}) — relying on the VI to clear it"
-            );
+            self.sink.emit(Event::RelinkDoneNotClearable {
+                indicator: DONE_INDICATOR.to_string(),
+                error: e.to_string(),
+            });
             self.can_reset_done = false;
         }
         self.conn.run_vi_async(self.vi_ref)
@@ -383,12 +393,18 @@ impl Relinker {
                     Ok(v) => {
                         let shown = v.to_string();
                         if shown != last {
-                            println!("        {:>6.0}s  {shown}", started.elapsed().as_secs_f64());
+                            self.sink.emit(Event::RelinkProgress {
+                                elapsed: started.elapsed(),
+                                value: shown.clone(),
+                            });
                             last = shown;
                         }
                     }
                     Err(e) => {
-                        eprintln!("      note: cannot read {name} ({e}) — not reporting progress");
+                        self.sink.emit(Event::RelinkProgressUnreadable {
+                            indicator: name,
+                            error: e.to_string(),
+                        });
                         self.progress = None;
                     }
                 }

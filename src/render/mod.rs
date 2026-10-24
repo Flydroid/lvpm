@@ -7,6 +7,10 @@
 //! owns the two streams.
 
 mod index;
+mod launch;
+mod relink;
+mod venv;
+mod viserver;
 
 use lvpm_core::events::{Event, EventSink};
 use std::io::Write;
@@ -15,8 +19,6 @@ use std::sync::{LazyLock, Mutex, PoisonError};
 /// The stream an event is written to. Each event goes to exactly one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Stream {
-    // Written by the stdout events of the modules converted next.
-    #[allow(dead_code)]
     Out,
     Err,
 }
@@ -42,6 +44,14 @@ impl Renderer {
             Event::FeedCheckStart { .. }
             | Event::FeedChecked { .. }
             | Event::LocalPackageIgnored { .. } => index::render(self, event),
+            Event::RelinkDoneNotClearable { .. }
+            | Event::RelinkProgress { .. }
+            | Event::RelinkProgressUnreadable { .. } => relink::render(self, event),
+            Event::VenvManifestWritten { .. } | Event::VenvRemoved { .. } => {
+                venv::render(self, event)
+            }
+            Event::VenvLabviewStarting { .. } => launch::render(self, event),
+            Event::LabviewStarting { .. } => viserver::render(self, event),
         }
     }
 

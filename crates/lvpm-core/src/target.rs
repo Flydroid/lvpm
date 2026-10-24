@@ -5,6 +5,10 @@
 //! the code path exercised against a sandbox is the same one that writes into
 //! `C:\Program Files\National Instruments\LabVIEW 2026`.
 
+// This is one of the two loaders that read the environment (the other is
+// `config`); the rest of core is handed what it needs.
+#![allow(clippy::disallowed_methods)]
+
 use anyhow::{Result, bail};
 use std::path::{Path, PathBuf};
 

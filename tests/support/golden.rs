@@ -123,6 +123,17 @@ impl Golden {
         }
     }
 
+    /// Compare only stdout, stderr and the exit code with recording `name`,
+    /// whatever else it holds: a scenario that checks the files a command left
+    /// behind in its own step uses this. It never records.
+    pub fn check_streams(&self, name: &str, actual: &Output) -> Result<(), String> {
+        let streams = Output {
+            tree: None,
+            ..actual.clone()
+        };
+        compare_files(name, &self.root.join(name), &streams)
+    }
+
     /// A comparing `Golden` over a copy of recording `name` made under `into`,
     /// with one byte of its stdout changed: the thing that must never match.
     pub fn altered_copy(&self, name: &str, into: &Path) -> Result<Golden, String> {
@@ -175,6 +186,17 @@ fn record(dir: &Path, actual: &Output) -> Result<(), String> {
 }
 
 fn compare(name: &str, dir: &Path, actual: &Output) -> Result<(), String> {
+    compare_files(name, dir, actual)?;
+    if actual.tree.is_none() && dir.join(TREE_FILE).exists() {
+        return Err(format!(
+            "recording `{name}` has a {TREE_FILE} but the scenario listed no files"
+        ));
+    }
+    Ok(())
+}
+
+/// Each file `actual` has, against the recording's.
+fn compare_files(name: &str, dir: &Path, actual: &Output) -> Result<(), String> {
     for (file, text) in files_of(actual) {
         let recorded = std::fs::read(dir.join(file)).map_err(|_| {
             format!(
@@ -189,11 +211,6 @@ fn compare(name: &str, dir: &Path, actual: &Output) -> Result<(), String> {
                 excerpt(text.as_bytes(), offset)
             ));
         }
-    }
-    if actual.tree.is_none() && dir.join(TREE_FILE).exists() {
-        return Err(format!(
-            "recording `{name}` has a {TREE_FILE} but the scenario listed no files"
-        ));
     }
     Ok(())
 }
@@ -365,6 +382,40 @@ mod tests {
             unrecorded.contains("no recording `case` (tree.txt)"),
             "{unrecorded}"
         );
+    }
+
+    #[test]
+    fn the_streams_alone_are_compared_whatever_tree_is_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        Golden::new(dir.path(), Mode::Record)
+            .check(
+                "with",
+                &with_tree(
+                    "x/
+",
+                ),
+            )
+            .unwrap();
+        let golden = Golden::new(dir.path(), Mode::Compare);
+        assert_eq!(golden.check_streams("with", &output()), Ok(()));
+        assert_eq!(
+            golden.check_streams(
+                "with",
+                &with_tree(
+                    "y/
+"
+                )
+            ),
+            Ok(())
+        );
+        let changed = Output {
+            stderr: "feed failed
+"
+            .into(),
+            ..output()
+        };
+        let why = golden.check_streams("with", &changed).unwrap_err();
+        assert!(why.starts_with("stderr.txt differs"), "{why}");
     }
 
     #[test]

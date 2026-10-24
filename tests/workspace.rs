@@ -4,6 +4,10 @@
 //! These tests call `cargo` itself: they are about how the repository is
 //! built, not about what lvpm does.
 
+// Test code builds sandboxes and reads the test process's environment; the
+// workspace-wide `clippy.toml` bars that from `lvpm-core` only.
+#![allow(clippy::disallowed_methods)]
+
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;

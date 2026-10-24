@@ -29,6 +29,7 @@
 //! Present in every install checked (2015, 2025, 2026). So this module is only
 //! plumbing: find the two VIs, run them, report what happened.
 
+use crate::events::EventSink;
 use crate::target::LvTarget;
 use crate::viserver::{self, Connection};
 use anyhow::{Context, Result};
@@ -62,8 +63,13 @@ pub struct Outcome {
 /// broken `Refresh Menus.vi` must not cost the caller its palette refresh.
 /// The connection itself failing is the one error that fails the call, since
 /// then nothing was refreshed at all.
-pub fn run(target: &LvTarget, timeout: Duration) -> Result<Vec<Outcome>> {
-    let port = viserver::ensure_vi_server(target, Duration::from_secs(120))?;
+pub fn run(
+    target: &LvTarget,
+    timeout: Duration,
+    headless: bool,
+    sink: &dyn EventSink,
+) -> Result<Vec<Outcome>> {
+    let port = viserver::ensure_vi_server(target, Duration::from_secs(120), headless, sink)?;
     let mut conn = Connection::connect("127.0.0.1", port, timeout)?;
 
     let mut out = Vec::with_capacity(REFRESH_VIS.len());

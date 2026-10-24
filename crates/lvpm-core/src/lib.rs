@@ -1,8 +1,9 @@
 //! The lvpm core: everything the CLI does, without a terminal.
 
-// Core still prints and reads input until Slice 3 converts it; that slice
-// removes this allow and turns the lint on for the crate.
-#![allow(clippy::disallowed_methods)]
+// Core prints and reads nothing (AC-K2): it emits events. These deny the
+// print macros; `clippy.toml` bars the std stream handles and the process
+// environment, which only `config` and `target` may read.
+#![deny(clippy::print_stdout, clippy::print_stderr)]
 
 pub mod cache;
 pub mod config;

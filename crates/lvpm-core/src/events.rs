@@ -36,6 +36,32 @@ pub enum Event {
     /// A local package that could not be read, and so is not in the index.
     /// `error` is the underlying error's own text, as the error reported it.
     LocalPackageIgnored { path: PathBuf, error: String },
+
+    // ---- relink ----
+    /// The relink VI's `Done` indicator could not be cleared before a run, so
+    /// the VI is relied on to clear it itself. `error` is the cause's own text.
+    RelinkDoneNotClearable { indicator: String, error: String },
+    /// The watched indicator changed while a folder was being relinked.
+    /// `value` is what the VI showed, verbatim.
+    RelinkProgress { elapsed: Duration, value: String },
+    /// The watched indicator could not be read; progress is not reported for
+    /// the rest of the run. `error` is the cause's own text.
+    RelinkProgressUnreadable { indicator: String, error: String },
+
+    // ---- venv ----
+    /// A project that had no manifest got one while its venv was created.
+    VenvManifestWritten { path: PathBuf },
+    /// The venv directory was deleted.
+    VenvRemoved { dir: PathBuf },
+
+    // ---- launch ----
+    /// A LabVIEW is being started on a venv. `labview` is the installation's
+    /// label, such as "LabVIEW 2026 (64-bit)".
+    VenvLabviewStarting { labview: String, port: u16 },
+
+    // ---- viserver ----
+    /// A LabVIEW is being started on an installation, to get its VI Server.
+    LabviewStarting { labview: String, port: u16 },
 }
 
 /// How a feed answered.

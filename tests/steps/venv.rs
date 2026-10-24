@@ -7,7 +7,7 @@ use crate::support::sandbox::LABVIEW_YEAR;
 
 /// The VI fixture a venv installs, whose relink really runs.
 const VI_FIXTURE: &str = "lvpm_vi_fixture";
-use cucumber::given;
+use cucumber::{given, then};
 
 #[given("a LabVIEW 2026 installation")]
 async fn labview_installation(world: &mut CliWorld) {
@@ -70,4 +70,10 @@ pub fn clean_up(world: &mut CliWorld) {
     if let Err(why) = world.sandbox.restore_labview_installation() {
         panic!("the LabVIEW installation was not restored: {why}");
     }
+}
+
+#[then("the venv still exists")]
+async fn venv_still_exists(world: &mut CliWorld) {
+    let dir = world.sandbox.venv_dir();
+    assert!(dir.is_dir(), "{} is gone", dir.display());
 }

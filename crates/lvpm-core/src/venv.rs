@@ -13,6 +13,7 @@
 //! and `--global` says the installation itself is meant.
 
 use crate::config;
+use crate::events::{Event, EventSink};
 use crate::project;
 use crate::target::{self, LvTarget, Roots};
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -183,7 +184,7 @@ pub(crate) fn load(repo: &Path) -> Result<Venv> {
 /// LabVIEW: `--labview-version` if given, else the manifest's own — which is
 /// the project's *minimum*, so a newer IDE may be chosen over it, never an
 /// older one. Installs nothing; that is `lvpm install`.
-pub fn create(start: &Path, labview_version: Option<&str>) -> Result<Venv> {
+pub fn create(start: &Path, labview_version: Option<&str>, sink: &dyn EventSink) -> Result<Venv> {
     let start = std::path::absolute(start)?;
     let repo = match project::find_manifest(&start) {
         Some(m) => m.parent().map(Path::to_path_buf).unwrap_or(start),
@@ -244,7 +245,9 @@ pub fn create(start: &Path, labview_version: Option<&str>) -> Result<Venv> {
             ),
         )
         .with_context(|| format!("writing {}", manifest_path.display()))?;
-        eprintln!("wrote {}", manifest_path.display());
+        sink.emit(Event::VenvManifestWritten {
+            path: manifest_path,
+        });
     }
 
     std::fs::create_dir_all(dir.join(".lvpm"))
@@ -274,18 +277,11 @@ pub fn create(start: &Path, labview_version: Option<&str>) -> Result<Venv> {
 }
 
 /// Delete the venv — payload, store, binding, all of it.
-pub fn remove(v: &Venv, yes: bool) -> Result<()> {
-    if !yes {
-        eprint!(
-            "delete {} and everything installed in it? [y/N] ",
-            v.dir.display()
-        );
-        let mut line = String::new();
-        std::io::stdin().read_line(&mut line)?;
-        if !line.trim().eq_ignore_ascii_case("y") {
-            bail!("not removed");
-        }
-    }
+///
+/// Core asks nothing: the front end asks, and says so with `confirmed`. A
+/// venv that was not confirmed is left as it is.
+pub fn remove(v: &Venv, confirmed: bool, sink: &dyn EventSink) -> Result<()> {
+    ensure!(confirmed, "not removed");
     std::fs::remove_dir_all(&v.dir).with_context(|| {
         let mut why = format!("removing {}", v.dir.display());
         if crate::launch::is_listening(v.port) {
@@ -295,7 +291,7 @@ pub fn remove(v: &Venv, yes: bool) -> Result<()> {
         }
         why
     })?;
-    println!("removed {}", v.dir.display());
+    sink.emit(Event::VenvRemoved { dir: v.dir.clone() });
     Ok(())
 }
 
