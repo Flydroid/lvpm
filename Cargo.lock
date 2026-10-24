@@ -1281,7 +1281,6 @@ dependencies = [
  "lvpm-core",
  "md-5",
  "regex",
- "reqwest",
  "serde_json",
  "sha2",
  "tempfile",

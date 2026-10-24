@@ -7,7 +7,7 @@
 //! [`InstallSession`], and [`install`] runs them in that order.
 
 use super::env::{Destination, OpEnv};
-use super::hooks::{HOOK_TIMEOUT_SECS, PostInstallHook, hook_action_info, run_post_install_hooks};
+use super::hooks::{HOOK_TIMEOUT_SECS, HookCall, PostInstallHook, hook_action_info};
 use super::refresh::refresh_palettes_and_menus;
 use super::relink::{RelinkOptions, run_relink};
 use super::session::InstallSession;
@@ -470,8 +470,7 @@ fn settle_installed(
         dry_run: opts.dry_run,
     });
     if !opts.dry_run {
-        let store = session.store().clone();
-        uninstall_one(env, &store, &entry.name, &mut session.hook_connection)?;
+        uninstall_one(env, session, &entry.name)?;
     }
     Ok(true)
 }
@@ -541,22 +540,17 @@ fn unpack(
             .map(|w| w.dest.to_string_lossy().into_owned())
             .collect();
         let info = hook_action_info(name, pkg.entry.display_name.as_deref(), t, &planned);
-        env.sink.emit(Event::HookStarting {
-            package: name.clone(),
-            hook: HookKind::PreInstall,
-        });
-        match session.run_hook(env, t, opts.relink.timeout, vi, &info) {
-            Ok(took) => env.sink.emit(Event::HookRan {
-                package: name.clone(),
+        session.run_hook(
+            env,
+            t,
+            &HookCall {
+                package: name,
                 hook: HookKind::PreInstall,
-                took,
-            }),
-            Err(err) => env.sink.emit(Event::HookFailed {
-                package: name.clone(),
-                hook: HookKind::PreInstall,
-                error: format!("{err:#}"),
-            }),
-        }
+                vi,
+                info: &info,
+                timeout_secs: opts.relink.timeout,
+            },
+        );
     }
 
     let m = install::apply(
@@ -749,22 +743,48 @@ fn relink_pass(
 
 /// PostInstall hooks, after relinking so the hook VI and whatever it loads
 /// are runnable. Failures are reported, not fatal: the files are installed.
-fn post_install_hooks(env: &OpEnv, session: &InstallSession, opts: &InstallOptions) {
-    let hooks = &session.post_install_hooks;
-    match session.target() {
-        None => env.sink.emit(Event::PhaseSkipped {
+fn post_install_hooks(env: &OpEnv, session: &mut InstallSession, opts: &InstallOptions) {
+    let hooks = std::mem::take(&mut session.post_install_hooks);
+    let Some(target) = session.target().cloned() else {
+        env.sink.emit(Event::PhaseSkipped {
             phase: Phase::Hooks,
             reason: SkipReason::ScratchDestination,
             skipped: hooks.len(),
-        }),
-        Some(t) if !hooks.is_empty() => {
-            env.sink.emit(Event::PhaseStarted {
-                phase: Phase::Hooks,
-            });
-            run_post_install_hooks(env, session.store(), t, opts.relink.timeout, hooks);
-        }
-        Some(_) => {}
+        });
+        return;
+    };
+    if hooks.is_empty() {
+        return;
     }
+    env.sink.emit(Event::PhaseStarted {
+        phase: Phase::Hooks,
+    });
+    env.sink
+        .emit(Event::PostInstallHooksStarted { count: hooks.len() });
+    for hook in &hooks {
+        let info = hook_action_info(&hook.package, None, &target, &hook.files);
+        let ran = session.run_hook(
+            env,
+            &target,
+            &HookCall {
+                package: &hook.package,
+                hook: HookKind::PostInstall,
+                vi: &hook.vi,
+                info: &info,
+                timeout_secs: opts.relink.timeout,
+            },
+        );
+        if !ran {
+            // So `lvpm list` shows it; a failed hook is otherwise only in
+            // this scrollback.
+            let _ = install::mark_hook_skipped(
+                session.store(),
+                &hook.package,
+                &format!("PostInstall={}", hook.vi.display()),
+            );
+        }
+    }
+    session.close_hook_connection();
 }
 
 /// Palettes and menus last, after the hooks: a hook is free to write more

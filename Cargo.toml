@@ -19,8 +19,6 @@ repository.workspace = true
 lvpm-core = { path = "crates/lvpm-core" }
 anyhow = "1.0.104"
 clap = { version = "4.6.6", features = ["derive"] }
-reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "default-tls"] }
-zip = "8.6.0"
 
 [dev-dependencies]
 cucumber = "0.23.0"
@@ -31,6 +29,7 @@ serde_json = "1.0.151"
 sha2 = "0.11.0"
 tempfile = "3.27.0"
 toml = { version = "1.1.5", features = ["preserve_order"] }
+zip = "8.6.0"
 
 [[test]]
 name = "acceptance"

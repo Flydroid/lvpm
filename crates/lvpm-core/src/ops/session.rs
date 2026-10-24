@@ -9,17 +9,16 @@
 //! [`finish`]: super::install::finish
 
 use super::env::{Destination, OpEnv};
-use super::hooks::{PostInstallHook, run_hook_vi};
+use super::hooks::{HookCall, PostInstallHook, run_reported_hook};
 use crate::cache::Cache;
 use crate::fetch;
 use crate::index::Entry;
 use crate::target::{LvTarget, Roots};
 use crate::venv::Venv;
-use crate::viserver::{Connection, LvValue};
+use crate::viserver::Connection;
 use anyhow::Result;
 use reqwest::blocking::Client;
-use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::path::PathBuf;
 
 /// What fetching an archive needs, opened when the first archive is wanted:
 /// an uninstall never gets here.
@@ -34,7 +33,7 @@ pub struct InstallSession {
     downloads: Option<Downloads>,
     /// Opened by the first hook and shared by the rest, so a LabVIEW is asked
     /// once however many packages have hooks.
-    pub(super) hook_connection: Option<Connection>,
+    hook_connection: Option<Connection>,
     /// Per package, in install order: the folders its files landed in.
     /// Relinking happens after every package is on disk, so no package can be
     /// relinked against a dependency that is not there yet.
@@ -102,23 +101,10 @@ impl InstallSession {
         fetch::package(&downloads.cache, &downloads.client, entry)
     }
 
-    /// Run one hook VI to completion on the session's VI Server connection.
-    pub fn run_hook(
-        &mut self,
-        env: &OpEnv,
-        target: &LvTarget,
-        timeout_secs: u64,
-        vi: &Path,
-        action_info: &LvValue,
-    ) -> Result<Duration> {
-        run_hook_vi(
-            env,
-            &mut self.hook_connection,
-            target,
-            timeout_secs,
-            vi,
-            action_info,
-        )
+    /// Run one hook on the session's VI Server connection, opening it if no
+    /// hook has yet, and report how it went. Whether it ran to the end.
+    pub fn run_hook(&mut self, env: &OpEnv, target: &LvTarget, call: &HookCall) -> bool {
+        run_reported_hook(env, &mut self.hook_connection, target, call)
     }
 
     /// Let go of the hook connection: the hooks that follow open their own.

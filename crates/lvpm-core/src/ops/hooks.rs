@@ -2,8 +2,7 @@
 
 use super::env::OpEnv;
 use crate::events::{Event, HookKind};
-use crate::install;
-use crate::target::{LvTarget, Roots};
+use crate::target::LvTarget;
 use crate::viserver::{self, Connection, LvValue};
 use anyhow::Result;
 use std::path::{Path, PathBuf};
@@ -22,48 +21,44 @@ pub struct PostInstallHook {
     pub files: Vec<String>,
 }
 
-/// Run each package's extracted `PostInstall.vi`, one at a time, and report.
-pub fn run_post_install_hooks(
+/// One hook to run: whose it is, which one, the VI and what the VI is told.
+pub struct HookCall<'a> {
+    pub package: &'a str,
+    pub hook: HookKind,
+    pub vi: &'a Path,
+    pub info: &'a LvValue,
+    pub timeout_secs: u64,
+}
+
+/// Run one hook and report how it went. Whether it ran to the end: a hook that
+/// fails is reported, and it is up to the caller whether that matters.
+pub fn run_reported_hook(
     env: &OpEnv,
-    roots: &Roots,
+    conn: &mut Option<Connection>,
     target: &LvTarget,
-    timeout_secs: u64,
-    hooks: &[PostInstallHook],
-) {
-    env.sink
-        .emit(Event::PostInstallHooksStarted { count: hooks.len() });
-    let mut conn: Option<Connection> = None;
-    for hook in hooks {
-        let package = hook.package.clone();
-        env.sink.emit(Event::HookStarting {
-            package: package.clone(),
-            hook: HookKind::PostInstall,
-        });
-        let info = hook_action_info(&hook.package, None, target, &hook.files);
-        match run_hook_vi(env, &mut conn, target, timeout_secs, &hook.vi, &info) {
-            Ok(took) => env.sink.emit(Event::HookRan {
-                package,
-                hook: HookKind::PostInstall,
+    call: &HookCall,
+) -> bool {
+    env.sink.emit(Event::HookStarting {
+        package: call.package.to_string(),
+        hook: call.hook,
+    });
+    match run_hook_vi(env, conn, target, call.timeout_secs, call.vi, call.info) {
+        Ok(took) => {
+            env.sink.emit(Event::HookRan {
+                package: call.package.to_string(),
+                hook: call.hook,
                 took,
-            }),
-            Err(e) => {
-                env.sink.emit(Event::HookFailed {
-                    package,
-                    hook: HookKind::PostInstall,
-                    error: format!("{e:#}"),
-                });
-                // So `lvpm list` shows it; a failed hook is otherwise only in
-                // this scrollback.
-                let _ = install::mark_hook_skipped(
-                    roots,
-                    &hook.package,
-                    &format!("PostInstall={}", hook.vi.display()),
-                );
-            }
+            });
+            true
         }
-    }
-    if let Some(c) = conn {
-        c.close();
+        Err(e) => {
+            env.sink.emit(Event::HookFailed {
+                package: call.package.to_string(),
+                hook: call.hook,
+                error: format!("{e:#}"),
+            });
+            false
+        }
     }
 }
 

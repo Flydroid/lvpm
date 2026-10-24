@@ -336,7 +336,9 @@ fn main() -> Result<()> {
             timeout,
         } => cmd_run_hooks(&env, package.as_deref(), *all, *timeout),
         Cmd::Refresh { timeout } => cmd_refresh(&env, *timeout),
-        Cmd::Uninstall { package, all } => cmd_uninstall(&env, package.as_deref(), *all),
+        Cmd::Uninstall { package, all } => {
+            ops::uninstall::uninstall(&env, package.as_deref(), *all)
+        }
         Cmd::AppProbe { ids } => cmd_app_probe(&env, ids),
         Cmd::ViProbe { vi } => cmd_vi_probe(&env, vi),
         Cmd::ViSave { vi } => cmd_vi_save(&env, vi),
@@ -424,72 +426,6 @@ fn cmd_refresh(env: &OpEnv, timeout: u64) -> Result<()> {
         bail!("refresh needs a real LabVIEW target, not --prefix");
     };
     ops::refresh::refresh_palettes_and_menus(env, &t, timeout);
-    Ok(())
-}
-
-fn cmd_uninstall(env: &OpEnv, package: Option<&str>, all: bool) -> Result<()> {
-    let roots = env.destination()?.store();
-    let names: Vec<String> = match (package, all) {
-        (Some(p), _) => vec![p.to_string()],
-        (None, true) => install::list_installed(&roots)?
-            .into_iter()
-            .map(|m| m.name)
-            .collect(),
-        (None, false) => bail!("give a package name, or --all"),
-    };
-    ensure!(
-        !names.is_empty(),
-        "no packages are installed in this target"
-    );
-
-    // One VI Server connection for the whole sweep, and one palette refresh at
-    // the end — the hooks are per package, the rebuild is not.
-    let mut conn: Option<viserver::Connection> = None;
-    let mut removed_any = false;
-    let mut failed: Vec<(String, anyhow::Error)> = Vec::new();
-    for name in &names {
-        match ops::uninstall::uninstall_one(env, &roots, name, &mut conn) {
-            Ok(removed) => removed_any |= removed > 0,
-            // One bad package must not strand the rest of an --all sweep. A
-            // single named package still fails the command with its own error.
-            Err(e) => {
-                if names.len() > 1 {
-                    println!("uninstall {name} FAILED: {e:#}");
-                }
-                failed.push((name.clone(), e));
-            }
-        }
-    }
-    if let Some(c) = conn {
-        c.close();
-    }
-
-    // The same reason as on install, in reverse: the packages' `.mnu` files
-    // are gone, but LabVIEW still shows the palette entries until told. Not
-    // for a venv — its LabVIEW is restarted on launch and rebuilds them then.
-    if removed_any
-        && roots.venv().is_none()
-        && let Some(t) = &roots.target
-    {
-        ops::refresh::refresh_palettes_and_menus(env, t, ops::hooks::HOOK_TIMEOUT_SECS);
-    }
-
-    if names.len() == 1
-        && let Some((_, e)) = failed.pop()
-    {
-        return Err(e);
-    }
-    ensure!(
-        failed.is_empty(),
-        "{} of {} packages failed to uninstall: {}",
-        failed.len(),
-        names.len(),
-        failed
-            .iter()
-            .map(|(n, _)| n.as_str())
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
     Ok(())
 }
 
