@@ -277,6 +277,49 @@ pub enum LockChange {
     },
 }
 
+/// One change a sync makes to a destination, as its plan lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "step", rename_all = "snake_case")]
+pub enum SyncStep {
+    /// The lock lists it and the destination has none.
+    Install { name: String, version: String },
+    /// The destination has it at another version, or from another archive,
+    /// than the lock says.
+    Replace {
+        name: String,
+        from: String,
+        to: String,
+    },
+    /// The destination has it and the sync does not want it.
+    Remove {
+        name: String,
+        version: String,
+        reason: RemoveReason,
+    },
+}
+
+impl SyncStep {
+    /// The package the step is about, as the plan spells it.
+    pub fn name(&self) -> &str {
+        match self {
+            SyncStep::Install { name, .. }
+            | SyncStep::Replace { name, .. }
+            | SyncStep::Remove { name, .. } => name,
+        }
+    }
+}
+
+/// Why a sync takes an installed package out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoveReason {
+    /// `lvpm.lock` does not list it.
+    NotInLock,
+    /// `lvpm.lock` lists it, but only dev dependencies need it, and this sync
+    /// leaves those out.
+    DevOnly,
+}
+
 /// A file a dry run would write.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct PlannedFile {
