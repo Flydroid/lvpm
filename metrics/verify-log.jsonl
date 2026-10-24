@@ -1,0 +1,1 @@
+{"ts":"2026-10-24T17:00:00Z","plan":"plans/lvpm-lockfile.md","slice":"1","runtime_verification":"skipped","reason":"tests-only slice; no shipped behaviour changed","evidence":"cargo test 85+24+110 green; LVPM_TEST_LABVIEW=1 acceptance 39/39 twice; clippy -D warnings and fmt clean"}

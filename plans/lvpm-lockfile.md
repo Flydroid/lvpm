@@ -1912,9 +1912,10 @@ and version.
 ### Slices (grouped by wave)
 
 #### Wave 1
-- [ ] Slice 1: Characterization harness and recorded CLI output
-  - [ ] Step 1.1: World, fixtures, loopback feed and cucumber-rs harness
-  - [ ] Step 1.2: Record every CLI output the extraction must preserve
+- [x] Slice 1: Characterization harness and recorded CLI output
+  - Commits 7f42afe, 8502d8c, 855c3e5, ac92074, 734ee06. Accepted deviations: the cargo fmt and legacy clippy fixes in `src/` landed as their own commit (ac92074, no behaviour change); one @labview scenario writes to the real LabVIEW 2026 installation, limited to `vi.lib/_lvpm_test_fixture` and a temp marker file, with a pre-check and cleanup (approved at the Slice 1 review).
+  - [x] Step 1.1: World, fixtures, loopback feed and cucumber-rs harness
+  - [x] Step 1.2: Record every CLI output the extraction must preserve
 
 #### Wave 2
 - [ ] Slice 2: Cargo workspace with `lvpm-core`
