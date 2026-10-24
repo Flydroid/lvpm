@@ -1,0 +1,4 @@
+# Archify render receipts; the .archify.json source and the .html stay tracked
+*.finalize*.json
+*.delivery.json
+*.browser-check.json

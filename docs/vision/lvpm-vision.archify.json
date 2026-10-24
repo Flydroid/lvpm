@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "LVPM — one package manager to rule them all",
+    "output": "docs/vision/lvpm-vision.html",
+    "locale": "en",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    { "id": "dev", "type": "external", "label": "Developer", "sublabel": "inner + open source", "pos": [40, 40], "size": [120, 64] },
+    { "id": "src", "type": "frontend", "label": "Library A source", "sublabel": "lvpm.toml + .lvlib", "pos": [220, 40], "size": [170, 64] },
+    { "id": "build", "type": "backend", "label": "lvpm build", "sublabel": "source | ppl → .lvpkg | .vip", "pos": [470, 40], "size": [170, 64], "tag": "proposed" },
+    { "id": "ci", "type": "security", "label": "CI pipeline", "sublabel": "Sigstore sign · SLSA provenance", "pos": [755, 40], "size": [190, 64], "tag": "proposed" },
+
+    { "id": "legacy", "type": "cloud", "label": "VIPM / NI indexes", "sublabel": ".vip / .ogp, read-only", "pos": [230, 200], "size": [160, 64], "tag": "works today" },
+    { "id": "folder", "type": "cloud", "label": "Folder feed", "sublabel": "local / UNC, offline", "pos": [410, 200], "size": [160, 64], "tag": "works today" },
+    { "id": "gh", "type": "cloud", "label": "GitHub Releases", "sublabel": "{ github = owner/repo }", "pos": [590, 200], "size": [160, 64], "tag": "proposed" },
+    { "id": "oci", "type": "cloud", "label": "Inner-source OCI", "sublabel": "ghcr · GitLab · ACR", "pos": [770, 200], "size": [160, 64], "tag": "proposed" },
+    { "id": "index", "type": "cloud", "label": "Community index", "sublabel": "git: name → repo · sha256", "pos": [950, 200], "size": [160, 64], "tag": "proposed" },
+
+    { "id": "resolver", "type": "security", "label": "lvpm install (add · sync proposed)", "sublabel": "proposed: one feed per scope · verify SHA-256, signature, provenance · one version per name per LabVIEW", "pos": [250, 380], "size": [840, 64] },
+
+    { "id": "nipm", "type": "external", "label": "NIPM drivers", "sublabel": "DAQmx · VISA · RT", "pos": [40, 540], "size": [170, 64] },
+    { "id": "lock", "type": "database", "label": "lvpm.lock", "sublabel": "sha256 · feed · signer · --check", "pos": [330, 540], "size": [190, 64], "tag": "proposed" },
+    { "id": "venvA", "type": "database", "label": ".lv-venv (A)", "sublabel": "App: libA 1.4 · libX 1.2", "pos": [600, 540], "size": [200, 64] },
+    { "id": "venvB", "type": "database", "label": ".lv-venv (B)", "sublabel": "Library B: libA >=1.4 · libX 2.0", "pos": [890, 540], "size": [200, 64] },
+
+    { "id": "global", "type": "external", "label": "Global LabVIEW install", "sublabel": "real vi.lib", "pos": [260, 690], "size": [200, 64] },
+    { "id": "lvA", "type": "frontend", "label": "LabVIEW process A", "sublabel": "own port · app build (proposed)", "pos": [600, 690], "size": [200, 64] },
+    { "id": "lvB", "type": "frontend", "label": "LabVIEW process B", "sublabel": "own ini · own VI Server port", "pos": [890, 690], "size": [200, 64] }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "Package sources — no single owner", "wraps": ["legacy", "folder", "gh", "oci", "index"] },
+    { "kind": "region", "label": "Project A — application", "wraps": ["venvA", "lvA"] },
+    { "kind": "region", "label": "Project B — library B", "wraps": ["venvB", "lvB"] }
+  ],
+  "connections": [
+    { "id": "dev-code", "from": "dev", "to": "src", "label": "code", "variant": "emphasis" },
+    { "id": "src-build", "from": "src", "to": "build", "label": "build", "variant": "emphasis" },
+    { "id": "build-ci", "from": "build", "to": "ci", "label": "dist/ + SBOM", "variant": "emphasis" },
+    { "id": "ci-oci", "from": "ci", "to": "oci", "label": "publish (OIDC)", "variant": "emphasis" },
+    { "id": "ci-index", "from": "ci", "to": "index", "label": "release + index PR", "variant": "security", "fromSide": "right", "toSide": "top" },
+
+    { "id": "legacy-resolve", "from": "legacy", "to": "resolver", "label": "read + MD5" },
+    { "id": "folder-resolve", "from": "folder", "to": "resolver", "label": "read" },
+    { "id": "gh-resolve", "from": "gh", "to": "resolver", "label": "attestation" },
+    { "id": "oci-resolve", "from": "oci", "to": "resolver", "label": "pull by digest", "variant": "emphasis" },
+    { "id": "index-resolve", "from": "index", "to": "resolver", "label": "pinned hash" },
+
+    { "id": "nipm-check", "from": "resolver", "to": "nipm", "label": "check only", "variant": "dashed", "fromSide": "left", "toSide": "top" },
+    { "id": "resolve-lock", "from": "resolver", "to": "lock", "label": "pin" },
+    { "id": "resolve-venvA", "from": "resolver", "to": "venvA", "label": "install", "variant": "emphasis" },
+    { "id": "resolve-venvB", "from": "resolver", "to": "venvB", "label": "install" },
+
+    { "id": "launchA", "from": "venvA", "to": "lvA", "label": "lvpm launch", "variant": "emphasis" },
+    { "id": "launchB", "from": "venvB", "to": "lvB", "label": "lvpm launch" },
+    { "id": "shadow", "from": "global", "to": "lvA", "label": "always wins", "variant": "dashed" }
+  ],
+  "cards": [
+    { "dot": "emerald", "title": "Works today", "items": ["Per-project .lv-venv, one LabVIEW process each: same package, different versions, no clash (a global copy still shadows it)", "Install from VIPM/NI indexes and folders; hooks never run in a venv; headless skips them unless --hooks", "NIPM dependencies checked; lvpm launch / relink / refresh"] },
+    { "dot": "cyan", "title": "Build (proposed)", "items": ["Kind: source (any LabVIEW ≥ min) or ppl (version + bitness)", "Format: .lvpkg native, .vip for VIPM users, from one lvpm.toml", "Linker check without LabVIEW; app builds + SBOM via lvproj specs"] },
+    { "dot": "rose", "title": "Trust (proposed)", "items": ["SHA-256 pinned in lvpm.lock; lock --check in CI", "Publish from CI only: OIDC, Sigstore, SLSA provenance", "@org scopes resolve from one feed only: no dependency confusion"] },
+    { "dot": "amber", "title": "Distributed sources (proposed)", "items": ["Registry ≠ storage: a git index maps names to repos and hashes", "Release files stay on GitHub Releases or any OCI registry", "Anyone can fork or mirror the index; vipm.io is one source of many"] },
+    { "dot": "violet", "title": "Develop library B (proposed)", "items": ["Depend on A by version, or { path = \"../libA\" } mounted live", "Release B through the same build → CI → publish path"] }
+  ]
+}
