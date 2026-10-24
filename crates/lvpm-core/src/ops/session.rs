@@ -10,7 +10,7 @@
 
 use super::env::{Destination, OpEnv};
 use super::hooks::{HookCall, PostInstallHook, run_reported_hook};
-use crate::cache::Cache;
+use crate::cache::{Cache, Stored};
 use crate::fetch;
 use crate::index::Entry;
 use crate::target::{LvTarget, Roots};
@@ -41,6 +41,17 @@ impl Downloads {
     /// The archive's bytes, from the cache, a local file or the entry's feed.
     pub(super) fn fetch(&self, entry: &Entry) -> Result<Vec<u8>> {
         fetch::package(&self.cache, &self.client, entry)
+    }
+
+    /// What the cache holds under this SHA-256, without removing anything.
+    pub(super) fn stored(&self, sha256: &str) -> Stored {
+        self.cache.lookup(sha256)
+    }
+
+    /// Keep bytes in the cache under their own SHA-256, so that a later read
+    /// of that SHA-256 finds them.
+    pub(super) fn keep(&self, bytes: &[u8]) -> Result<String> {
+        self.cache.store(bytes)
     }
 }
 

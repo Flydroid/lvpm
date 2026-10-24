@@ -52,10 +52,31 @@ pub struct InstallOptions {
 
 /// The packages to install, dependencies before dependents. [`apply`] takes
 /// the entries as they are, so a plan can come from anywhere: the greedy
-/// resolution here, or a front end that built one by hand.
+/// resolution here, a sync from `lvpm.lock`, or a front end that built one by
+/// hand.
 #[derive(Debug, Clone, Default)]
 pub struct InstallPlan {
-    pub entries: Vec<Entry>,
+    pub entries: Vec<PlannedPackage>,
+}
+
+/// One package of a plan: where to get it, and what its archive must be.
+#[derive(Debug, Clone)]
+pub struct PlannedPackage {
+    pub entry: Entry,
+    /// The SHA-256 the archive must have. [`apply`] checks it when it has the
+    /// bytes, and installs nothing from an archive that differs. A plan from a
+    /// lock sets it; a greedy resolution has none to give.
+    pub expected_sha256: Option<String>,
+}
+
+impl PlannedPackage {
+    /// A package whose archive is taken as the source gives it.
+    pub fn unchecked(entry: Entry) -> PlannedPackage {
+        PlannedPackage {
+            entry,
+            expected_sha256: None,
+        }
+    }
 }
 
 /// What [`apply`] did, as [`finish`] needs to know it.
@@ -226,7 +247,7 @@ pub fn resolve_greedy(
         .map(|(n, c)| (n.clone(), Req::from(c), true))
         .collect();
     let mut done: HashSet<String> = HashSet::new();
-    let mut entries: Vec<Entry> = Vec::new();
+    let mut entries: Vec<PlannedPackage> = Vec::new();
     let mut unresolved: Vec<String> = Vec::new();
 
     while let Some((n, req, is_root)) = queue.pop() {
@@ -275,7 +296,7 @@ pub fn resolve_greedy(
                 queue.push((r.name.clone(), Req::Floor(r.floor()), false));
             }
         }
-        entries.push(entry);
+        entries.push(PlannedPackage::unchecked(entry));
     }
 
     if !unresolved.is_empty() {
@@ -293,9 +314,9 @@ pub fn resolve_greedy(
     env.sink.emit(Event::Resolved {
         packages: entries
             .iter()
-            .map(|e| PackageRef {
-                name: e.name.clone(),
-                version: e.version.to_string(),
+            .map(|planned| PackageRef {
+                name: planned.entry.name.clone(),
+                version: planned.entry.version.to_string(),
             })
             .collect(),
     });
@@ -332,7 +353,8 @@ impl HookPolicy {
 /// alone; an older one is upgraded, its recorded footprint removed first so
 /// files the new version no longer ships do not linger; a newer one is never
 /// silently downgraded. The archive of each is fetched just before it is
-/// unpacked.
+/// unpacked, and refused when the plan says what its SHA-256 must be and it is
+/// not.
 pub fn apply(
     env: &OpEnv,
     session: &mut InstallSession,
@@ -344,8 +366,8 @@ pub fn apply(
     // How many packages declared a hook this install did not run — decides
     // whether the headless note below is owed. Each package already said which.
     let mut hooks_unrun = 0usize;
-    for entry in &plan.entries {
-        if let Some(done) = install_one(env, session, entry, opts, hooks)? {
+    for planned in &plan.entries {
+        if let Some(done) = install_one(env, session, planned, opts, hooks)? {
             files += done.files;
             hooks_unrun += usize::from(done.hooks_unrun);
         }
@@ -389,10 +411,11 @@ struct Unpacking<'e> {
 fn install_one(
     env: &OpEnv,
     session: &mut InstallSession,
-    entry: &Entry,
+    planned: &PlannedPackage,
     opts: &InstallOptions,
     hooks: HookPolicy,
 ) -> Result<Option<Installed>> {
+    let entry = &planned.entry;
     let roots = session.roots_for(&entry.name)?;
     if !settle_installed(env, session, &roots, entry, opts)? {
         return Ok(None);
@@ -408,6 +431,15 @@ fn install_one(
     });
     let bytes = session.fetch(env, entry)?;
     let archive_sha256 = sha256_hex(&bytes);
+    if let Some(expected) = &planned.expected_sha256 {
+        ensure!(
+            archive_sha256.eq_ignore_ascii_case(expected),
+            "the archive of {} {} has SHA-256 {archive_sha256}, not the expected {expected}: \
+             it was not installed",
+            entry.name,
+            entry.version
+        );
+    }
     let mut zip = install::open_archive(bytes)?;
     let spec = spec::parse(&read_spec(&mut zip)?)?;
     let plan = install::plan(&roots, &spec, &mut zip)?;
@@ -822,5 +854,117 @@ fn refresh_palettes(env: &OpEnv, session: &InstallSession, applied: &Applied) {
             refresh_palettes_and_menus(env, t, HOOK_TIMEOUT_SECS);
         }
         Some(_) => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::events::NullSink;
+    use std::io::Write;
+
+    /// A scratch destination and a one-package archive, removed with it.
+    struct Scratch {
+        root: PathBuf,
+        archive: PathBuf,
+        sha256: String,
+    }
+
+    impl Scratch {
+        fn new(tag: &str) -> Scratch {
+            let root = std::env::temp_dir()
+                .join(format!("lvpm-install-test-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(&root).unwrap();
+            let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+            writer
+                .start_file("spec", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            writer
+                .write_all(b"[Package]\nName=alpha\nVersion=2.0\n")
+                .unwrap();
+            let bytes = writer.finish().unwrap().into_inner();
+            let archive = root.join("alpha-2.0.vip");
+            std::fs::write(&archive, &bytes).unwrap();
+            Scratch {
+                root,
+                archive,
+                sha256: sha256_hex(&bytes),
+            }
+        }
+
+        fn env<'a>(&self, sink: &'a NullSink) -> OpEnv<'a> {
+            let config = Config {
+                cache: self.root.join("cache"),
+                local_sources: Vec::new(),
+                venv_dir: PathBuf::from(".lv-venv"),
+            };
+            let mut env = OpEnv::new(sink, config, Vec::new(), self.root.clone());
+            env.flags.prefix = Some(self.root.join("dest"));
+            env
+        }
+
+        fn plan(&self, expected_sha256: Option<&str>) -> InstallPlan {
+            InstallPlan {
+                entries: vec![PlannedPackage {
+                    entry: Entry {
+                        name: "alpha".to_string(),
+                        version: Version::parse("2.0"),
+                        url: self.archive.to_string_lossy().into_owned(),
+                        md5: None,
+                        display_name: None,
+                        requires: Vec::new(),
+                        lv_min: None,
+                    },
+                    expected_sha256: expected_sha256.map(str::to_string),
+                }],
+            }
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn apply_plan(scratch: &Scratch, plan: &InstallPlan) -> Result<Applied> {
+        let env = scratch.env(&NullSink);
+        let mut session = InstallSession::new(env.destination().unwrap());
+        apply(&env, &mut session, plan, &InstallOptions::default())
+    }
+
+    #[test]
+    fn apply_refuses_an_archive_whose_hash_differs_from_the_plans_and_installs_nothing() {
+        let scratch = Scratch::new("refuses");
+        let plan = scratch.plan(Some(&"0".repeat(64)));
+        let why = apply_plan(&scratch, &plan).unwrap_err().to_string();
+        assert!(why.contains("alpha 2.0"), "{why}");
+        assert!(why.contains(&scratch.sha256), "{why}");
+        let roots = Roots::scratch(&scratch.root.join("dest"));
+        assert!(!install::is_installed(&roots, "alpha"));
+    }
+
+    #[test]
+    fn apply_installs_an_archive_that_hashes_as_the_plan_says() {
+        let scratch = Scratch::new("accepts");
+        // The case of the hex digits does not matter.
+        let plan = scratch.plan(Some(&scratch.sha256.to_uppercase()));
+        apply_plan(&scratch, &plan).unwrap();
+        let roots = Roots::scratch(&scratch.root.join("dest"));
+        let manifest = install::read_manifest(&roots, "alpha").unwrap();
+        assert_eq!(
+            manifest.archive_sha256.as_deref(),
+            Some(scratch.sha256.as_str())
+        );
+    }
+
+    #[test]
+    fn a_plan_that_names_no_hash_takes_the_archive_as_the_source_gives_it() {
+        let scratch = Scratch::new("unchecked");
+        apply_plan(&scratch, &scratch.plan(None)).unwrap();
+        let roots = Roots::scratch(&scratch.root.join("dest"));
+        assert!(install::is_installed(&roots, "alpha"));
     }
 }

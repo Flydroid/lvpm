@@ -74,6 +74,17 @@ pub struct CachedPackage {
     pub md5: String,
 }
 
+/// What the content store holds under a digest.
+#[derive(Debug)]
+pub(crate) enum Stored {
+    /// The bytes, which hash to the digest.
+    Intact(Vec<u8>),
+    /// A blob is there, and it hashes to `found_sha256` instead.
+    Corrupt { found_sha256: String },
+    /// Nothing is there, or the digest is not one.
+    Absent,
+}
+
 /// Where a source's body came from and how to ask whether it changed.
 ///
 /// `resolved_url` is kept apart from the `ref` it was looked up by because
@@ -386,19 +397,34 @@ impl Cache {
     }
 
     /// The stored bytes for a digest, if they are there and still hash to it.
+    /// Bytes that do not are removed.
     pub(crate) fn load(&self, sha: &str) -> Result<Option<Vec<u8>>> {
+        Ok(match self.lookup(sha) {
+            Stored::Intact(bytes) => Some(bytes),
+            Stored::Corrupt { .. } => {
+                std::fs::remove_file(self.blob_path(sha)).ok();
+                None
+            }
+            Stored::Absent => None,
+        })
+    }
+
+    /// What the store holds under a digest, told apart: a caller that must
+    /// say why it has nothing can tell a blob that is not there from one that
+    /// is there and wrong. Nothing is removed.
+    pub(crate) fn lookup(&self, sha: &str) -> Stored {
         if !valid_sha256(sha) {
-            return Ok(None);
+            return Stored::Absent;
         }
-        let path = self.blob_path(sha);
-        let Ok(bytes) = std::fs::read(&path) else {
-            return Ok(None);
+        let Ok(bytes) = std::fs::read(self.blob_path(sha)) else {
+            return Stored::Absent;
         };
-        if sha256_hex(&bytes) != sha {
-            std::fs::remove_file(&path).ok();
-            return Ok(None);
+        match sha256_hex(&bytes) {
+            found if found == sha => Stored::Intact(bytes),
+            found => Stored::Corrupt {
+                found_sha256: found,
+            },
         }
-        Ok(Some(bytes))
     }
 
     fn blob_path(&self, sha: &str) -> PathBuf {
@@ -474,6 +500,30 @@ mod tests {
         assert!(
             c.load(&sha).unwrap().is_none(),
             "bytes that do not hash to their name are not trusted"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_lookup_tells_a_blob_that_is_wrong_from_one_that_is_not_there() {
+        let root = temp_root("lookup");
+        let c = Cache::open(&root).unwrap();
+        let sha = c.store(b"original").unwrap();
+        assert!(matches!(c.lookup(&sha), Stored::Intact(bytes) if bytes == b"original"));
+        assert!(matches!(
+            c.lookup(&sha256_hex(b"never stored")),
+            Stored::Absent
+        ));
+        assert!(matches!(c.lookup("not a digest"), Stored::Absent));
+
+        std::fs::write(c.blob_path(&sha), b"tampered").unwrap();
+        assert!(matches!(
+            c.lookup(&sha),
+            Stored::Corrupt { found_sha256 } if found_sha256 == sha256_hex(b"tampered")
+        ));
+        assert!(
+            c.blob_path(&sha).is_file(),
+            "a lookup leaves the blob where it is"
         );
         std::fs::remove_dir_all(&root).ok();
     }

@@ -13,7 +13,7 @@ use lvpm_core::config::Config;
 use lvpm_core::events::{Event, Phase, SkipReason};
 use lvpm_core::index::Entry;
 use lvpm_core::install;
-use lvpm_core::ops::install::{InstallOptions, InstallPlan, apply, finish};
+use lvpm_core::ops::install::{InstallOptions, InstallPlan, PlannedPackage, apply, finish};
 use lvpm_core::ops::session::InstallSession;
 use lvpm_core::ops::{self, OpEnv};
 use lvpm_core::target::Roots;
@@ -138,7 +138,7 @@ async fn a_plan_built_by_hand(world: &mut CliWorld, name: String, version: Strin
     };
     world.install = InstallState {
         plan: Some(InstallPlan {
-            entries: vec![entry],
+            entries: vec![PlannedPackage::unchecked(entry)],
         }),
         archive,
     };

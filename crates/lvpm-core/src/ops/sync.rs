@@ -5,11 +5,19 @@
 //! written. Every change is a [`SyncStep`], and a removal carries the reason for
 //! it.
 
+use super::env::OpEnv;
+use super::install::PlannedPackage;
+use super::session::Downloads;
+use crate::cache::{Stored, sha256_hex};
+use crate::errors::{ArchiveFault, LockedArchiveProblem, SyncError};
 use crate::events::{RemoveReason, SyncStep};
+use crate::index::{self, Entry, Index};
 use crate::install::Manifest;
 use crate::lockfile::{LockedPackage, Lockfile};
+use crate::project::Project;
 use crate::version::Version;
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
 /// What a sync does to a destination.
 #[derive(Debug, Clone, PartialEq)]
@@ -125,6 +133,177 @@ fn visit<'a>(
         }
     }
     ordered.push(package);
+}
+
+/// Get every archive a sync will put on disk, before it changes anything.
+///
+/// An archive is found by its SHA-256, wherever it is: first in the cache,
+/// whose bytes are checked again because an entry can be corrupt, then in any
+/// source by name and version, keeping only the archive that hashes as locked.
+/// What is found is kept in the cache, and each package of the result reads it
+/// from there, so the bytes installed are the bytes that were checked.
+///
+/// An archive that is not found, or is found with other bytes, fails the whole
+/// fetch; every one that fails is reported.
+pub fn fetch_locked(
+    env: &OpEnv,
+    project: &Project,
+    wanted: &[LockedPackage],
+) -> Result<Vec<PlannedPackage>, SyncError> {
+    if wanted.is_empty() {
+        return Ok(Vec::new());
+    }
+    let downloads = Downloads::open(env)?;
+    let mut searches: Vec<Search> = wanted
+        .iter()
+        .map(|locked| Search::in_cache(&downloads, locked))
+        .collect();
+    for source in Source::all(env, project)? {
+        if searches.iter().all(|search| search.found) {
+            break;
+        }
+        let Some(index) = source.index(env) else {
+            continue;
+        };
+        for search in searches.iter_mut().filter(|search| !search.found) {
+            search.look_in(&downloads, &index)?;
+        }
+    }
+
+    let problems: Vec<LockedArchiveProblem> = searches.iter().filter_map(Search::problem).collect();
+    match problems.is_empty() {
+        true => Ok(searches.iter().map(Search::planned).collect()),
+        false => Err(SyncError::Archives(problems)),
+    }
+}
+
+/// The hunt for one locked archive.
+struct Search<'a> {
+    locked: &'a LockedPackage,
+    /// The archive is in the cache, with the locked bytes.
+    found: bool,
+    /// The SHA-256 of an archive that was found and is not the locked one.
+    differs: Option<String>,
+}
+
+impl<'a> Search<'a> {
+    fn in_cache(downloads: &Downloads, locked: &'a LockedPackage) -> Search<'a> {
+        let mut search = Search {
+            locked,
+            found: false,
+            differs: None,
+        };
+        match downloads.stored(&search.sha256()) {
+            Stored::Intact(_) => search.found = true,
+            Stored::Corrupt { found_sha256 } => search.differs = Some(found_sha256),
+            Stored::Absent => {}
+        }
+        search
+    }
+
+    fn sha256(&self) -> String {
+        self.locked.sha256.to_lowercase()
+    }
+
+    /// Try every entry of the index that has the locked name and version. One
+    /// that cannot be read holds nothing; one with other bytes is noted and
+    /// never used.
+    fn look_in(&mut self, downloads: &Downloads, index: &Index) -> anyhow::Result<()> {
+        let version = Version::parse(&self.locked.version);
+        for entry in index
+            .versions_of(&self.locked.name)
+            .into_iter()
+            .filter(|entry| entry.version == version)
+        {
+            let Ok(bytes) = downloads.fetch(entry) else {
+                continue;
+            };
+            let found = sha256_hex(&bytes);
+            if found == self.sha256() {
+                downloads.keep(&bytes)?;
+                self.found = true;
+                return Ok(());
+            }
+            self.differs = Some(found);
+        }
+        Ok(())
+    }
+
+    /// What is wrong, when the archive was not found.
+    fn problem(&self) -> Option<LockedArchiveProblem> {
+        let fault = match (&self.found, &self.differs) {
+            (true, _) => return None,
+            (false, Some(found_sha256)) => ArchiveFault::DiffersFromLock {
+                found_sha256: found_sha256.clone(),
+            },
+            (false, None) => ArchiveFault::NotFound,
+        };
+        Some(LockedArchiveProblem {
+            name: self.locked.name.clone(),
+            version: self.locked.version.clone(),
+            sha256: self.locked.sha256.clone(),
+            fault,
+        })
+    }
+
+    /// The package as a plan carries it: read from the cache, and checked
+    /// against the locked SHA-256 again when it is installed.
+    fn planned(&self) -> PlannedPackage {
+        PlannedPackage {
+            entry: Entry {
+                name: self.locked.name.clone(),
+                version: Version::parse(&self.locked.version),
+                url: format!("cache:{}", self.sha256()),
+                md5: None,
+                display_name: None,
+                requires: Vec::new(),
+                lv_min: None,
+            },
+            expected_sha256: Some(self.sha256()),
+        }
+    }
+}
+
+/// A place an archive may be: whatever was imported, each local folder, the
+/// public feeds and each hosted source of the project. They are asked one at a
+/// time, so that one that is gone does not hide what another holds.
+enum Source {
+    Imported,
+    Folder(PathBuf),
+    PublicFeeds,
+    Feed(String),
+}
+
+impl Source {
+    fn all(env: &OpEnv, project: &Project) -> anyhow::Result<Vec<Source>> {
+        let mut sources = vec![Source::Imported];
+        sources.extend(env.config.local_sources.iter().cloned().map(Source::Folder));
+        if project.default_sources {
+            sources.push(Source::PublicFeeds);
+        }
+        sources.extend(project.resolved_sources()?.into_iter().map(Source::Feed));
+        Ok(sources)
+    }
+
+    /// The source's index, or none when it cannot be read: a folder that is
+    /// gone and a feed that is down hold nothing.
+    fn index(&self, env: &OpEnv) -> Option<Index> {
+        let (feeds, folders, defaults) = match self {
+            Source::Imported => (Vec::new(), Vec::new(), false),
+            Source::Folder(dir) => (Vec::new(), vec![dir.clone()], false),
+            Source::PublicFeeds => (Vec::new(), Vec::new(), true),
+            Source::Feed(url) => (vec![url.clone()], Vec::new(), false),
+        };
+        index::load(
+            &env.config.cache,
+            env.refresh,
+            &feeds,
+            &folders,
+            defaults,
+            env.sink,
+        )
+        .ok()
+    }
 }
 
 #[cfg(test)]
@@ -367,5 +546,272 @@ mod tests {
             locked("two", "1.0", &["one"], false),
         ]);
         assert_eq!(plan_sync(&lock, &[], false).steps.len(), 2);
+    }
+
+    // ---- fetching by SHA-256 ----
+
+    use crate::cache::Cache;
+    use crate::config::Config;
+    use crate::events::NullSink;
+    use std::io::Write;
+    use std::path::Path;
+
+    /// A scratch directory with a cache, a local package folder and a second
+    /// one, removed when it goes out of scope.
+    struct Scratch {
+        root: PathBuf,
+    }
+
+    impl Scratch {
+        fn new(tag: &str) -> Scratch {
+            let root =
+                std::env::temp_dir().join(format!("lvpm-sync-test-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(root.join("packages")).unwrap();
+            std::fs::create_dir_all(root.join("more-packages")).unwrap();
+            Scratch { root }
+        }
+
+        fn folder(&self) -> PathBuf {
+            self.root.join("packages")
+        }
+
+        fn cache(&self) -> Cache {
+            Cache::open(&self.root.join("cache")).unwrap()
+        }
+
+        fn env<'a>(&self, sink: &'a NullSink, folders: Vec<PathBuf>) -> OpEnv<'a> {
+            let config = Config {
+                cache: self.root.join("cache"),
+                local_sources: folders,
+                venv_dir: PathBuf::from(".lv-venv"),
+            };
+            OpEnv::new(sink, config, Vec::new(), self.root.clone())
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    /// A `.vip` with only a spec. `tag` is written into the spec, so that two
+    /// archives of one package and version can have different bytes.
+    fn vip(name: &str, version: &str, tag: &str) -> Vec<u8> {
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        writer
+            .start_file("spec", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        let spec = format!(
+            "[Package]\nName={name}\nVersion={version}\nDisplay Name={tag}\n\
+             [Platform]\nExclusive_LabVIEW_Version=LabVIEW>=20.0\n"
+        );
+        writer.write_all(spec.as_bytes()).unwrap();
+        writer.finish().unwrap().into_inner()
+    }
+
+    fn put(dir: &Path, name: &str, version: &str, bytes: &[u8]) {
+        std::fs::write(dir.join(format!("{name}-{version}.vip")), bytes).unwrap();
+    }
+
+    fn locked_as(name: &str, version: &str, bytes: &[u8]) -> LockedPackage {
+        let mut package = locked(name, version, &[], false);
+        package.sha256 = sha256_hex(bytes);
+        package
+    }
+
+    fn manifest(sources: &str) -> Project {
+        crate::project::parse(&format!(
+            "[project]\nlabview = \"2024\"\n\n[sources]\n{sources}defaults = false\n"
+        ))
+        .unwrap()
+    }
+
+    fn problems(why: SyncError) -> Vec<LockedArchiveProblem> {
+        match why {
+            SyncError::Archives(problems) => problems,
+            other => panic!("expected archive problems, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_archive_in_the_cache_is_used_with_no_source_at_all() {
+        let scratch = Scratch::new("cache-hit");
+        let bytes = vip("alpha", "2.0", "");
+        scratch.cache().store(&bytes).unwrap();
+        let lock = locked_as("alpha", "2.0", &bytes);
+
+        let planned = fetch_locked(
+            &scratch.env(&NullSink, vec![]),
+            &manifest(""),
+            std::slice::from_ref(&lock),
+        )
+        .unwrap();
+        assert_eq!(planned.len(), 1);
+        assert_eq!(planned[0].entry.name, "alpha");
+        assert_eq!(planned[0].entry.url, format!("cache:{}", lock.sha256));
+        assert_eq!(
+            planned[0].expected_sha256.as_deref(),
+            Some(lock.sha256.as_str())
+        );
+    }
+
+    #[test]
+    fn an_archive_found_in_a_local_folder_is_kept_in_the_cache() {
+        let scratch = Scratch::new("folder");
+        let bytes = vip("alpha", "2.0", "");
+        put(&scratch.folder(), "alpha", "2.0", &bytes);
+        let lock = locked_as("alpha", "2.0", &bytes);
+
+        let env = scratch.env(&NullSink, vec![scratch.folder()]);
+        let planned = fetch_locked(&env, &manifest(""), std::slice::from_ref(&lock)).unwrap();
+        assert_eq!(planned[0].entry.url, format!("cache:{}", lock.sha256));
+        assert_eq!(
+            scratch.cache().load(&lock.sha256).unwrap().as_deref(),
+            Some(bytes.as_slice()),
+            "a plan that reads the cache needs the bytes there"
+        );
+    }
+
+    #[test]
+    fn a_source_that_has_gone_does_not_hide_the_one_that_has_the_archive() {
+        let scratch = Scratch::new("moved");
+        let bytes = vip("alpha", "2.0", "");
+        put(&scratch.root.join("more-packages"), "alpha", "2.0", &bytes);
+        let lock = locked_as("alpha", "2.0", &bytes);
+
+        // The folder the lock was made from is gone, and so is the feed.
+        let gone = scratch.root.join("no-longer-there");
+        let env = scratch.env(&NullSink, vec![gone, scratch.root.join("more-packages")]);
+        let project = manifest("dead = \"http://127.0.0.1:1/feed\"\n");
+        let planned = fetch_locked(&env, &project, &[lock]).unwrap();
+        assert_eq!(planned.len(), 1);
+    }
+
+    #[test]
+    fn an_imported_archive_needs_no_source() {
+        let scratch = Scratch::new("imported");
+        let bytes = vip("alpha", "2.0", "");
+        put(&scratch.folder(), "alpha", "2.0", &bytes);
+        index::cache_add(
+            &scratch.root.join("cache"),
+            &scratch.folder().join("alpha-2.0.vip"),
+            false,
+        )
+        .unwrap();
+        std::fs::remove_file(scratch.folder().join("alpha-2.0.vip")).unwrap();
+        let lock = locked_as("alpha", "2.0", &bytes);
+
+        let planned =
+            fetch_locked(&scratch.env(&NullSink, vec![]), &manifest(""), &[lock]).unwrap();
+        assert_eq!(planned.len(), 1);
+    }
+
+    #[test]
+    fn a_missing_archive_fails_the_whole_fetch_and_every_missing_one_is_named() {
+        let scratch = Scratch::new("missing");
+        let there = vip("alpha", "2.0", "");
+        put(&scratch.folder(), "alpha", "2.0", &there);
+        let locks = [
+            locked_as("alpha", "2.0", &there),
+            locked_as("beta", "1.0", b"nobody has these bytes"),
+            locked_as("gamma", "1.0", b"nor these"),
+        ];
+
+        let env = scratch.env(&NullSink, vec![scratch.folder()]);
+        let found = problems(fetch_locked(&env, &manifest(""), &locks).unwrap_err());
+        assert_eq!(
+            found
+                .iter()
+                .map(|problem| (
+                    problem.name.as_str(),
+                    problem.version.as_str(),
+                    &problem.fault
+                ))
+                .collect::<Vec<_>>(),
+            [
+                ("beta", "1.0", &ArchiveFault::NotFound),
+                ("gamma", "1.0", &ArchiveFault::NotFound)
+            ]
+        );
+        assert_eq!(found[0].sha256, locks[1].sha256);
+    }
+
+    #[test]
+    fn an_archive_with_other_bytes_is_never_used_and_is_told_from_a_missing_one() {
+        let scratch = Scratch::new("differs-folder");
+        let locked_bytes = vip("alpha", "2.0", "what the lock has");
+        let other_bytes = vip("alpha", "2.0", "something else");
+        put(&scratch.folder(), "alpha", "2.0", &other_bytes);
+        let lock = locked_as("alpha", "2.0", &locked_bytes);
+
+        let env = scratch.env(&NullSink, vec![scratch.folder()]);
+        let found = problems(fetch_locked(&env, &manifest(""), &[lock]).unwrap_err());
+        assert_eq!(
+            found[0].fault,
+            ArchiveFault::DiffersFromLock {
+                found_sha256: sha256_hex(&other_bytes)
+            }
+        );
+        assert!(
+            scratch
+                .cache()
+                .load(&sha256_hex(&other_bytes))
+                .unwrap()
+                .is_none(),
+            "bytes that are not the locked ones are not kept"
+        );
+    }
+
+    #[test]
+    fn a_corrupt_cache_entry_is_an_archive_with_other_bytes() {
+        let scratch = Scratch::new("differs-cache");
+        let bytes = vip("alpha", "2.0", "");
+        let sha256 = scratch.cache().store(&bytes).unwrap();
+        let blob = scratch
+            .root
+            .join("cache/content/sha256")
+            .join(&sha256[..2])
+            .join(&sha256);
+        std::fs::write(&blob, b"not what was stored").unwrap();
+        let lock = locked_as("alpha", "2.0", &bytes);
+
+        let found = problems(
+            fetch_locked(&scratch.env(&NullSink, vec![]), &manifest(""), &[lock]).unwrap_err(),
+        );
+        assert_eq!(
+            found[0].fault,
+            ArchiveFault::DiffersFromLock {
+                found_sha256: sha256_hex(b"not what was stored")
+            }
+        );
+    }
+
+    #[test]
+    fn a_corrupt_cache_entry_is_replaced_by_the_right_archive_from_a_source() {
+        let scratch = Scratch::new("repair");
+        let bytes = vip("alpha", "2.0", "");
+        let sha256 = scratch.cache().store(&bytes).unwrap();
+        let blob = scratch
+            .root
+            .join("cache/content/sha256")
+            .join(&sha256[..2])
+            .join(&sha256);
+        std::fs::write(&blob, b"corrupt").unwrap();
+        put(&scratch.folder(), "alpha", "2.0", &bytes);
+        let lock = locked_as("alpha", "2.0", &bytes);
+
+        let env = scratch.env(&NullSink, vec![scratch.folder()]);
+        fetch_locked(&env, &manifest(""), &[lock]).unwrap();
+        assert_eq!(scratch.cache().load(&sha256).unwrap(), Some(bytes));
+    }
+
+    #[test]
+    fn nothing_wanted_opens_nothing() {
+        let scratch = Scratch::new("nothing");
+        let env = scratch.env(&NullSink, vec![]);
+        assert!(fetch_locked(&env, &manifest(""), &[]).unwrap().is_empty());
+        assert!(!scratch.root.join("cache").exists());
     }
 }
