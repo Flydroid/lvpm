@@ -6,3 +6,9 @@
 /*.json
 
 __pycache__/
+
+# Archify scratch output and render receipts (the .archify.json source and .html stay)
+/.archify/
+/docs/vision/*.finalize*.json
+/docs/vision/*.delivery.json
+/docs/vision/*.browser-check.json
