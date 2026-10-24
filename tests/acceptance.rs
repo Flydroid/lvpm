@@ -40,6 +40,7 @@ const FEATURE_FILES: &[&str] = &[
     "tests/features/lvpm-lockfile/slice-10-exact-sync.feature",
     "tests/features/lvpm-lockfile/slice-11-headless-implies-locked.feature",
     "tests/features/lvpm-lockfile/slice-12-upgrades.feature",
+    "tests/features/lvpm-lockfile/slice-13-lvpm-add-lvpm-remove-install-pkg-routing.feature",
 ];
 const LABVIEW_TAG: &str = "labview";
 /// A scenario that needs a later slice, tagged `@pending-<slice>`. It is not
@@ -81,6 +82,8 @@ pub struct CliWorld {
     pub staleness: steps::staleness::StalenessState,
     /// What an exact-sync scenario has set up and seen.
     pub sync: steps::sync::SyncState,
+    /// What an add or remove scenario has seen of a call into core.
+    pub add_remove: steps::add_remove::AddRemoveState,
 }
 
 impl CliWorld {
@@ -100,6 +103,7 @@ impl CliWorld {
             lock: Default::default(),
             staleness: Default::default(),
             sync: Default::default(),
+            add_remove: Default::default(),
         }
     }
 

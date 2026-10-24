@@ -216,7 +216,7 @@ fn new_lock(
 
 /// The first sync of a project removes what the lock it just made does not
 /// list, which nobody asked for in so many words: say so.
-fn announce_migration(env: &OpEnv, plan: &SyncPlan) {
+pub(super) fn announce_migration(env: &OpEnv, plan: &SyncPlan) {
     let removing: Vec<PackageRef> = plan
         .steps
         .iter()

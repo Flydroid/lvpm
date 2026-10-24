@@ -40,9 +40,9 @@ pub struct SyncState {
 }
 
 #[derive(Debug)]
-struct Before {
-    dest: Snapshot,
-    manifest: Vec<u8>,
+pub(super) struct Before {
+    pub(super) dest: Snapshot,
+    pub(super) manifest: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -143,7 +143,7 @@ fn quoted(text: &str) -> Vec<String> {
 }
 
 impl CliWorld {
-    fn dest_dir(&self) -> PathBuf {
+    pub(super) fn dest_dir(&self) -> PathBuf {
         self.sandbox.work_dir().join(DEST_DIR)
     }
 
@@ -170,7 +170,7 @@ impl CliWorld {
         self.lock.before = self.lock_bytes();
     }
 
-    fn sync_into_dest(&self) {
+    pub(super) fn sync_into_dest(&self) {
         self.sandbox.setup_lvpm(&["sync", "--prefix", DEST_DIR]);
     }
 
@@ -192,7 +192,7 @@ impl CliWorld {
         });
     }
 
-    fn noted(&self) -> &Before {
+    pub(super) fn noted(&self) -> &Before {
         self.sync.before.as_ref().expect("the project was noted")
     }
 
@@ -204,7 +204,7 @@ impl CliWorld {
         assert_eq!(locked, wanted, "what lvpm.lock holds");
     }
 
-    fn assert_dest_unchanged(&self) {
+    pub(super) fn assert_dest_unchanged(&self) {
         assert_eq!(
             snapshot(&self.dest_dir()),
             self.noted().dest,

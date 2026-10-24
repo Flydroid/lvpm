@@ -17,7 +17,8 @@ pub enum DependencyTable {
 }
 
 impl DependencyTable {
-    fn key(self) -> &'static str {
+    /// The table's name in the manifest, as it appears between brackets.
+    pub fn key(self) -> &'static str {
         match self {
             DependencyTable::Dependencies => "dependencies",
             DependencyTable::DevDependencies => "dev-dependencies",

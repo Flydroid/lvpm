@@ -6,6 +6,7 @@
 
 use crate::events::SyncStep;
 use crate::lockfile::StaleReason;
+use crate::manifest_edit::DependencyTable;
 use crate::solve::Conflict;
 use std::path::PathBuf;
 
@@ -89,6 +90,34 @@ pub enum SyncError {
         done: Vec<SyncStep>,
         left: Vec<SyncStep>,
         cause: String,
+    },
+    /// Anything else that went wrong: its own text.
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+/// Why `add` or `remove` changed nothing in `lvpm.toml` and `lvpm.lock`, or
+/// put both back as they were.
+#[derive(Debug, thiserror::Error)]
+pub enum EditError {
+    /// The edit could not be locked: [`LockError`]'s own words.
+    #[error(transparent)]
+    Lock(#[from] LockError),
+    /// The destination could not be synced to the new lock: [`SyncError`]'s own
+    /// words. Both files are as they were.
+    #[error(transparent)]
+    Sync(#[from] SyncError),
+    /// A package was written `name@` with nothing after the `@`.
+    #[error("a constraint is expected after \"@\" in \"{name}@\"")]
+    EmptyConstraint { name: String },
+    /// `remove` names a package that is in neither dependency table.
+    #[error("{name} is not in lvpm.toml")]
+    NotADependency { name: String },
+    /// `remove` names a package that is in the other dependency table.
+    #[error("{name} is in [{}]", .found_in.key())]
+    InOtherTable {
+        name: String,
+        found_in: DependencyTable,
     },
     /// Anything else that went wrong: its own text.
     #[error(transparent)]

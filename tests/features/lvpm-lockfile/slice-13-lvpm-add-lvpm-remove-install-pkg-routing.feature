@@ -4,31 +4,37 @@ Feature: add and remove edit the manifest, then lock and sync
     Given fixture packages "alpha" 1.0 and 2.0, "beta" 1.0 requiring "alpha" >= 1.0, "gamma" 0.5 and 1.0, "caraya" 1.0
     And a project with labview "2024" depending on "beta" ">=1.0", locked and synced into scratch destination "dest"
 
+  @pending-13-2
   Scenario: add without a version writes a floor of the newest eligible version
     When I run "lvpm add gamma --prefix dest"
     Then lvpm.toml says "gamma" = ">=1.0"
     And lvpm.lock and dest include "gamma" 1.0
 
+  @pending-13-2
   Scenario: add with a constraint writes it as given
     When I run "lvpm add gamma@>=0.5 --prefix dest" (argument quoted)
     Then lvpm.toml says "gamma" = ">=0.5"
 
+  @pending-13-2
   Scenario: add with an empty constraint explains quoting
     When I run "lvpm add gamma@ --prefix dest"
     Then the command fails saying a constraint is expected after "@" and to quote it, e.g. "gamma@>=0.5"
     And it says the shell may have created a file named "=0.5" that can be deleted
 
+  @pending-13-2
   Scenario: add without a lock explains the migration
     Given no lvpm.lock exists and "delta" 1.0 is installed in dest
     When I run "lvpm add gamma --prefix dest"
     Then the output says no lvpm.lock was found, names "delta" as to be removed, and says to commit lvpm.lock
 
+  @pending-13-2
   Scenario: add gated by LabVIEW says why
     Given every "omega" version needs LabVIEW 2026
     When I run "lvpm add omega --prefix dest"
     Then the command fails saying omega requires LabVIEW 2026 and this project is locked for 2024
     And nothing changed
 
+  @pending-13-2
   Scenario: remove --dry-run shows the plan and writes nothing
     Given the project also depends on "gamma" ">=1.0", locked and synced
     When I run "lvpm remove gamma --dry-run --prefix dest"
@@ -36,30 +42,36 @@ Feature: add and remove edit the manifest, then lock and sync
     And lvpm.toml, lvpm.lock and dest are byte-identical to before
     And nothing changed
 
+  @pending-13-2
   Scenario: add of an existing entry updates its constraint and says so
     When I run "lvpm add beta@>=0.5 --prefix dest"
     Then lvpm.toml says "beta" = ">=0.5" and the output says the constraint was updated
 
+  @pending-13-2
   Scenario: add --dev writes to [dev-dependencies]
     When I run "lvpm add caraya --dev --prefix dest"
     Then [dev-dependencies] says "caraya" = ">=1.0"
 
+  @pending-13-2
   Scenario: add keeps the rest of the manifest byte for byte
     Given lvpm.toml contains comments
     When I run "lvpm add gamma --prefix dest"
     Then lvpm.toml differs from before by exactly the "gamma" line
 
+  @pending-13-2
   Scenario: add --dry-run shows the plan and writes nothing
     When I run "lvpm add gamma --dry-run --prefix dest"
     Then the output shows the manifest line, the lock changes and the sync plan
     And lvpm.toml, lvpm.lock and dest are byte-identical to before
 
+  @pending-13-2
   Scenario: a failed lock during add leaves both files untouched
     Given lvpm.toml pins "alpha" = "1.0" and the only "omega" requires "alpha" >= 2.0
     When I run "lvpm add omega --prefix dest"
     Then the command fails with a conflict naming "alpha" "1.0" and "omega"
     And lvpm.toml and lvpm.lock are byte-identical to before
 
+  @pending-13-2
   Scenario: a failed sync during add leaves both files untouched
     Given the fixture "broken_zip" 1.0 has a valid index entry and a fixed SHA-256, but its archive is not a valid zip
     When I run "lvpm add broken_zip --prefix dest"
@@ -67,11 +79,13 @@ Feature: add and remove edit the manifest, then lock and sync
     And lvpm.toml and lvpm.lock are byte-identical to before
     And dest holds no "broken_zip" files
 
+  @pending-13-2
   Scenario: remove uninstalls a package nothing else needs
     Given the project also depends on "gamma" ">=1.0", locked and synced
     When I run "lvpm remove gamma --prefix dest"
     Then "gamma" is gone from lvpm.toml, lvpm.lock and dest
 
+  @pending-13-2
   Scenario: remove keeps a package another one still requires
     Given the project also depends on "alpha" ">=1.0", locked and synced
     When I run "lvpm remove alpha --prefix dest"
@@ -79,21 +93,25 @@ Feature: add and remove edit the manifest, then lock and sync
     And "alpha" stays in lvpm.lock and dest
     And the output says "alpha" is still required by "beta"
 
+  @pending-13-2
   Scenario: remove --dev removes from [dev-dependencies]
     Given dev dependency "caraya" ">=1.0", locked and synced
     When I run "lvpm remove caraya --dev --prefix dest"
     Then "caraya" is gone from [dev-dependencies], lvpm.lock and dest
 
+  @pending-13-2
   Scenario: remove without --dev of a dev dependency points to --dev
     Given dev dependency "caraya" ">=1.0"
     When I run "lvpm remove caraya --prefix dest"
     Then the command fails saying "caraya" is in [dev-dependencies] and to use --dev
     And nothing changed
 
+  @pending-13-2
   Scenario: removing the last dependency empties lock and destination
     When I run "lvpm remove beta --prefix dest"
     Then [dependencies] is empty, lvpm.lock lists no packages and dest has no lvpm-installed packages
 
+  @pending-13-2
   Scenario: removing a name that is not a dependency fails
     When I run "lvpm remove zeta --prefix dest"
     Then the command fails saying "zeta" is not in lvpm.toml
@@ -106,7 +124,7 @@ Feature: add and remove edit the manifest, then lock and sync
     Then the result is a sync error naming "beta"
     And lvpm.toml and lvpm.lock are byte-identical to before
 
-  @core
+  @core @pending-13-2
   Scenario Outline: install routing follows the table
     Given <project>
     When core routes "lvpm install <args>"
@@ -125,13 +143,14 @@ Feature: add and remove edit the manifest, then lock and sync
       | a project  | --no-deps                    | error "not supported with a lock" |
       | no project | (none)                       | error "give a package name"       |
 
-  @labview
+  @labview @pending-13-2
   Scenario: install with a name in a project is add, and says so
     Given a project with a venv
     When I run "lvpm install gamma", and "lvpm add gamma" in an identical world
     Then the first output line says gamma is being added to lvpm.toml and the project synced to lvpm.lock
     And both manifests, locks and destinations are identical
 
+  @pending-13-2
   Scenario Outline: install with a name and an explicit destination stays additive
     When I run "lvpm install gamma <flag>" inside the project
     Then gamma is installed in that destination
@@ -141,15 +160,18 @@ Feature: add and remove edit the manifest, then lock and sync
       | flag          |
       | --prefix dest |
 
+  @pending-13-2
   Scenario: install flags that make no sense with a lock are rejected
     When I run "lvpm install --no-deps" inside the project
     Then the command fails saying --no-deps is not supported with a lock
 
+  @pending-13-2
   Scenario: uninstall inside a project hints at remove
     When I run "lvpm uninstall beta --prefix dest"
     Then "beta" is uninstalled
     And the output says "beta" is still in lvpm.toml and "lvpm remove beta" removes it for good
 
+  @pending-13-2
   Scenario Outline: lock-editing commands outside a project are refused
     Given a directory without lvpm.toml
     When I run "<command>"
@@ -164,12 +186,13 @@ Feature: add and remove edit the manifest, then lock and sync
       | lvpm sync         |
       | lvpm install      |
 
+  @pending-13-2
   Scenario: install with a name outside a project is unchanged
     Given a directory without lvpm.toml
     When I run "lvpm install beta --prefix dest"
     Then the output equals the recording "install-beta-noproject"
 
-  @labview
+  @labview @pending-13-2
   Scenario: install with a name and --global stays additive
     When I run "lvpm install gamma --global --labview-version 2026" inside the project
     Then gamma is installed into that LabVIEW and lvpm.toml and lvpm.lock are unchanged

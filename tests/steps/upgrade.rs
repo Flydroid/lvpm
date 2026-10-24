@@ -297,7 +297,10 @@ async fn the_manifest_is_unchanged(world: &mut CliWorld) {
 
 #[then("lvpm.toml and lvpm.lock are byte-identical to before")]
 async fn the_manifest_and_the_lock_are_unchanged(world: &mut CliWorld) {
-    world.assert_failed();
+    // A scenario that called core ran no command to have failed.
+    if world.last_output.is_some() {
+        world.assert_failed();
+    }
     assert_eq!(
         String::from_utf8_lossy(&world.manifest_bytes()),
         world.manifest_before(),

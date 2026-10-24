@@ -255,6 +255,19 @@ pub enum Event {
         from: String,
         to: String,
     },
+    /// `add` or `remove` changed one entry of the manifest. `dev`: the entry
+    /// is in `[dev-dependencies]`. `dry_run`: it is shown and not written.
+    ManifestEdited {
+        edit: ManifestEdit,
+        dev: bool,
+        dry_run: bool,
+    },
+    /// A package `remove` took out of the manifest stays locked and installed:
+    /// these locked packages still require it.
+    PackageStillRequired {
+        name: String,
+        required_by: Vec<String>,
+    },
     /// The lock on disk still represents the manifest, so it was left alone.
     LockUpToDate { path: PathBuf },
     /// An upgrade found nothing newer than the lock holds, so it was left
@@ -289,6 +302,27 @@ pub enum Event {
 pub struct PackageRef {
     pub name: String,
     pub version: String,
+}
+
+/// What `add` or `remove` did to one entry of the manifest. A constraint is as
+/// the manifest writes it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "edit", rename_all = "snake_case")]
+pub enum ManifestEdit {
+    Added {
+        name: String,
+        constraint: String,
+    },
+    /// The entry was there, with another constraint.
+    Updated {
+        name: String,
+        from: String,
+        to: String,
+    },
+    Removed {
+        name: String,
+        constraint: String,
+    },
 }
 
 /// One difference between two locks.

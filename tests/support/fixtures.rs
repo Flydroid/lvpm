@@ -197,6 +197,17 @@ pub const UPGRADE_PACKAGES: &[FixturePackage] = &[
     text_package("gamma", "2.0", &[], "20.0"),
 ];
 
+/// What the add and remove scenarios publish: alpha 1.0 and 2.0, beta 1.0
+/// requiring alpha >= 1.0, gamma 0.5 and 1.0, and caraya 1.0.
+pub const ADD_PACKAGES: &[FixturePackage] = &[
+    text_package("alpha", "1.0", &[], "20.0"),
+    text_package("alpha", "2.0", &[], "20.0"),
+    text_package("beta", "1.0", &[("alpha", "1.0")], "20.0"),
+    text_package("gamma", "0.5", &[], "20.0"),
+    text_package("gamma", "1.0", &[], "20.0"),
+    text_package("caraya", "1.0", &[], "20.0"),
+];
+
 /// An alpha 3.0 that needs LabVIEW 2026.
 pub const ALPHA_3_NEEDING_LABVIEW_2026: FixturePackage = text_package("alpha", "3.0", &[], "26.0");
 

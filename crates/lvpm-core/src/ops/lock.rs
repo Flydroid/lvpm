@@ -130,12 +130,12 @@ pub fn upgrade(env: &OpEnv, which: &Upgrade) -> Result<Lockfile, LockError> {
         return Ok(lock);
     }
     let text = lock.to_toml()?;
+    let manifest = pins
+        .rewrite
+        .as_ref()
+        .map(|rewrite| (manifest_path.as_path(), rewrite.text.as_str()));
     restoring_on_failure(&[manifest_path, &lock_path], || {
-        if let Some(rewrite) = &pins.rewrite {
-            std::fs::write(manifest_path, &rewrite.text)
-                .with_context(|| format!("writing {}", manifest_path.display()))?;
-        }
-        write_atomically(&lock_path, &text)
+        write_manifest_and_lock(manifest, &lock_path, &text)
     })?;
     for update in pins.rewrite.iter().flat_map(|rewrite| &rewrite.updates) {
         env.sink.emit(Event::ManifestUpdated {
@@ -149,7 +149,12 @@ pub fn upgrade(env: &OpEnv, which: &Upgrade) -> Result<Lockfile, LockError> {
 }
 
 /// What changed in the lock just written, and that it is on disk.
-fn announce_written(env: &OpEnv, lock_path: PathBuf, lock: &Lockfile, changes: Vec<LockChange>) {
+pub(super) fn announce_written(
+    env: &OpEnv,
+    lock_path: PathBuf,
+    lock: &Lockfile,
+    changes: Vec<LockChange>,
+) {
     if !changes.is_empty() {
         env.sink.emit(Event::LockChanged { changes });
     }
@@ -351,7 +356,36 @@ pub(super) fn relock(
     previous: Option<&Lockfile>,
 ) -> Result<(Lockfile, Vec<LockChange>), LockError> {
     let index = env.load_index(Some(found))?;
-    relock_in(env, &found.1, &index, previous, &Moving::Nothing, &[])
+    relock_with(env, &found.1, &index, previous)
+}
+
+/// [`relock`] for `project` against an index already loaded.
+pub(super) fn relock_with(
+    env: &OpEnv,
+    project: &Project,
+    index: &Index,
+    previous: Option<&Lockfile>,
+) -> Result<(Lockfile, Vec<LockChange>), LockError> {
+    relock_in(env, project, index, previous, &Moving::Nothing, &[])
+}
+
+/// The version the solver chooses for `name` in `project`, keeping the
+/// versions `previous` holds where they still fit; `None` when `project` has
+/// no use for it.
+pub(super) fn resolved_version(
+    env: &OpEnv,
+    project: &Project,
+    index: &Index,
+    previous: Option<&Lockfile>,
+    name: &str,
+) -> Result<Option<Version>, LockError> {
+    let gate = lv_gate(project.labview.as_deref().ok_or(LockError::NoLabview)?)?;
+    let preferences = preferences(previous, &Moving::Nothing);
+    let resolution = resolve(env, project, index, &preferences, &[], gate)?;
+    Ok(resolution
+        .packages
+        .get(&name.to_lowercase())
+        .map(|entry| entry.version.clone()))
 }
 
 /// [`relock`] for `project` against `index`, with `moving` letting some
@@ -422,7 +456,7 @@ pub(super) fn read_lock(path: &Path) -> Result<Lockfile, LockError> {
 }
 
 /// The project's LabVIEW in the units of an index's `lv_min`: 24.0 for 2024.
-fn lv_gate(labview: &str) -> Result<f64, LockError> {
+pub(super) fn lv_gate(labview: &str) -> Result<f64, LockError> {
     match labview.trim().parse::<u32>() {
         Ok(year) if year >= 2000 => Ok(f64::from(year - 2000)),
         _ => Err(LockError::LabviewNotAYear {
@@ -646,6 +680,20 @@ fn changes(old: Option<&Lockfile>, new: &Lockfile) -> Vec<LockChange> {
             _ => None,
         })
         .collect()
+}
+
+/// Write the manifest `text`, when there is one to write, and then the lock.
+/// The caller puts both back when anything after this fails
+/// ([`restoring_on_failure`]), so that the two never disagree on disk.
+pub(super) fn write_manifest_and_lock(
+    manifest: Option<(&Path, &str)>,
+    lock_path: &Path,
+    lock_text: &str,
+) -> anyhow::Result<()> {
+    if let Some((path, text)) = manifest {
+        std::fs::write(path, text).with_context(|| format!("writing {}", path.display()))?;
+    }
+    write_atomically(lock_path, lock_text)
 }
 
 /// The new text goes beside the old file first and replaces it in one step:

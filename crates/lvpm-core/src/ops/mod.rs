@@ -2,6 +2,7 @@
 //! reports through its sink; none prints, reads the environment or knows which
 //! front end called it.
 
+pub mod add_remove;
 pub mod env;
 pub mod hooks;
 pub mod install;

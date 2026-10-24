@@ -2,6 +2,7 @@
 //! do: set a scenario up, work with a venv, run a command, check a recording,
 //! call core in-process.
 
+pub mod add_remove;
 pub mod destination;
 pub mod headless;
 pub mod in_process;

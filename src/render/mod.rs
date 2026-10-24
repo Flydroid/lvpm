@@ -6,6 +6,7 @@
 //! the wording of that module's events; this file routes events to them and
 //! owns the two streams. `query` words what a query returns instead.
 
+pub mod edit;
 mod env;
 mod headless;
 mod hooks;
@@ -109,6 +110,9 @@ impl Renderer {
             | Event::ManifestUpdated { .. }
             | Event::LockNothingNewer { .. }
             | Event::LockWouldChange { .. } => lock::render(self, event),
+            Event::ManifestEdited { .. } | Event::PackageStillRequired { .. } => {
+                edit::render(self, event)
+            }
             Event::SyncLockMissing { .. }
             | Event::SyncUnresolved { .. }
             | Event::SyncMigration { .. }
