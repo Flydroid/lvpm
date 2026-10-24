@@ -24,7 +24,7 @@ impl CliWorld {
         self.note_the_project();
     }
 
-    fn assert_succeeded(&self) {
+    pub(super) fn assert_succeeded(&self) {
         assert_eq!(self.output().exit_code, 0, "{}", self.printed());
     }
 

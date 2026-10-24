@@ -25,6 +25,9 @@ pub const NI_FEED_DIR: &str = "/evaluation/labview/lvtn/vipm/";
 pub const JKI_FEED_INDEX: &str = "/packages/jkisoft.ogpd";
 /// Feeds whose archives are broken in the ways a real server's can be.
 pub const FAULTY_FEED_DIR: &str = "/faulty/";
+/// A feed with one package, `broken_zip` 1.0, whose archive is not a zip.
+pub const BROKEN_FEED_DIR: &str = "/broken/";
+const BROKEN_ARCHIVE_ID: &str = "broken_zip-1.0";
 /// A feed listing more packages than `lvpm search` prints.
 pub const CATALOG_FEED_DIR: &str = "/catalog/";
 /// How many packages the catalog feed lists: more than search's cap of 40.
@@ -186,6 +189,11 @@ fn routes(packages: &[FixturePackage]) -> Routes {
     routes.insert(JKI_FEED_INDEX.to_string(), listing(&[], false).into_bytes());
     routes.insert(index_path(CATALOG_FEED_DIR), catalog_listing().into_bytes());
     routes.insert(index_path(FAULTY_FEED_DIR), faulty_listing().into_bytes());
+    routes.insert(index_path(BROKEN_FEED_DIR), broken_listing().into_bytes());
+    routes.insert(
+        archive_path(BROKEN_FEED_DIR, &format!("{BROKEN_ARCHIVE_ID}.vip")),
+        NOT_AN_ARCHIVE.to_vec(),
+    );
     for archive in FAULTY_ARCHIVES {
         if let Some(bytes) = archive.served {
             routes.insert(
@@ -222,6 +230,17 @@ fn faulty_listing() -> String {
         ));
     }
     body
+}
+
+/// `broken_zip` 1.0: a valid entry, with the MD5 of the bytes the server
+/// serves, which are not a zip archive.
+fn broken_listing() -> String {
+    format!(
+        "; lvpm acceptance fixture: an archive that is listed and served but is not a zip\n\n\
+         [Package {BROKEN_ARCHIVE_ID}]\nPackage.URL={ARCHIVE_SUBDIR}{BROKEN_ARCHIVE_ID}.vip\n\
+         Package.MD5={}\nPackage.Display Name={BROKEN_ARCHIVE_ID}\n",
+        md5_hex(NOT_AN_ARCHIVE)
+    )
 }
 
 /// An `index.vipr` (with `Package.MD5`) or an `.ogpd` (without) listing.
@@ -505,6 +524,18 @@ mod tests {
         );
         let missing = get(&feed, "/faulty/packages/missing-1.0.vip", "");
         assert_eq!(missing.status_line, "HTTP/1.1 404 Not Found");
+    }
+
+    #[test]
+    fn the_broken_feed_lists_broken_zip_with_the_md5_of_bytes_that_are_not_a_zip() {
+        let feed = Feed::start(PACKAGES);
+        let listing = String::from_utf8(get(&feed, "/broken/index.vipr", "").body).unwrap();
+        assert_eq!(listing.matches("[Package ").count(), 1, "{listing}");
+        assert!(listing.contains("[Package broken_zip-1.0]"), "{listing}");
+        let archive = get(&feed, "/broken/packages/broken_zip-1.0.vip", "");
+        assert_eq!(archive.status_line, "HTTP/1.1 200 OK");
+        assert!(listing.contains(&format!("Package.MD5={}", md5_hex(&archive.body))));
+        assert!(zip::ZipArchive::new(std::io::Cursor::new(archive.body)).is_err());
     }
 
     #[test]

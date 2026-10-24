@@ -107,7 +107,10 @@ fn create_dir_avoiding(taken: &HashSet<u16>) -> TempDir {
 }
 
 /// The subcommands that put packages on a destination or take them off it.
-const CHANGES_PACKAGES: &[&str] = &["sync", "install", "uninstall"];
+const CHANGES_PACKAGES: &[&str] = &["sync", "install", "uninstall", "add", "remove"];
+/// Of those, the ones that make the destination equal a lock, so that they
+/// take out whatever the lock does not list, whatever package they name.
+const SYNCS: &[&str] = &["sync", "add", "remove"];
 
 /// The LabVIEW installations on this machine, read once.
 static MACHINE_TARGETS: LazyLock<Vec<LvTarget>> =
@@ -128,9 +131,10 @@ fn flag_value<'a>(
 
 /// Why running `lvpm <args>` from `cwd` would install or uninstall on a real
 /// LabVIEW installation, or `None` when its destination is a `--prefix` tree or
-/// a venv, or it would fail before reaching one. A `sync` takes out every
-/// package its lock does not list, so no scenario may point one at the user's
-/// own installation.
+/// a venv, or it would fail before reaching one. A `sync`, and so an `add` or a
+/// `remove`, takes out every package its lock does not list, so no scenario may
+/// point one at the user's own installation. `install <package>` inside a
+/// project is an `add`, and settles its destination the same way.
 ///
 /// The destination is found the way `lvpm` finds it: core's own settling of the
 /// flags, the project's venv and `targets`, which are the machine's. A child
@@ -183,7 +187,7 @@ pub fn real_installation_risk(
     let names_only_the_fixture = positional
         .get(1)
         .is_some_and(|package| package.split('@').next() == Some(global::FIXTURE_NAME));
-    if fixture_armed && command != "sync" && names_only_the_fixture {
+    if fixture_armed && !SYNCS.contains(&command) && names_only_the_fixture {
         return None;
     }
     let installation = roots
@@ -756,6 +760,68 @@ mod tests {
     }
 
     #[test]
+    fn an_add_syncs_so_it_is_refused_at_a_real_installation_and_allowed_into_a_prefix_tree() {
+        for command in [
+            "add gamma --prefix dest",
+            "add gamma@>=0.5 --dev --prefix=dest",
+            "add gamma --dry-run --prefix dest",
+        ] {
+            assert!(!risky(command, false), "{command}");
+        }
+        for command in [
+            "add gamma --labview-version 2026",
+            "add gamma@1.0 --dev --labview-version=2026",
+            "add gamma --dry-run --global --labview-version 2026",
+        ] {
+            assert!(risky(command, false), "{command}");
+        }
+        // Not even the fixture, which an install may put there once armed: an
+        // add syncs, and a sync takes out what the lock does not list.
+        assert!(risky("add lvpm_test_fixture --labview-version 2026", true));
+        // Nothing it settles on is a real installation without a destination.
+        assert!(!risky("add gamma", false));
+        assert!(risky_headless_in_a_project("add gamma"));
+        assert!(!risky_headless_in_a_project("add gamma --prefix dest"));
+    }
+
+    #[test]
+    fn a_remove_syncs_so_it_is_refused_at_a_real_installation_and_allowed_into_a_prefix_tree() {
+        for command in [
+            "remove gamma --prefix dest",
+            "remove gamma --dev --prefix=dest",
+            "remove gamma --dry-run --prefix dest",
+        ] {
+            assert!(!risky(command, false), "{command}");
+        }
+        for command in [
+            "remove gamma --labview-version 2026",
+            "remove gamma --dev --labview-version=2026",
+            "remove gamma --dry-run --global --labview-version 2026",
+        ] {
+            assert!(risky(command, false), "{command}");
+        }
+        assert!(risky(
+            "remove lvpm_test_fixture --labview-version 2026",
+            true
+        ));
+        assert!(!risky("remove gamma", false));
+        assert!(risky_headless_in_a_project("remove gamma"));
+        assert!(!risky_headless_in_a_project("remove gamma --prefix dest"));
+    }
+
+    #[test]
+    fn a_named_install_in_a_project_is_an_add_and_settles_on_the_same_destination() {
+        // Without a destination flag it is an add: a headless project with no
+        // venv means the installation. With one it is the plain install it was.
+        assert!(risky_headless_in_a_project("install gamma"));
+        assert!(!risky_headless_in_a_project("install gamma --prefix dest"));
+        assert!(risky(
+            "install gamma --global --labview-version 2026",
+            false
+        ));
+    }
+
+    #[test]
     fn one_that_settles_nowhere_fails_before_it_changes_anything_and_is_allowed() {
         // No prefix, no venv, no LabVIEW named, and the child is not headless:
         // `lvpm` says to pick a destination.
@@ -851,6 +917,24 @@ mod tests {
     fn the_sandbox_will_not_run_a_sync_at_a_real_installation() {
         Sandbox::new()
             .refuse_a_real_installation(&["sync", "--labview-version", "2026"], &[labview_2026()]);
+    }
+
+    #[test]
+    #[should_panic(expected = "refusing to run `lvpm add gamma --labview-version 2026`")]
+    fn the_sandbox_will_not_run_an_add_at_a_real_installation() {
+        Sandbox::new().refuse_a_real_installation(
+            &["add", "gamma", "--labview-version", "2026"],
+            &[labview_2026()],
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "refusing to run `lvpm remove gamma --labview-version 2026`")]
+    fn the_sandbox_will_not_run_a_remove_at_a_real_installation() {
+        Sandbox::new().refuse_a_real_installation(
+            &["remove", "gamma", "--labview-version", "2026"],
+            &[labview_2026()],
+        );
     }
 
     #[test]

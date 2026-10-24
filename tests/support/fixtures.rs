@@ -208,6 +208,16 @@ pub const ADD_PACKAGES: &[FixturePackage] = &[
     text_package("caraya", "1.0", &[], "20.0"),
 ];
 
+/// A delta 1.0, which the add scenarios install by hand, outside the lock.
+pub const DELTA_1: FixturePackage = text_package("delta", "1.0", &[], "20.0");
+
+/// An omega 1.0, the only omega, which needs LabVIEW 2026.
+pub const OMEGA_NEEDING_LABVIEW_2026: FixturePackage = text_package("omega", "1.0", &[], "26.0");
+
+/// An omega 1.0, the only omega, which requires alpha >= 2.0.
+pub const OMEGA_NEEDING_ALPHA_2: FixturePackage =
+    text_package("omega", "1.0", &[("alpha", "2.0")], "20.0");
+
 /// An alpha 3.0 that needs LabVIEW 2026.
 pub const ALPHA_3_NEEDING_LABVIEW_2026: FixturePackage = text_package("alpha", "3.0", &[], "26.0");
 

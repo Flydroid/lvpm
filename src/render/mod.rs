@@ -110,9 +110,10 @@ impl Renderer {
             | Event::ManifestUpdated { .. }
             | Event::LockNothingNewer { .. }
             | Event::LockWouldChange { .. } => lock::render(self, event),
-            Event::ManifestEdited { .. } | Event::PackageStillRequired { .. } => {
-                edit::render(self, event)
-            }
+            Event::ManifestEdited { .. }
+            | Event::PackageStillRequired { .. }
+            | Event::InstallAddsToProject { .. }
+            | Event::UninstalledStillListed { .. } => edit::render(self, event),
             Event::SyncLockMissing { .. }
             | Event::SyncUnresolved { .. }
             | Event::SyncMigration { .. }

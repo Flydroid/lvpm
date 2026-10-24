@@ -10,6 +10,7 @@ use super::install::{Applied, InstallOptions, finish};
 use super::session::InstallSession;
 use crate::events::{Event, HookKind, UnrunReason};
 use crate::install;
+use crate::project::Constraint;
 use anyhow::{Context, Result, ensure};
 use std::path::Path;
 
@@ -76,7 +77,32 @@ pub fn uninstall(env: &OpEnv, package: Option<&str>, all: bool) -> Result<()> {
             .collect::<Vec<_>>()
             .join(", ")
     );
+    if let (Some(name), false) = (package, all) {
+        say_if_still_listed(env, name);
+    }
     Ok(())
+}
+
+/// A package taken out of the destination but still listed in the project's
+/// manifest comes back with the next sync: say how to take it out for good.
+/// A manifest that cannot be read has nothing to say.
+fn say_if_still_listed(env: &OpEnv, package: &str) {
+    let Ok(Some((_, project))) = env.manifest_for(None, None) else {
+        return;
+    };
+    let listed = |entries: &[(String, Constraint)]| {
+        entries
+            .iter()
+            .find(|(entry, _)| entry.eq_ignore_ascii_case(package))
+            .map(|(entry, _)| entry.clone())
+    };
+    let found = match listed(&project.dependencies) {
+        Some(name) => Some((name, false)),
+        None => listed(&project.dev_dependencies).map(|name| (name, true)),
+    };
+    if let Some((name, dev)) = found {
+        env.sink.emit(Event::UninstalledStillListed { name, dev });
+    }
 }
 
 /// Remove one package and run its uninstall hooks. Returns the file count, so

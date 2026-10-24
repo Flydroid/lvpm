@@ -268,6 +268,12 @@ pub enum Event {
         name: String,
         required_by: Vec<String>,
     },
+    /// `install` with a package name, inside a project and with no destination
+    /// flag, is an `add`. `package` is as it was typed. The first thing it says.
+    InstallAddsToProject { package: String },
+    /// An `uninstall` took out a package that `lvpm.toml` still lists, in
+    /// `[dev-dependencies]` when `dev`: the next sync would put it back.
+    UninstalledStillListed { name: String, dev: bool },
     /// The lock on disk still represents the manifest, so it was left alone.
     LockUpToDate { path: PathBuf },
     /// An upgrade found nothing newer than the lock holds, so it was left

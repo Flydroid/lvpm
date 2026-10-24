@@ -51,7 +51,7 @@ impl CliWorld {
         self.sandbox.work_dir().join(MANIFEST_FILE)
     }
 
-    fn manifest_text(&self) -> String {
+    pub(super) fn manifest_text(&self) -> String {
         std::fs::read_to_string(self.manifest_path()).expect("read the manifest")
     }
 

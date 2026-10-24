@@ -46,12 +46,7 @@ Feature: On a headless machine a missing or outdated lock fails the job
     Then it succeeds and lvpm.lock is current afterwards
 
     Examples:
-      | command   |
-      | lvpm lock |
-
-    # `add` and `remove` arrive with Slice 13, which removes this tag.
-    @pending-13
-    Examples:
       | command                        |
+      | lvpm lock                      |
       | lvpm add gamma --prefix dest   |
       | lvpm remove beta --prefix dest |

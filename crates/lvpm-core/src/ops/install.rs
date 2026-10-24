@@ -424,7 +424,18 @@ fn install_one(
             entry.version
         );
     }
-    let mut zip = install::open_archive(bytes)?;
+    let mut zip = match install::open_archive(bytes) {
+        Ok(zip) => zip,
+        // A sync, which knows what the archive must hash to, says which
+        // package it could not open; the install of a name keeps its own text.
+        Err(why) if planned.expected_sha256.is_some() => {
+            return Err(why.context(format!(
+                "the archive of {} {} could not be unpacked",
+                entry.name, entry.version
+            )));
+        }
+        Err(why) => return Err(why),
+    };
     let spec = spec::parse(&read_spec(&mut zip)?)?;
     let plan = install::plan(&roots, &spec, &mut zip)?;
     let mut pkg = Unpacking {

@@ -584,7 +584,12 @@ mod tests {
         format!("vi.lib/unit/{name}.txt")
     }
 
-    fn write_vip(path: &Path, (name, version, requires): Fixture) {
+    fn write_vip(path: &Path, fixture: Fixture) {
+        write_vip_for_labview(path, fixture, "20.0");
+    }
+
+    /// The package needs LabVIEW `lv_min` (in the index's units) or newer.
+    fn write_vip_for_labview(path: &Path, (name, version, requires): Fixture, lv_min: &str) {
         let options = zip::write::SimpleFileOptions::default();
         let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
         let mut spec = format!("[Package]\nName=\"{name}\"\nVersion=\"{version}\"\n\n");
@@ -592,7 +597,7 @@ mod tests {
             spec.push_str(&format!("[Dependencies]\nRequires=\"{requires}\"\n\n"));
         }
         spec.push_str(&format!(
-            "[Platform]\nExclusive_LabVIEW_Version=\"LabVIEW>=20.0\"\n\n\
+            "[Platform]\nExclusive_LabVIEW_Version=\"LabVIEW>={lv_min}\"\n\n\
              [Files]\nNum File Groups=\"1\"\n\n[File Group 0]\nTarget Dir=\"<application>\"\n\
              Replace Mode=\"Always\"\nNum Files=1\nFile 0=\"{}\"\n",
             payload_path(name)
@@ -710,13 +715,56 @@ mod tests {
     }
 
     #[test]
-    fn the_floor_is_the_version_the_lock_holds_even_when_a_pin_holds_it_below_the_newest() {
-        let manifest = format!("{PROJECT}gamma = \"0.5\"\n");
+    fn the_floor_is_the_version_the_lock_holds_when_a_pin_keeps_it_below_the_newest() {
+        let manifest = format!("{PROJECT}alpha = \"1.0\"\n");
         let world = World::new("pinned", &manifest);
-        // The only way to ask for gamma without a constraint is to replace its
-        // line, which the pin of 0.5 then keeps below the newest, 1.0.
-        run_add(&world, "gamma", &InstallOptions::default()).unwrap();
-        assert_eq!(world.manifest(), manifest.replace("\"0.5\"", "\">=1.0\""));
+        let packages = world.root.join("packages");
+        write_vip(
+            &packages.join("omega-1.0.vip"),
+            ("omega", "1.0", "alpha>=1.0"),
+        );
+        write_vip(
+            &packages.join("omega-2.0.vip"),
+            ("omega", "2.0", "alpha>=2.0"),
+        );
+        // omega 2.0 is the newest there is, and cannot be had beside alpha 1.0.
+        run_add(&world, "omega", &InstallOptions::default()).unwrap();
+        assert_eq!(world.manifest(), format!("{manifest}omega = \">=1.0\"\n"));
+        assert!(world.locked().contains(&"omega 1.0".to_string()));
+    }
+
+    #[test]
+    fn a_package_no_source_lists_is_a_conflict_that_says_so_and_changes_nothing() {
+        let world = World::new("unlisted", PROJECT);
+        let why = run_add(&world, "zeta", &InstallOptions::default()).unwrap_err();
+        assert!(
+            matches!(&why, EditError::Lock(LockError::Conflict(conflict))
+                if conflict.to_string().contains("zeta")),
+            "{why:?}"
+        );
+        assert_eq!(world.manifest(), PROJECT);
+        assert_eq!(world.lock(), None);
+    }
+
+    #[test]
+    fn a_package_whose_every_version_needs_a_newer_labview_says_which_and_changes_nothing() {
+        let world = World::new("gated", PROJECT);
+        write_vip_for_labview(
+            &world.root.join("packages").join("omega-1.0.vip"),
+            ("omega", "1.0", ""),
+            "26.0",
+        );
+        let why = run_add(&world, "omega", &InstallOptions::default()).unwrap_err();
+        assert!(
+            matches!(
+                &why,
+                EditError::Lock(LockError::NeedsNewerLabview { name, needs_year: 2026, project_year: 2024, .. })
+                    if name == "omega"
+            ),
+            "{why:?}"
+        );
+        assert_eq!(world.manifest(), PROJECT);
+        assert_eq!(world.lock(), None);
     }
 
     #[test]

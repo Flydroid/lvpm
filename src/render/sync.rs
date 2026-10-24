@@ -163,6 +163,14 @@ fn archives_text(problems: &[LockedArchiveProblem]) -> String {
 }
 
 fn incomplete_text(done: &[SyncStep], left: &[SyncStep], cause: &str) -> String {
+    let mut text = incomplete_body(done, left, cause);
+    text.push_str("\nnext: fix what is wrong, then re-run lvpm sync to finish");
+    text
+}
+
+/// What a sync that stopped part-way did and did not do, without what to do
+/// about it.
+pub(super) fn incomplete_body(done: &[SyncStep], left: &[SyncStep], cause: &str) -> String {
     let mut text = format!("sync stopped before it was done: {cause}");
     for (heading, steps) in [("done:", done), ("not done:", left)] {
         if steps.is_empty() {
@@ -174,23 +182,35 @@ fn incomplete_text(done: &[SyncStep], left: &[SyncStep], cause: &str) -> String 
             text.push_str(&format!("\n  {}", step_line(step)));
         }
     }
-    text.push_str("\nnext: fix what is wrong, then re-run lvpm sync to finish");
     text
 }
 
 /// What `lvpm install` prints when it cannot tell which operation it means.
 pub fn route_error(error: &RouteError) -> String {
     match error {
-        RouteError::NotWithLock { option } => {
-            let (flag, next) = match option {
-                LockIncompatible::NoDeps => (
+        RouteError::NoPackage { searched_from } => format!(
+            "give a package name, or --manifest <FILE>\n\
+             there is no project to sync: no lvpm.toml found in {} or above\n\
+             next: name a package to install, or run this in a project, a directory with an \
+             lvpm.toml",
+            searched_from.display()
+        ),
+        RouteError::NotWithLock { option, adding } => {
+            let (flag, next) = match (option, adding) {
+                (LockIncompatible::NoDeps, false) => (
                     "--no-deps",
-                    "drop --no-deps, or name a package: `lvpm install <package> --no-deps`",
+                    "drop --no-deps, or install one package where you choose: \
+                     `lvpm install <package> --no-deps --prefix <dir>`",
                 ),
-                LockIncompatible::Manifest => (
+                (LockIncompatible::NoDeps, true) => (
+                    "--no-deps",
+                    "drop --no-deps, or say where the package goes: \
+                     `lvpm install <package> --no-deps --prefix <dir>`",
+                ),
+                (LockIncompatible::Manifest, _) => (
                     "--manifest",
-                    "drop --manifest to sync this project, or name a package: \
-                     `lvpm install <package>`",
+                    "drop --manifest to sync this project, or name a package and where it \
+                     goes: `lvpm install <package> --prefix <dir>`",
                 ),
             };
             format!("{flag} is {error}\nnext: {next}")
@@ -397,14 +417,39 @@ mod tests {
 
     #[test]
     fn a_flag_a_lock_cannot_honor_is_named_with_what_to_do_instead() {
-        let text = route_error(&RouteError::NotWithLock {
-            option: LockIncompatible::NoDeps,
+        for adding in [false, true] {
+            let text = route_error(&RouteError::NotWithLock {
+                option: LockIncompatible::NoDeps,
+                adding,
+            });
+            assert!(
+                text.starts_with(
+                    "--no-deps is not supported with a lock (lvpm.lock always holds the full set)\nnext: "
+                ),
+                "{text}"
+            );
+            // The way out of it is never the install it refuses.
+            assert!(
+                text.ends_with("`lvpm install <package> --no-deps --prefix <dir>`"),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn nothing_to_install_outside_a_project_starts_with_the_text_it_always_had_and_says_where_it_looked()
+     {
+        let text = route_error(&RouteError::NoPackage {
+            searched_from: PathBuf::from("here"),
         });
         assert!(
-            text.starts_with(
-                "--no-deps is not supported with a lock (lvpm.lock always holds the full set)\nnext: "
-            ),
+            text.starts_with("give a package name, or --manifest <FILE>\n"),
             "{text}"
         );
+        assert!(
+            text.contains("no lvpm.toml found in here or above"),
+            "{text}"
+        );
+        assert!(text.lines().last().unwrap().starts_with("next: "), "{text}");
     }
 }

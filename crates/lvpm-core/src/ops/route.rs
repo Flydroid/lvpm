@@ -2,8 +2,9 @@
 //! CLI and any other front end route it the same way.
 //!
 //! In a project, `install` with no package is a sync of the project to its
-//! lock. With a package it adds that package where it was asked to, as it
-//! always has.
+//! lock, and with a package and no destination flag it is an `add`. With a
+//! package and a destination flag, or outside a project, it puts that package
+//! where it was asked to, as it always has.
 
 use super::env::OpEnv;
 use crate::errors::{LockIncompatible, RouteError};
@@ -14,6 +15,9 @@ use std::path::Path;
 pub enum InstallMode {
     /// Make the destination equal `lvpm.lock`: bare install, in a project.
     Sync,
+    /// Put the named package in `lvpm.toml`, lock and sync, as `add` does: a
+    /// named install in a project, with no destination flag.
+    Add,
     /// Put the named package where it was asked to go, and what it needs.
     Additive,
 }
@@ -30,25 +34,43 @@ pub struct InstallRequest<'a> {
 
 /// The mode of `request`, in the project `env` runs in, if any.
 ///
-/// With no package, in a project (with or without a destination flag), it is a
-/// sync; a sync takes the lock's full set, so `--no-deps` and `--manifest` are
-/// refused. With no package outside a project it is [`InstallMode::Additive`],
-/// which fails the way it always did, asking for a package name.
+/// A named package is an [`InstallMode::Add`] in a project, unless a
+/// destination flag (`--global`, `--prefix`, `--labview-version`) says where it
+/// goes, and is additive otherwise. With no package, in a project (with or
+/// without a destination flag), it is a sync. Add and sync both take the
+/// lock's full set, so `--no-deps` and `--manifest` are refused for them. With
+/// no package outside a project there is nothing to install.
 pub fn install_mode(env: &OpEnv, request: &InstallRequest) -> Result<InstallMode, RouteError> {
-    if request.package.is_some() {
-        return Ok(InstallMode::Additive);
-    }
-    if env.manifest_for(request.manifest, None)?.is_none() {
-        return Ok(InstallMode::Additive);
-    }
+    let mode = match request.package {
+        Some(_) => {
+            let flags = &env.flags;
+            let names_a_destination =
+                flags.global || flags.prefix.is_some() || flags.labview_version.is_some();
+            if names_a_destination || env.manifest_for(None, None)?.is_none() {
+                return Ok(InstallMode::Additive);
+            }
+            InstallMode::Add
+        }
+        None => {
+            if env.manifest_for(request.manifest, None)?.is_none() {
+                return Err(RouteError::NoPackage {
+                    searched_from: env.cwd.clone(),
+                });
+            }
+            InstallMode::Sync
+        }
+    };
     let unsupported = match (request.no_deps, request.manifest) {
         (true, _) => Some(LockIncompatible::NoDeps),
         (false, Some(_)) => Some(LockIncompatible::Manifest),
         (false, None) => None,
     };
     match unsupported {
-        Some(option) => Err(RouteError::NotWithLock { option }),
-        None => Ok(InstallMode::Sync),
+        Some(option) => Err(RouteError::NotWithLock {
+            option,
+            adding: mode == InstallMode::Add,
+        }),
+        None => Ok(mode),
     }
 }
 
@@ -122,27 +144,63 @@ mod tests {
         }
     }
 
+    const GAMMA: InstallRequest = InstallRequest {
+        package: Some("gamma"),
+        manifest: None,
+        no_deps: false,
+    };
+
     #[test]
-    fn a_named_package_is_additive_in_a_project_and_outside_one() {
-        let request = InstallRequest {
-            package: Some("gamma"),
-            ..InstallRequest::default()
-        };
-        for dir in [
-            Dir::new("named-in", Some(PROJECT)),
-            Dir::new("named-out", None),
-        ] {
-            assert_eq!(mode(&dir, request).unwrap(), InstallMode::Additive);
+    fn a_named_package_in_a_project_is_an_add() {
+        let dir = Dir::new("named-in", Some(PROJECT));
+        assert_eq!(mode(&dir, GAMMA).unwrap(), InstallMode::Add);
+    }
+
+    #[test]
+    fn a_named_package_outside_a_project_is_additive() {
+        let dir = Dir::new("named-out", None);
+        assert_eq!(mode(&dir, GAMMA).unwrap(), InstallMode::Additive);
+    }
+
+    #[test]
+    fn a_destination_flag_keeps_a_named_package_additive_even_in_a_project() {
+        let dir = Dir::new("named-flags", Some(PROJECT));
+        let sink = NullSink;
+        let flagged: [fn(&mut OpEnv); 3] = [
+            |env| env.flags.global = true,
+            |env| env.flags.prefix = Some(PathBuf::from("dest")),
+            |env| env.flags.labview_version = Some("2026".into()),
+        ];
+        for set in flagged {
+            let mut env = dir.env(&sink);
+            set(&mut env);
+            assert_eq!(
+                install_mode(&env, &GAMMA).unwrap(),
+                InstallMode::Additive,
+                "{:?}",
+                env.flags
+            );
         }
     }
 
     #[test]
-    fn a_bare_install_outside_a_project_is_left_to_fail_as_it_always_did() {
+    fn a_project_flag_is_no_destination_so_a_named_package_is_still_an_add() {
+        let dir = Dir::new("named-project-flag", Some(PROJECT));
+        let sink = NullSink;
+        let mut env = dir.env(&sink);
+        env.flags.project = Some(PathBuf::from("."));
+        assert_eq!(install_mode(&env, &GAMMA).unwrap(), InstallMode::Add);
+    }
+
+    #[test]
+    fn a_bare_install_outside_a_project_has_nothing_to_install() {
         let dir = Dir::new("outside", None);
-        assert_eq!(
-            mode(&dir, InstallRequest::default()).unwrap(),
-            InstallMode::Additive
+        let why = mode(&dir, InstallRequest::default()).unwrap_err();
+        assert!(
+            matches!(&why, RouteError::NoPackage { searched_from } if *searched_from == dir.root),
+            "{why:?}"
         );
+        assert_eq!(why.to_string(), "give a package name");
     }
 
     #[test]
@@ -155,7 +213,8 @@ mod tests {
         assert!(matches!(
             mode(&dir, no_deps),
             Err(RouteError::NotWithLock {
-                option: LockIncompatible::NoDeps
+                option: LockIncompatible::NoDeps,
+                adding: false
             })
         ));
 
@@ -166,19 +225,31 @@ mod tests {
         assert!(matches!(
             mode(&dir, manifest),
             Err(RouteError::NotWithLock {
-                option: LockIncompatible::Manifest
+                option: LockIncompatible::Manifest,
+                adding: false
             })
         ));
     }
 
     #[test]
-    fn no_deps_is_fine_for_a_named_package() {
-        let dir = Dir::new("named-no-deps", Some(PROJECT));
+    fn no_deps_is_refused_for_an_add_and_fine_for_a_named_package_that_stays_additive() {
         let request = InstallRequest {
-            package: Some("gamma"),
             no_deps: true,
-            ..InstallRequest::default()
+            ..GAMMA
         };
-        assert_eq!(mode(&dir, request).unwrap(), InstallMode::Additive);
+        let in_a_project = Dir::new("named-no-deps", Some(PROJECT));
+        assert!(matches!(
+            mode(&in_a_project, request),
+            Err(RouteError::NotWithLock {
+                option: LockIncompatible::NoDeps,
+                adding: true
+            })
+        ));
+        let outside = Dir::new("named-no-deps-out", None);
+        assert_eq!(mode(&outside, request).unwrap(), InstallMode::Additive);
+        let sink = NullSink;
+        let mut env = in_a_project.env(&sink);
+        env.flags.prefix = Some(PathBuf::from("dest"));
+        assert_eq!(install_mode(&env, &request).unwrap(), InstallMode::Additive);
     }
 }

@@ -127,10 +127,18 @@ pub enum EditError {
 /// Why an install request could not be routed to a mode.
 #[derive(Debug, thiserror::Error)]
 pub enum RouteError {
-    /// In a project a bare install is a sync, and a lock always holds the full
-    /// set of packages, so these ask for something it cannot do.
+    /// There is no project to sync, and no package to install: no `lvpm.toml`
+    /// at or above `searched_from`.
+    #[error("give a package name")]
+    NoPackage { searched_from: PathBuf },
+    /// In a project a bare install is a sync and a named one an add, and a lock
+    /// always holds the full set of packages, so these ask for something it
+    /// cannot do. `adding`: it was a package that was named.
     #[error("not supported with a lock (lvpm.lock always holds the full set)")]
-    NotWithLock { option: LockIncompatible },
+    NotWithLock {
+        option: LockIncompatible,
+        adding: bool,
+    },
     /// Anything else that went wrong: its own text.
     #[error(transparent)]
     Other(#[from] anyhow::Error),

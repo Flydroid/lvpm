@@ -4,6 +4,8 @@
 // it from `lvpm-core` only.
 #![allow(clippy::disallowed_methods)]
 
+use lvpm_core::events::Event;
+use lvpm_core::manifest_edit::DependencyTable;
 use lvpm_core::ops::install::InstallOptions;
 use lvpm_core::ops::lock::{Upgrade, UpgradeTarget};
 use lvpm_core::ops::relink::RelinkOptions;
@@ -195,6 +197,33 @@ enum Cmd {
         apply: ApplyArgs,
         #[command(flatten)]
         sync: SyncArgs,
+    },
+    /// Add a package to lvpm.toml, lock the project and sync the destination.
+    ///
+    /// With no constraint it writes `>=` the version it locked. Quote a
+    /// constraint, or the shell reads its `>` as a redirect: "gamma@>=0.5".
+    /// Nothing is written unless the lock and the sync both work.
+    Add {
+        /// The package, or package@constraint, e.g. "gamma@>=0.5".
+        package: String,
+        /// Add it to [dev-dependencies].
+        #[arg(long)]
+        dev: bool,
+        #[command(flatten)]
+        apply: ApplyArgs,
+    },
+    /// Remove a package from lvpm.toml, lock the project and sync the
+    /// destination. A package that another one still requires stays.
+    ///
+    /// Nothing is written unless the lock and the sync both work.
+    Remove {
+        /// The package to take out of lvpm.toml.
+        package: String,
+        /// It is in [dev-dependencies].
+        #[arg(long)]
+        dev: bool,
+        #[command(flatten)]
+        apply: ApplyArgs,
     },
     /// Relink an already-installed package, without reinstalling it.
     ///
@@ -416,17 +445,32 @@ fn main() -> Result<()> {
                 manifest: manifest.as_deref(),
                 no_deps: *no_deps,
             };
-            match route::install_mode(&env, &request)
-                .map_err(|why| anyhow!(render::sync::route_error(&why)))?
-            {
-                InstallMode::Sync => cmd_sync(&env, &sync.options(apply, env.headless)),
-                InstallMode::Additive => ops::install::install(
-                    &env,
-                    package.as_deref(),
-                    &apply.options(*no_deps, *allow_downgrade),
-                ),
+            let mode = route::install_mode(&env, &request)
+                .map_err(|why| anyhow!(render::sync::route_error(&why)))?;
+            match (mode, package.as_deref()) {
+                (InstallMode::Sync, _) => cmd_sync(&env, &sync.options(apply, env.headless)),
+                // A named install in a project is an add, and always names one.
+                (InstallMode::Add, Some(spec)) => {
+                    env.sink.emit(Event::InstallAddsToProject {
+                        package: spec.to_string(),
+                    });
+                    cmd_add(&env, spec, false, apply)
+                }
+                (InstallMode::Add | InstallMode::Additive, package) => {
+                    ops::install::install(&env, package, &apply.options(*no_deps, *allow_downgrade))
+                }
             }
         }
+        Cmd::Add {
+            package,
+            dev,
+            apply,
+        } => cmd_add(&env, package, *dev, apply),
+        Cmd::Remove {
+            package,
+            dev,
+            apply,
+        } => cmd_remove(&env, package, *dev, apply),
         Cmd::Sync { apply, sync } => cmd_sync(&env, &sync.options(apply, env.headless)),
         Cmd::Relink {
             package,
@@ -510,6 +554,33 @@ fn main() -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn dependency_table(dev: bool) -> DependencyTable {
+    match dev {
+        true => DependencyTable::DevDependencies,
+        false => DependencyTable::Dependencies,
+    }
+}
+
+fn cmd_add(env: &OpEnv, package: &str, dev: bool, apply: &ApplyArgs) -> Result<()> {
+    ops::add_remove::add(
+        env,
+        package,
+        dependency_table(dev),
+        &apply.options(false, false),
+    )
+    .map_err(|why| anyhow!(render::edit::error(&why, "`lvpm add`")))
+}
+
+fn cmd_remove(env: &OpEnv, package: &str, dev: bool, apply: &ApplyArgs) -> Result<()> {
+    ops::add_remove::remove(
+        env,
+        package,
+        dependency_table(dev),
+        &apply.options(false, false),
+    )
+    .map_err(|why| anyhow!(render::edit::error(&why, "`lvpm remove`")))
 }
 
 fn cmd_sync(env: &OpEnv, options: &SyncOptions) -> Result<()> {

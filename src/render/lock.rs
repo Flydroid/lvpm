@@ -97,6 +97,12 @@ fn change_line(change: &LockChange) -> String {
 /// What `lvpm lock` prints when it fails: what happened, then the next thing
 /// to do.
 pub fn error(error: &LockError) -> String {
+    error_for(error, "`lvpm lock`")
+}
+
+/// [`error`] for a command that locks as part of what it does: `rerun` is what
+/// to run again once the cause is dealt with, as "run {rerun} again" reads.
+pub(super) fn error_for(error: &LockError, rerun: &str) -> String {
     match error {
         LockError::NoManifest { .. } => {
             format!("{error}\nnext: run `lvpm lock` in a project, a directory with an lvpm.toml")
@@ -104,15 +110,15 @@ pub fn error(error: &LockError) -> String {
         LockError::NoLabview => format!(
             "{error}, so lvpm does not know which LabVIEW to lock for\n\
              next: add labview = \"<year>\" under [project] in lvpm.toml (for example \
-             labview = \"2024\"), then run `lvpm lock` again"
+             labview = \"2024\"), then run {rerun} again"
         ),
         LockError::LabviewNotAYear { .. } => format!(
             "{error}\n\
              next: write labview = \"<year>\" under [project] in lvpm.toml (for example \
-             labview = \"2024\"), then run `lvpm lock` again"
+             labview = \"2024\"), then run {rerun} again"
         ),
-        LockError::Conflict(conflict) => conflict_text(conflict),
-        LockError::ArchivesUnavailable(failures) => archives_text(failures),
+        LockError::Conflict(conflict) => conflict_text(conflict, rerun),
+        LockError::ArchivesUnavailable(failures) => archives_text(failures, rerun),
         // `lvpm lock --check` fails with one line: a script reads it.
         LockError::NoLock { .. } => {
             "there is no lvpm.lock; run `lvpm lock` to create it".to_string()
@@ -143,13 +149,13 @@ pub fn error(error: &LockError) -> String {
              lvpm.toml, then run `lvpm lock --upgrade-package {name}@<version>` again"
         ),
         LockError::Cancelled => {
-            format!("{error}; lvpm.lock is unchanged\nnext: run `lvpm lock` again")
+            format!("{error}; lvpm.lock is unchanged\nnext: run {rerun} again")
         }
         LockError::Other(cause) => format!("{cause:#}"),
     }
 }
 
-fn conflict_text(conflict: &Conflict) -> String {
+fn conflict_text(conflict: &Conflict, rerun: &str) -> String {
     let unlisted: Vec<&str> = conflict
         .facts
         .iter()
@@ -169,7 +175,9 @@ fn conflict_text(conflict: &Conflict) -> String {
     }
     text.push_str("\nnext: ");
     match unlisted.is_empty() {
-        true => text.push_str("change one of these in lvpm.toml, then run `lvpm lock` again"),
+        true => text.push_str(&format!(
+            "change one of these in lvpm.toml, then run {rerun} again"
+        )),
         false => {
             let searches: Vec<String> = unlisted
                 .iter()
@@ -177,7 +185,7 @@ fn conflict_text(conflict: &Conflict) -> String {
                 .collect();
             text.push_str(&format!(
                 "look for it with {}, or list a repository under [sources] in lvpm.toml, \
-                 then run `lvpm lock` again",
+                 then run {rerun} again",
                 searches.join(", ")
             ));
         }
@@ -209,7 +217,7 @@ fn manifest_constraint(wanted: &str) -> String {
     }
 }
 
-fn archives_text(failures: &[ArchiveFailure]) -> String {
+fn archives_text(failures: &[ArchiveFailure], rerun: &str) -> String {
     let plural = if failures.len() == 1 { "" } else { "s" };
     let mut text = format!(
         "cannot lock: {} archive{plural} could not be fetched:",
@@ -221,10 +229,10 @@ fn archives_text(failures: &[ArchiveFailure]) -> String {
             failure.name, failure.version, failure.reason
         ));
     }
-    text.push_str(
+    text.push_str(&format!(
         "\nnext: make each source reachable, or add the archive with `lvpm cache add <file>`, \
-         then run `lvpm lock` again",
-    );
+         then run {rerun} again"
+    ));
     text
 }
 

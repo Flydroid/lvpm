@@ -158,7 +158,7 @@ impl CliWorld {
             .collect()
     }
 
-    fn is_installed(&self, name: &str) -> bool {
+    pub(super) fn is_installed(&self, name: &str) -> bool {
         self.installed()
             .iter()
             .any(|(installed, _)| installed == name)
@@ -174,7 +174,7 @@ impl CliWorld {
         self.sandbox.setup_lvpm(&["sync", "--prefix", DEST_DIR]);
     }
 
-    fn install_into_dest(&self, name: &str, version: &str) {
+    pub(super) fn install_into_dest(&self, name: &str, version: &str) {
         self.sandbox.setup_lvpm(&[
             "install",
             &format!("{name}@{version}"),
