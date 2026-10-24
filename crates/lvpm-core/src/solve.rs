@@ -653,6 +653,24 @@ mod tests {
     }
 
     #[test]
+    fn two_prereleases_of_one_release_are_two_entries_with_their_own_archives() {
+        let mut first = entry("foo", "0.1.0alpha1-1", &[]);
+        first.url = "http://example/alpha1.vip".into();
+        first.md5 = Some("md5-of-alpha1".into());
+        let mut second = entry("foo", "0.1.0alpha2-1", &[]);
+        second.url = "http://example/alpha2.vip".into();
+        second.md5 = Some("md5-of-alpha2".into());
+        let index = Index {
+            entries: vec![first, second],
+        };
+        let resolution = run(&[("foo", "0.1.0alpha2-1")], &index, &[], None).expect("solves");
+        let picked = &resolution.packages["foo"];
+        assert_eq!(picked.version.raw, "0.1.0alpha2-1");
+        assert_eq!(picked.url, "http://example/alpha2.vip");
+        assert_eq!(picked.md5.as_deref(), Some("md5-of-alpha2"));
+    }
+
+    #[test]
     fn a_preference_that_no_longer_fits_is_dropped() {
         let index = Index {
             entries: vec![entry("a", "1.0", &[]), entry("a", "2.0", &[])],

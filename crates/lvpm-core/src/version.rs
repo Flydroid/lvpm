@@ -12,32 +12,64 @@ use std::cmp::Ordering;
 #[derive(Debug, Clone, Eq)]
 pub struct Version {
     parts: Vec<u64>,
-    /// True when any component carried a non-numeric tail (`0.1.0alpha1`).
-    /// Such a version sorts below an otherwise-identical release.
-    pre: bool,
+    /// The non-numeric tails (`alpha1` of `0.1.0alpha1`), as comparable chunks.
+    /// `None` is a release. Among versions whose numbers are identical, a
+    /// prerelease sorts below a release and prereleases sort by their chunks.
+    pre: Option<Vec<Chunk>>,
     pub raw: String,
+}
+
+/// A piece of a prerelease tail: letters compare as text, digits as numbers,
+/// so `alpha2 < alpha10` and `alpha < beta`. Text sorts below a number.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum Chunk {
+    Text(String),
+    Num(u64),
+}
+
+/// `alpha1` -> [Text("alpha"), Num(1)]. Anything that is not a letter or a
+/// digit only separates chunks.
+fn chunks(tail: &str) -> Vec<Chunk> {
+    let mut out = Vec::new();
+    let mut rest = tail;
+    while let Some(start) = rest.find(|c: char| c.is_ascii_alphanumeric()) {
+        rest = &rest[start..];
+        let numeric = rest.starts_with(|c: char| c.is_ascii_digit());
+        let end = rest
+            .find(|c: char| c.is_ascii_digit() != numeric || !c.is_ascii_alphanumeric())
+            .unwrap_or(rest.len());
+        let (piece, after) = rest.split_at(end);
+        out.push(if numeric {
+            Chunk::Num(piece.parse().unwrap_or(0))
+        } else {
+            Chunk::Text(piece.to_ascii_lowercase())
+        });
+        rest = after;
+    }
+    out
 }
 
 impl Version {
     pub fn parse(raw: &str) -> Self {
         let raw = raw.trim();
-        let mut pre = false;
+        let mut tails: Vec<Chunk> = Vec::new();
+        let mut tailed = false;
         let parts = raw
             .replace('-', ".")
             .split('.')
             .map(|c| {
-                // take the leading digits: "0alpha1" -> 0, and remember that
-                // we threw something away
+                // take the leading digits: "0alpha1" -> 0, and keep the rest
                 let digits: String = c.chars().take_while(|c| c.is_ascii_digit()).collect();
                 if digits.len() != c.len() {
-                    pre = true;
+                    tailed = true;
+                    tails.extend(chunks(&c[digits.len()..]));
                 }
                 digits.parse::<u64>().unwrap_or(0)
             })
             .collect();
         Version {
             parts,
-            pre,
+            pre: tailed.then_some(tails),
             raw: raw.to_string(),
         }
     }
@@ -56,8 +88,14 @@ impl Ord for Version {
                 o => return o,
             }
         }
-        // Numerically identical: a prerelease loses to a release.
-        other.pre.cmp(&self.pre)
+        // Numerically identical: a prerelease loses to a release, and two
+        // prereleases are told apart by their tails.
+        match (&self.pre, &other.pre) {
+            (None, None) => Ordering::Equal,
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (Some(a), Some(b)) => a.cmp(b),
+        }
     }
 }
 
@@ -165,5 +203,31 @@ mod tests {
         assert!(Version::parse("2.3-2") > Version::parse("2.3-1"));
         // "0.1.0alpha1-1" must not panic and sorts below 0.1.0.1
         assert!(Version::parse("0.1.0alpha1-1") < Version::parse("0.1.0.1"));
+    }
+
+    #[test]
+    fn prerelease_tails_are_compared_not_discarded() {
+        let ladder =
+            ["1.0alpha1", "1.0alpha2", "1.0alpha10", "1.0beta1", "1.0"].map(Version::parse);
+        for pair in ladder.windows(2) {
+            assert!(
+                pair[0] < pair[1],
+                "{} should sort below {}",
+                pair[0],
+                pair[1]
+            );
+        }
+        assert_ne!(Version::parse("1.0alpha1"), Version::parse("1.0alpha2"));
+        assert_ne!(
+            Version::parse("0.1.0alpha1-1"),
+            Version::parse("0.1.0alpha2-1")
+        );
+        assert!(Version::parse("0.1.0alpha1-1") < Version::parse("0.1.0alpha2-1"));
+    }
+
+    #[test]
+    fn trailing_zeros_and_tail_case_do_not_make_versions_differ() {
+        assert_eq!(Version::parse("1.0"), Version::parse("1.0.0"));
+        assert_eq!(Version::parse("1.0.0alpha1"), Version::parse("1.0Alpha1"));
     }
 }
