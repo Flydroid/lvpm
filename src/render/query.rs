@@ -64,7 +64,10 @@ pub fn list(installed: &[Manifest]) -> String {
                 if m.skipped_hooks.is_empty() {
                     String::new()
                 } else {
-                    format!("  (hooks skipped: {})", crate::hook_names(&m.skipped_hooks))
+                    format!(
+                        "  (hooks skipped: {})",
+                        super::hooks::hook_names(&m.skipped_hooks)
+                    )
                 }
             )
         })

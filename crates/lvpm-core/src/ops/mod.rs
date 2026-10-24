@@ -3,6 +3,11 @@
 //! front end called it.
 
 pub mod env;
+pub mod hooks;
+pub mod install;
 pub mod query;
+pub mod refresh;
+pub mod relink;
+pub mod uninstall;
 
 pub use env::{Destination, DestinationFlags, OpEnv};

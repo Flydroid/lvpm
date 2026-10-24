@@ -70,6 +70,225 @@ pub enum Event {
     /// A headless machine's project has a manifest and no venv, so the
     /// installation itself is used. `repo` is the project's directory.
     HeadlessInstallationChosen { repo: PathBuf, labview: String },
+
+    // ---- ops::install ----
+    /// The install reads its packages from a project manifest. `name` and
+    /// `labview` are what the manifest states, if anything.
+    ManifestInUse {
+        path: PathBuf,
+        name: Option<String>,
+        dependencies: usize,
+        labview: Option<String>,
+    },
+    /// Where the install goes. `labview` is the installation's label and `path`
+    /// its directory; with no `labview` the destination is a scratch tree and
+    /// `path` is its application directory.
+    InstallTarget {
+        labview: Option<String>,
+        path: PathBuf,
+    },
+    /// The indexes are about to be loaded; feed events follow.
+    IndexesLoading,
+    /// The indexes are loaded. `versions` counts every package version known.
+    IndexesLoaded { versions: usize },
+    /// A dependency is left alone because the installed version satisfies it.
+    DependencySatisfied { name: String, version: String },
+    /// A dependency of a resolved package that no index lists; it is skipped.
+    DependencyUnresolved { name: String },
+    /// What resolution chose, dependencies before dependents.
+    Resolved { packages: Vec<PackageRef> },
+    /// The manifest lists NI Package Manager dependencies, which lvpm does not
+    /// install.
+    NipmNotInstalled { count: usize },
+    /// A package is already installed at the version resolution chose.
+    PackageAlreadyInstalled { name: String, version: String },
+    /// A newer version is installed than the one resolution chose, and the
+    /// install was not told to downgrade.
+    PackageNotDowngraded {
+        name: String,
+        installed: String,
+        wanted: String,
+    },
+    /// An installed version is being replaced by `wanted`, its recorded files
+    /// removed first. `dry_run`: they would be, and `old_files` is how many.
+    PackageReplacing {
+        name: String,
+        installed: String,
+        wanted: String,
+        upgrade: bool,
+        old_files: usize,
+        dry_run: bool,
+    },
+    /// A package is about to be fetched and unpacked (or, on a dry run, only
+    /// planned). Its line ends with [`Event::PackageDone`].
+    PackageStart {
+        name: String,
+        version: String,
+        dry_run: bool,
+    },
+    /// The package is on disk (`files` written) or, on a dry run, planned.
+    PackageDone { files: usize, dry_run: bool },
+    /// What a dry run would write for one package, in the order it would.
+    PlannedWrites { files: Vec<PlannedFile> },
+    /// Files the package ships that were already on disk and are left alone.
+    FilesKept { count: usize },
+    /// A venv holds LabVIEW-tree content only, so a group aimed elsewhere was
+    /// not installed. `target_dir` is the group's `Target Dir`.
+    GroupSkipped { target_dir: String, files: usize },
+    /// The package's spec lists a file the archive does not hold.
+    MissingFromArchive { entry: String },
+    /// Hooks a package declares that this install did not run, as `Name=path`.
+    HooksNotRun { hooks: Vec<String> },
+    /// The install is finished as far as the files go. On a dry run `files`
+    /// would be written and nothing changed.
+    InstallDone { files: usize, dry_run: bool },
+    /// A phase of the operation did not run. `skipped` counts what it left
+    /// undone, in the phase's own unit: folders to relink, hooks to run, files
+    /// that a palette refresh would show. Zero when there was nothing to do.
+    PhaseSkipped {
+        phase: Phase,
+        reason: SkipReason,
+        skipped: usize,
+    },
+    /// A hook is about to run.
+    HookStarting { package: String, hook: HookKind },
+    /// A hook ran to the end after `took`.
+    HookRan {
+        package: String,
+        hook: HookKind,
+        took: Duration,
+    },
+    /// A hook could not run or failed. `error` is the cause's own text.
+    HookFailed {
+        package: String,
+        hook: HookKind,
+        error: String,
+    },
+    /// The PostInstall hooks of `count` packages are about to run, one by one.
+    PostInstallHooksStarted { count: usize },
+    /// A venv install is done; a LabVIEW already open on the venv has to be
+    /// restarted to see it.
+    LaunchHint,
+
+    // ---- ops::relink ----
+    /// The relink pass begins: `folders` to walk with the relink VI at `vi`,
+    /// `covered_by_parent` more that a folder above them already covers.
+    RelinkStarted {
+        folders: usize,
+        covered_by_parent: usize,
+        vi: PathBuf,
+    },
+    /// One folder is being relinked, for these packages.
+    RelinkFolderStarted {
+        packages: Vec<String>,
+        folder: PathBuf,
+    },
+    /// The folder is relinked after `took`. `summary` is the relink VI's own
+    /// account of what it saved, one line each.
+    RelinkFolderDone {
+        took: Duration,
+        summary: Vec<String>,
+    },
+    /// The folder could not be relinked; the rest still run.
+    RelinkFolderFailed { error: String },
+    /// A dry run: what a relink pass would walk.
+    RelinkPlanned {
+        folders: usize,
+        packages: Vec<PackageFolders>,
+    },
+    /// The LabVIEW started for a venv relink is left running, as asked.
+    VenvLabviewLeftOpen { port: u16 },
+
+    // ---- ops::refresh ----
+    /// The palettes and menus are being rebuilt.
+    RefreshStarted,
+    /// One refresh step (`what`) finished after `took`.
+    RefreshStepDone { what: String, took: Duration },
+    /// One refresh step failed; a LabVIEW restart does what it would have.
+    RefreshStepFailed { what: String, error: String },
+    /// No refresh could run at all. The files are installed regardless.
+    RefreshUnavailable { error: String },
+
+    // ---- ops::uninstall ----
+    /// A package's recorded files are off the disk.
+    PackageRemoved {
+        name: String,
+        version: String,
+        files: usize,
+    },
+    /// One package of a sweep could not be uninstalled; the rest go on.
+    UninstallFailed { name: String, error: String },
+    /// PostUninstall.vi could not be copied out of the package's folder, which
+    /// goes with the package, so it will not run.
+    PostUninstallNotStaged { error: String },
+    /// Uninstall hooks the package declares that did not run, as `Name=path`.
+    UninstallHooksNotRun {
+        hooks: Vec<String>,
+        reason: UnrunReason,
+    },
+}
+
+/// A package at a version, as a plan lists it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PackageRef {
+    pub name: String,
+    pub version: String,
+}
+
+/// A file a dry run would write.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PlannedFile {
+    pub path: PathBuf,
+    pub overwrites: bool,
+}
+
+/// The folders one package asked to have relinked.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PackageFolders {
+    pub package: String,
+    pub folders: Vec<PathBuf>,
+}
+
+/// The phases an install goes through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Phase {
+    Relink,
+    Hooks,
+    Refresh,
+}
+
+/// Why a phase did not run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkipReason {
+    /// A scratch tree has no LabVIEW to relink with, run hooks in or refresh.
+    ScratchDestination,
+    /// LabVIEW runs headless here, where nothing opens the IDE.
+    Headless,
+    /// The caller asked for it to be left out.
+    Declined,
+}
+
+/// The hooks a package can ship.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HookKind {
+    PreInstall,
+    PostInstall,
+    PreUninstall,
+    PostUninstall,
+}
+
+/// Why an uninstall hook was declared and not run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnrunReason {
+    /// The install predates the extraction of uninstall hooks: nothing on disk
+    /// to run.
+    InstalledBeforeUninstallHooks,
+    /// Hooks act on a LabVIEW installation, and a venv is not one.
+    VenvRunsNoHooks,
 }
 
 /// How a feed answered.

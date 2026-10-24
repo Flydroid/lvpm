@@ -7,10 +7,14 @@
 //! owns the two streams. `query` words what a query returns instead.
 
 mod env;
+mod hooks;
 mod index;
+mod install;
 mod launch;
 pub mod query;
+mod refresh;
 mod relink;
+mod uninstall;
 mod venv;
 mod viserver;
 
@@ -48,7 +52,46 @@ impl Renderer {
             | Event::LocalPackageIgnored { .. } => index::render(self, event),
             Event::RelinkDoneNotClearable { .. }
             | Event::RelinkProgress { .. }
-            | Event::RelinkProgressUnreadable { .. } => relink::render(self, event),
+            | Event::RelinkProgressUnreadable { .. }
+            | Event::RelinkStarted { .. }
+            | Event::RelinkFolderStarted { .. }
+            | Event::RelinkFolderDone { .. }
+            | Event::RelinkFolderFailed { .. }
+            | Event::RelinkPlanned { .. }
+            | Event::VenvLabviewLeftOpen { .. } => relink::render(self, event),
+            Event::ManifestInUse { .. }
+            | Event::InstallTarget { .. }
+            | Event::IndexesLoading
+            | Event::IndexesLoaded { .. }
+            | Event::DependencySatisfied { .. }
+            | Event::DependencyUnresolved { .. }
+            | Event::Resolved { .. }
+            | Event::NipmNotInstalled { .. }
+            | Event::PackageAlreadyInstalled { .. }
+            | Event::PackageNotDowngraded { .. }
+            | Event::PackageReplacing { .. }
+            | Event::PackageStart { .. }
+            | Event::PackageDone { .. }
+            | Event::PlannedWrites { .. }
+            | Event::FilesKept { .. }
+            | Event::GroupSkipped { .. }
+            | Event::MissingFromArchive { .. }
+            | Event::HooksNotRun { .. }
+            | Event::InstallDone { .. }
+            | Event::PhaseSkipped { .. }
+            | Event::LaunchHint => install::render(self, event),
+            Event::HookStarting { .. }
+            | Event::HookRan { .. }
+            | Event::HookFailed { .. }
+            | Event::PostInstallHooksStarted { .. } => hooks::render(self, event),
+            Event::RefreshStarted
+            | Event::RefreshStepDone { .. }
+            | Event::RefreshStepFailed { .. }
+            | Event::RefreshUnavailable { .. } => refresh::render(self, event),
+            Event::PackageRemoved { .. }
+            | Event::UninstallFailed { .. }
+            | Event::PostUninstallNotStaged { .. }
+            | Event::UninstallHooksNotRun { .. } => uninstall::render(self, event),
             Event::VenvManifestWritten { .. } | Event::VenvRemoved { .. } => {
                 venv::render(self, event)
             }
@@ -70,6 +113,17 @@ impl Renderer {
     /// announces.
     fn begin(&mut self, stream: Stream, text: &str) {
         self.end_open_line();
+        self.write(stream, text);
+        self.flush(stream);
+        self.open = Some(stream);
+    }
+
+    /// More of the line begun on `stream`, which stays open for its end. Starts
+    /// a line when none is open there.
+    fn append(&mut self, stream: Stream, text: &str) {
+        if self.open.is_some_and(|open| open != stream) {
+            self.end_open_line();
+        }
         self.write(stream, text);
         self.flush(stream);
         self.open = Some(stream);
