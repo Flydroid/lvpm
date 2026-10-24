@@ -1954,10 +1954,11 @@ and version.
 - [x] Slice 7b (inserted 2026-10-24 by user decision): version comparison fixes before locking
   - Prerelease tails compare (`1.0alpha1 < 1.0alpha2`, no dedup merge); a prerelease sorts below its release even with a revision suffix; a `>` requirement is strict. May change which version the greedy CLI picks when prereleases are involved.
   - Commits 0227c0a, a82451e, efcc104. `Requirement` gained `min_exclusive`; `Floor` type in `index.rs`; strict floors cached as `">1.2"`. No golden changed; no CLI version choice changed in any fixture.
-- [ ] Slice 8: `lvpm lock`
-  - [ ] Step 8.1: Lock format
-  - [ ] Step 8.2: `ops::lock` and `lvpm lock`
+- [x] Slice 8: `lvpm lock`
+  - [x] Step 8.1: Lock format
+  - [x] Step 8.2: `ops::lock` and `lvpm lock`
 
+  - Commits 0cd2541, 76e20c7, 6ffbc2d. `errors` module added; `Downloads` split out of `InstallSession` (`ops/session.rs`) so `lock` fetches through the cache without a destination. `source` is the feed index URL or `local`. `labview` must be a year (`LockError::LabviewNotAYear`). A package in both dependency tables satisfies both lines and is not dev (6ffbc2d). For Slice 9: `Lockfile::read`, `Inputs::of`, `constraint_text` are pub. For Slice 10: `Downloads` is `pub(super)`.
 #### Wave 7
 - [ ] Slice 9: Staleness and `lvpm lock --check`
   - [ ] Step 9.1: Staleness rules as named predicates
