@@ -54,6 +54,8 @@ pub struct CliWorld {
     pub core_events: Vec<lvpm_core::events::Event>,
     /// What an `@core` manifest-editing scenario has done and seen.
     pub manifest: steps::manifest::ManifestState,
+    /// What an `@core` solver scenario has set up and seen.
+    pub solver: steps::solver::SolverState,
 }
 
 impl CliWorld {
@@ -67,6 +69,7 @@ impl CliWorld {
             row_outputs: Vec::new(),
             core_events: Vec::new(),
             manifest: Default::default(),
+            solver: Default::default(),
         }
     }
 

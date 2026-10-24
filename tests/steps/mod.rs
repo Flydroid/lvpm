@@ -8,4 +8,5 @@ pub mod manifest;
 pub mod recording;
 pub mod run;
 pub mod setup;
+pub mod solver;
 pub mod venv;
