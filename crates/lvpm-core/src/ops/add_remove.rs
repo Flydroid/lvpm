@@ -297,13 +297,8 @@ fn commit(
             dry_run: options.dry_run,
         });
     }
+    // Locking warns about the requirements no source lists.
     let (lock, changes) = locking::relock_with(env, &edit.project, index, previous.as_ref())?;
-    for unresolved in &lock.unresolved {
-        env.sink.emit(Event::SyncUnresolved {
-            name: unresolved.name.clone(),
-            required_by: unresolved.required_by.clone(),
-        });
-    }
     let plan = plan_sync(&lock, &install::list_installed(&dest.store())?, false);
     if lock_missing {
         announce_migration(env, &plan);
@@ -765,6 +760,40 @@ mod tests {
         );
         assert_eq!(world.manifest(), PROJECT);
         assert_eq!(world.lock(), None);
+    }
+
+    #[test]
+    fn a_requirement_no_source_lists_is_warned_about_once() {
+        let world = World::new("unresolved", PROJECT);
+        write_vip(
+            &world.root.join("packages").join("delta-1.0.vip"),
+            ("delta", "1.0", "ni_lib_missing>=1.0"),
+        );
+        let sink = Recorder::default();
+        add(
+            &world.env(&sink),
+            "delta",
+            DependencyTable::Dependencies,
+            &InstallOptions::default(),
+        )
+        .unwrap();
+        let warnings: Vec<Event> = sink
+            .events()
+            .into_iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    Event::SyncUnresolved { .. } | Event::RequirementUnresolved { .. }
+                )
+            })
+            .collect();
+        assert_eq!(
+            warnings,
+            [Event::RequirementUnresolved {
+                name: "ni_lib_missing".into(),
+                required_by: "delta".into()
+            }]
+        );
     }
 
     #[test]

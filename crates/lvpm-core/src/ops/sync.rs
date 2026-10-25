@@ -125,12 +125,6 @@ pub fn sync(env: &OpEnv, opts: &SyncOptions) -> Result<(), SyncError> {
 
     let lock_path = manifest_path.with_file_name(lockfile::FILE_NAME);
     let (lock, first_sync) = settle_lock(env, &found, &lock_path, opts)?;
-    for unresolved in &lock.unresolved {
-        env.sink.emit(Event::SyncUnresolved {
-            name: unresolved.name.clone(),
-            required_by: unresolved.required_by.clone(),
-        });
-    }
     if !project.nipm.is_empty() {
         env.sink.emit(Event::NipmNotInstalled {
             count: project.nipm.len(),
@@ -162,6 +156,9 @@ pub fn sync(env: &OpEnv, opts: &SyncOptions) -> Result<(), SyncError> {
 
 /// The lock this sync goes by, and whether it is the project's first: made
 /// here because there was none. A dry run makes it without writing it.
+///
+/// A lock that was there is warned about for the requirements it records as
+/// unresolved; one made here has said so already, as it was made.
 fn settle_lock(
     env: &OpEnv,
     found: &(PathBuf, Project),
@@ -170,16 +167,18 @@ fn settle_lock(
 ) -> Result<(Lockfile, bool), SyncError> {
     let project = &found.1;
     match opts.lock {
-        LockPolicy::Frozen => Ok((locking::read_lock(lock_path)?, false)),
+        LockPolicy::Frozen => Ok((warn_unresolved(env, locking::read_lock(lock_path)?), false)),
         LockPolicy::Locked => {
             let lock = locking::read_lock(lock_path)?;
             match lock.staleness(project) {
                 Some(reason) => Err(LockError::Stale(reason).into()),
-                None => Ok((lock, false)),
+                None => Ok((warn_unresolved(env, lock), false)),
             }
         }
         LockPolicy::Update => match locking::read_lock(lock_path) {
-            Ok(lock) if lock.staleness(project).is_none() => Ok((lock, false)),
+            Ok(lock) if lock.staleness(project).is_none() => {
+                Ok((warn_unresolved(env, lock), false))
+            }
             read => {
                 let missing = matches!(read, Err(LockError::NoLock { .. }));
                 if missing {
@@ -193,6 +192,17 @@ fn settle_lock(
             }
         },
     }
+}
+
+/// `lock`, after a warning for each requirement it records as unresolved.
+fn warn_unresolved(env: &OpEnv, lock: Lockfile) -> Lockfile {
+    for unresolved in &lock.unresolved {
+        env.sink.emit(Event::SyncUnresolved {
+            name: unresolved.name.clone(),
+            required_by: unresolved.required_by.clone(),
+        });
+    }
+    lock
 }
 
 /// The lock the manifest resolves to now: written beside it, or on a dry run
@@ -1716,23 +1726,56 @@ mod tests {
         assert!(project.lock_bytes().is_none());
     }
 
-    #[test]
-    fn an_unresolved_requirement_is_warned_about_at_sync() {
-        let project = project("unresolved", &["beta"]);
+    /// A project whose beta needs `ni_lib_missing`, which no source lists.
+    fn project_with_an_unresolved_requirement(tag: &str) -> Scratch {
+        let project = project(tag, &["beta"]);
         put(
             &project.folder(),
             "beta",
             "1.0",
             &vip_requiring("beta", "1.0", "alpha>=1.0,ni_lib_missing>=1.0", ""),
         );
+        project
+    }
+
+    fn unresolved_warnings(events: &[Event]) -> Vec<&Event> {
+        events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    Event::SyncUnresolved { .. } | Event::RequirementUnresolved { .. }
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_unresolved_requirement_of_the_lock_there_is_warned_about_once_at_sync() {
+        let project = project_with_an_unresolved_requirement("unresolved");
+        locking_lock(&project);
         let (outcome, events) = project.sync(&SyncOptions::default());
         outcome.unwrap();
-        assert!(
-            events.contains(&Event::SyncUnresolved {
+        assert_eq!(
+            unresolved_warnings(&events),
+            [&Event::SyncUnresolved {
                 name: "ni_lib_missing".into(),
                 required_by: "beta".into()
-            }),
-            "{events:?}"
+            }]
+        );
+    }
+
+    #[test]
+    fn an_unresolved_requirement_is_warned_about_once_when_the_sync_makes_the_lock() {
+        let project = project_with_an_unresolved_requirement("unresolved-made");
+        let (outcome, events) = project.sync(&SyncOptions::default());
+        outcome.unwrap();
+        assert_eq!(
+            unresolved_warnings(&events),
+            [&Event::RequirementUnresolved {
+                name: "ni_lib_missing".into(),
+                required_by: "beta".into()
+            }]
         );
     }
 }
