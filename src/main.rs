@@ -280,8 +280,17 @@ enum Cmd {
         verbose: bool,
         /// Leave compiled-code settings unchanged. By default VIs are made
         /// source-only and library/class XML is marked source-only too.
+        /// Same as leaving `source-only` out of `--fix`.
         #[arg(long)]
         keep_compiled_code: bool,
+        /// Apply only these methods, comma-separated (default: all). Running
+        /// them one at a time shows which one a later save dialog is about.
+        #[arg(long, value_enum, value_delimiter = ',', value_name = "METHOD")]
+        fix: Vec<linkfix::Method>,
+        /// Write, per changed or skipped file, what each method changed (or
+        /// why the file was skipped) as JSON.
+        #[arg(long, value_name = "FILE")]
+        report: Option<PathBuf>,
     },
     /// Show what lvpm has installed into the selected target.
     List,
@@ -380,8 +389,12 @@ fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Launch { lvproj, ini_keys } => cmd_launch(&cli, lvproj.as_deref(), ini_keys),
-        Cmd::Linkfix { tree, dry_run, verbose, keep_compiled_code } => {
-            cmd_linkfix(&cli, tree.as_deref(), *dry_run, *verbose, !*keep_compiled_code)
+        Cmd::Linkfix { tree, dry_run, verbose, keep_compiled_code, fix, report } => {
+            let mut methods: Vec<linkfix::Method> = if fix.is_empty() { linkfix::Method::ALL.to_vec() } else { fix.clone() };
+            if *keep_compiled_code {
+                methods.retain(|m| *m != linkfix::Method::SourceOnly);
+            }
+            cmd_linkfix(&cli, tree.as_deref(), *dry_run, *verbose, &methods, report.as_deref())
         }
         Cmd::List => cmd_list(&cli),
         Cmd::Search { query } => cmd_search(&cli, query),
@@ -1725,7 +1738,14 @@ fn cmd_app_probe(cli: &Cli, ids: &[String]) -> Result<()> {
 
 /// Fix linker tables in place — see [`linkfix`]. A venv store is a set of
 /// `<package>/1/` roots; anything else is one LabVIEW-shaped root.
-fn cmd_linkfix(cli: &Cli, tree: Option<&Path>, dry_run: bool, verbose: bool, separate: bool) -> Result<()> {
+fn cmd_linkfix(
+    cli: &Cli,
+    tree: Option<&Path>,
+    dry_run: bool,
+    verbose: bool,
+    methods: &[linkfix::Method],
+    report: Option<&Path>,
+) -> Result<()> {
     let roots: Vec<PathBuf> = match tree {
         Some(t) => {
             let store_like = linkfix::venv_roots(t)?;
@@ -1740,14 +1760,36 @@ fn cmd_linkfix(cli: &Cli, tree: Option<&Path>, dry_run: bool, verbose: bool, sep
         },
     };
     ensure!(!roots.is_empty(), "nothing to fix: no package roots found");
-    println!("{}fixing linker tables under {} root(s)", if dry_run { "dry run: " } else { "" }, roots.len());
+    let names: Vec<String> = methods
+        .iter()
+        .map(|m| clap::ValueEnum::to_possible_value(m).expect("no skipped variants").get_name().to_string())
+        .collect();
+    println!(
+        "{}fixing under {} root(s), methods: {}",
+        if dry_run { "dry run: " } else { "" },
+        roots.len(),
+        names.join(", ")
+    );
 
-    let (_tree, outcomes) = linkfix::fix_tree(&roots, dry_run, separate)?;
+    let (_tree, outcomes) = linkfix::fix_tree(&roots, dry_run, linkfix::Methods::of(methods))?;
     let mut total = linkfix::Changes::default();
-    let (mut changed, mut clean, mut skipped) = (0usize, 0usize, 0usize);
+    let (mut changed, mut clean, mut skipped, mut not_separated) = (0usize, 0usize, 0usize, 0usize);
+    let mut files = Vec::new();
     for o in &outcomes {
+        // Always shown, not only with --verbose: the file keeps its embedded
+        // compiled code, and LabVIEW may still ask to save it.
+        if let Ok(c) = &o.result
+            && let Some(why) = &c.not_separated
+        {
+            not_separated += 1;
+            println!("  NOT SEPARATED {}: {why}", o.path.display());
+            if c.total() == 0 {
+                files.push(serde_json::json!({ "path": o.path, "methods": c.methods(), "changes": c }));
+            }
+        }
         match &o.result {
             Ok(c) if c.total() > 0 => {
+                files.push(serde_json::json!({ "path": o.path, "methods": c.methods(), "changes": c }));
                 changed += 1;
                 total.owner += c.owner;
                 total.relative += c.relative;
@@ -1770,12 +1812,28 @@ fn cmd_linkfix(cli: &Cli, tree: Option<&Path>, dry_run: bool, verbose: bool, sep
             }
             Ok(_) => clean += 1,
             Err(e) => {
+                files.push(serde_json::json!({ "path": o.path, "skipped": format!("{e:#}") }));
                 skipped += 1;
                 if verbose {
                     println!("  SKIPPED {}: {e:#}", o.path.display());
                 }
             }
         }
+    }
+    if let Some(report) = report {
+        let doc = serde_json::json!({
+            "methods": methods,
+            "dry_run": dry_run,
+            "looked_at": outcomes.len(),
+            "changed": changed,
+            "clean": clean,
+            "skipped": skipped,
+            "not_separated": not_separated,
+            "files": files,
+        });
+        std::fs::write(report, serde_json::to_string_pretty(&doc)?)
+            .with_context(|| format!("writing {}", report.display()))?;
+        println!("report: {}", report.display());
     }
     println!(
         "\n{} LabVIEW files looked at: {changed} {}, {clean} already clean, {skipped} skipped",
@@ -1787,6 +1845,9 @@ fn cmd_linkfix(cli: &Cli, tree: Option<&Path>, dry_run: bool, verbose: bool, sep
          compiled code separated {}",
         total.owner, total.relative, total.absolute, total.qualifier, total.vils, total.separated
     );
+    if not_separated > 0 {
+        println!("  compiled code left embedded in {not_separated} file(s), listed above with the reason; their links were fixed");
+    }
     if skipped > 0 && !verbose {
         println!("  (--verbose names the skipped files and why)");
     }

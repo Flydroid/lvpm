@@ -38,7 +38,7 @@ use anyhow::{bail, ensure, Context, Result};
 use md5::{Digest, Md5};
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 
@@ -56,6 +56,7 @@ fn be32(b: &[u8], o: usize) -> Result<u32> {
     Ok(u32::from_be_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]))
 }
 
+#[derive(Clone)]
 pub struct Section {
     pub ident: [u8; 4],
     /// Where this section's `data_offset` field sits inside `Rsrc::info`.
@@ -63,6 +64,7 @@ pub struct Section {
     pub data: Vec<u8>,
 }
 
+#[derive(Clone)]
 pub struct Rsrc {
     head: [u8; 32],
     /// The block-info table, after its 32-byte header copy, kept byte for byte.
@@ -301,7 +303,13 @@ fn heap_hash(rsrc: &Rsrc) -> Result<Option<[u8; 16]>> {
 
 /// The salt is three little-endian terminal counts of the connector pane;
 /// rather than count terminals, find the one the stored hash was made with.
-fn find_salt(prefix: &[u8], hash1: &[u8]) -> Option<[u8; 12]> {
+/// LabVIEW 2010 hashes without a salt (measured on jki_lib_unicode's 10.0
+/// VIs: the hash is exactly `MD5(password + LIBN + LVSR)`), which comes back
+/// as an empty salt.
+fn find_salt(prefix: &[u8], hash1: &[u8]) -> Option<Vec<u8>> {
+    if md5_of(&[prefix]).as_slice() == hash1 {
+        return Some(Vec::new());
+    }
     let mut base = Md5::new();
     base.update(prefix);
     for sum in 0..3 * SALT_LIMIT {
@@ -318,7 +326,7 @@ fn find_salt(prefix: &[u8], hash1: &[u8]) -> Option<[u8; 12]> {
                 let mut h = base.clone();
                 h.update(salt);
                 if h.finalize().as_slice() == hash1 {
-                    return Some(salt);
+                    return Some(salt.to_vec());
                 }
             }
         }
@@ -934,6 +942,8 @@ const TOKENS: &[(&str, &str)] = &[
 struct Entry {
     logical: String,
     physical: PathBuf,
+    /// Index of the root (a venv package) the file came from.
+    root: usize,
 }
 
 pub struct Tree {
@@ -943,6 +953,32 @@ pub struct Tree {
     owner: HashMap<String, String>,
     /// lowercase basename -> logical paths (for resolving build-machine absolutes)
     by_name: HashMap<String, Vec<String>>,
+    /// Roots holding a library or class saved in LabVIEW 2010 or earlier.
+    old_roots: HashSet<usize>,
+    /// Lowercase file names of the methods of those old classes.
+    old_methods: HashSet<String>,
+}
+
+/// The newest LabVIEW whose libraries and classes linkfix leaves as packaged.
+///
+/// Measured 2026-10 (NovaXC on LabVIEW 2026): rewriting the links of the
+/// members of jki_lib_serialization (9.0) or jki_lib_unicode (10.0) classes
+/// sends the compiler into endless recursion on project load, with or without
+/// their compiled code separated, and so does rewriting the
+/// jki_lib_json_serialization (2020) methods that override the 9.0 ones. The
+/// same rewrite is fine for classes from 2013 on. LabVIEW's own save fixes it
+/// only by rewriting the class file too, binary private data and all.
+const OLD_LIBRARY_MAJOR: u32 = 10;
+
+/// The major LabVIEW version a `.lvlib`/`.lvclass` was saved in, from its
+/// `LVVersion` attribute (`10008000` is 10, `9008000` is 9).
+fn library_major(head: &str) -> Option<u32> {
+    let at = head.find("LVVersion=\"")? + "LVVersion=\"".len();
+    let digits: String = head[at..].chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.len() <= 6 {
+        return None;
+    }
+    digits[..digits.len() - 6].parse().ok()
 }
 
 fn lower(s: &str) -> String {
@@ -966,16 +1002,62 @@ impl Tree {
     pub fn index(roots: &[PathBuf]) -> Result<Tree> {
         let mut files = HashMap::new();
         let mut by_name: HashMap<String, Vec<String>> = HashMap::new();
-        for root in roots {
+        for (i, root) in roots.iter().enumerate() {
             for (physical, logical) in walk(root)? {
                 by_name.entry(lower(basename(&logical))).or_default().push(logical.clone());
-                files.insert(lower(&logical), Entry { logical, physical });
+                files.insert(lower(&logical), Entry { logical, physical, root: i });
             }
         }
-        let mut t = Tree { files, owner: HashMap::new(), by_name };
+        let mut t = Tree { files, owner: HashMap::new(), by_name, old_roots: HashSet::new(), old_methods: HashSet::new() };
         t.read_libraries()?;
         t.read_llbs()?;
+        t.find_old_libraries();
         Ok(t)
+    }
+
+    /// Mark the packages that hold a library or class from LabVIEW 2010 or
+    /// earlier, and collect the method names of those old classes.
+    fn find_old_libraries(&mut self) {
+        let mut old_classes = HashSet::new();
+        for e in self.files.values() {
+            let l = lower(&e.logical);
+            if !(l.ends_with(".lvlib") || l.ends_with(".lvclass")) || l.contains(".llb/") {
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(&e.physical) else { continue };
+            let head = String::from_utf8_lossy(&bytes[..bytes.len().min(512)]).into_owned();
+            if library_major(&head).is_some_and(|v| v <= OLD_LIBRARY_MAJOR) {
+                self.old_roots.insert(e.root);
+                if l.ends_with(".lvclass") {
+                    old_classes.insert(e.logical.clone());
+                }
+            }
+        }
+        for (member, owner) in &self.owner {
+            if old_classes.contains(owner) {
+                self.old_methods.insert(lower(basename(member)));
+            }
+        }
+    }
+
+    /// Why a file must stay as packaged, if it must: see [`OLD_LIBRARY_MAJOR`].
+    fn keep_as_packaged(&self, e: &Entry) -> Option<String> {
+        if self.old_roots.contains(&e.root) {
+            return Some(format!(
+                "left as packaged: its package has libraries or classes saved in LabVIEW {OLD_LIBRARY_MAJOR} or \
+                 earlier (link edits crash LabVIEW 2026's compiler)"
+            ));
+        }
+        // An override has its parent method's file name; the inheritance itself
+        // is only in the class's binary genealogy, so match by name.
+        let in_class = self.owner.get(&lower(&e.logical)).is_some_and(|o| lower(o).ends_with(".lvclass"));
+        if in_class && self.old_methods.contains(&lower(basename(&e.logical))) {
+            return Some(format!(
+                "left as packaged: may override a method of a LabVIEW {OLD_LIBRARY_MAJOR} or earlier class \
+                 (link edits crash LabVIEW 2026's compiler)"
+            ));
+        }
+        None
     }
 
     /// Members of every `.llb`, so links INTO an LLB resolve and get their
@@ -991,7 +1073,10 @@ impl Tree {
             for (name, member) in llb_members(&bytes) {
                 let logical = format!("{}/{}", llb.logical, name);
                 self.by_name.entry(lower(&name)).or_default().push(logical.clone());
-                self.files.insert(lower(&logical), Entry { logical: logical.clone(), physical: llb.physical.clone() });
+                self.files.insert(
+                    lower(&logical),
+                    Entry { logical: logical.clone(), physical: llb.physical.clone(), root: llb.root },
+                );
                 let Ok(r) = Rsrc::parse(member) else { continue };
                 let Ok(ver) = r.version() else { continue };
                 let Some(sec) = r.sections.iter().find(|s| &s.ident == b"LIvi") else { continue };
@@ -1008,7 +1093,7 @@ impl Tree {
                 if let Some(owner) = owner {
                     self.files
                         .entry(lower(&owner))
-                        .or_insert_with(|| Entry { logical: owner.clone(), physical: llb.physical.clone() });
+                        .or_insert_with(|| Entry { logical: owner.clone(), physical: llb.physical.clone(), root: llb.root });
                     self.owner.insert(lower(&logical), owner);
                 }
             }
@@ -1246,7 +1331,55 @@ fn walk(root: &Path) -> Result<Vec<(PathBuf, String)>> {
 // The fix itself.
 // ---------------------------------------------------------------------------
 
-#[derive(Default, Debug, Clone)]
+/// The independent things linkfix does to a file. Each can be run on its own,
+/// so a save dialog after a run can be traced to the method that should have
+/// prevented it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Method {
+    /// The `VILB` owner path becomes the owning library's token path.
+    Owner,
+    /// Relative and build-machine absolute link paths become token paths.
+    Paths,
+    /// Links into libraries get their qualifier chain and owner ref.
+    Qualifiers,
+    /// Embedded compiled code is removed and `.lvlib`/`.lvclass`
+    /// files are marked source-only.
+    SourceOnly,
+}
+
+impl Method {
+    pub const ALL: [Method; 4] = [Method::Owner, Method::Paths, Method::Qualifiers, Method::SourceOnly];
+}
+
+/// Which [`Method`]s a run applies.
+#[derive(Debug, Clone, Copy)]
+pub struct Methods {
+    pub owner: bool,
+    pub paths: bool,
+    pub qualifiers: bool,
+    pub source_only: bool,
+}
+
+impl Methods {
+    pub fn of(list: &[Method]) -> Methods {
+        Methods {
+            owner: list.contains(&Method::Owner),
+            paths: list.contains(&Method::Paths),
+            qualifiers: list.contains(&Method::Qualifiers),
+            source_only: list.contains(&Method::SourceOnly),
+        }
+    }
+
+    fn links(&self) -> bool {
+        self.owner || self.paths || self.qualifiers
+    }
+}
+
+/// What one file got, by method: `owner` from [`Method::Owner`], `relative`
+/// and `absolute` from [`Method::Paths`], `qualifier` and `vils` from
+/// [`Method::Qualifiers`], `separated` from [`Method::SourceOnly`].
+#[derive(Default, Debug, Clone, serde::Serialize)]
 pub struct Changes {
     pub owner: usize,
     pub relative: usize,
@@ -1255,32 +1388,77 @@ pub struct Changes {
     pub vils: usize,
     /// 1 when this file was made source-only.
     pub separated: usize,
+    /// Why [`Method::SourceOnly`] left this file's compiled code embedded,
+    /// when it could not separate it; the other methods still ran.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub not_separated: Option<String>,
 }
 
 impl Changes {
     pub fn total(&self) -> usize {
         self.owner + self.relative + self.absolute + self.qualifier + self.vils + self.separated
     }
+
+    /// The methods that changed something in this file.
+    pub fn methods(&self) -> Vec<Method> {
+        let mut out = Vec::new();
+        if self.owner > 0 {
+            out.push(Method::Owner);
+        }
+        if self.relative + self.absolute > 0 {
+            out.push(Method::Paths);
+        }
+        if self.qualifier + self.vils > 0 {
+            out.push(Method::Qualifiers);
+        }
+        if self.separated > 0 {
+            out.push(Method::SourceOnly);
+        }
+        out
+    }
 }
 
-/// What to do to one VI's link sections, and with `separate`, its compiled
-/// code flag. Returns the new file bytes when anything changed.
-pub fn fix_vi(bytes: &[u8], vi_logical: &str, tree: &Tree, separate: bool) -> Result<(Option<Vec<u8>>, Changes)> {
+/// Apply the selected methods to one VI. Returns the new file bytes when
+/// anything changed.
+pub fn fix_vi(bytes: &[u8], vi_logical: &str, tree: &Tree, m: Methods) -> Result<(Option<Vec<u8>>, Changes)> {
     let mut rsrc = Rsrc::parse(bytes)?;
     let ver = rsrc.version()?;
     ensure!(ver >= (8, 6), "LabVIEW {}.{} is older than this tool handles", ver.0, ver.1);
+    // Measured 2026-10 (NovaXC on LabVIEW 2026): rewriting the links of a
+    // LabVIEW 9 VI (jki_lib_serialization's Flatten/Unflatten From String)
+    // sends the compiler into endless recursion on project load. Before 2010
+    // a VI cannot keep its compiled code separate, so it cannot be made
+    // source-only either: such a file stays as packaged.
+    ensure!(
+        ver >= (10, 0),
+        "left as packaged: saved in LabVIEW {}.{}, before 2010 (link edits crash LabVIEW 2026's compiler)",
+        ver.0,
+        ver.1
+    );
     let vi_dir = parent(vi_logical).to_string();
     let vi_chain = tree.chain(vi_logical);
     let mut changes = Changes::default();
     let mut touched = false;
 
-    if separate && separate_compiled_code(&mut rsrc)? {
-        changes.separated = 1;
-        touched = true;
+    if m.source_only {
+        // On a copy: separation can fail after it has already added the
+        // SourceOnly tag (the password check comes later), and a half-
+        // separated file must never be written. A file it cannot separate
+        // keeps its compiled code and still gets the link fixes.
+        let mut trial = rsrc.clone();
+        match separate_compiled_code(&mut trial) {
+            Ok(true) => {
+                rsrc = trial;
+                changes.separated = 1;
+                touched = true;
+            }
+            Ok(false) => {}
+            Err(e) => changes.not_separated = Some(format!("{e:#}")),
+        }
     }
 
     for sec in rsrc.sections.iter_mut() {
-        if !matches!(&sec.ident, b"LIvi" | b"LIbd" | b"LIfp" | b"LIds") {
+        if !m.links() || !matches!(&sec.ident, b"LIvi" | b"LIbd" | b"LIfp" | b"LIds") {
             continue;
         }
         let mut ls = LinkSection::parse(&sec.data, ver)
@@ -1303,7 +1481,8 @@ pub fn fix_vi(bytes: &[u8], vi_logical: &str, tree: &Tree, separate: bool) -> Re
                 None
             };
 
-            if is_api_kind(&o.ident)
+            if m.paths
+                && is_api_kind(&o.ident)
                 && let Ok(true) = fix_parent_paths(o, ver, &sec.ident != b"LIvi", tree)
             {
                 changes.absolute += 1;
@@ -1313,7 +1492,8 @@ pub fn fix_vi(bytes: &[u8], vi_logical: &str, tree: &Tree, separate: bool) -> Re
             if &o.ident == b"VILB" {
                 // The owner is what the library files say, not what the VI recorded.
                 let owner = tree.owner.get(&lower(vi_logical)).cloned().or(target);
-                if let Some(owner) = owner
+                if m.owner
+                    && let Some(owner) = owner
                     && !o.path.is_token()
                     && let Some(tok) = logical_to_token(&owner)
                 {
@@ -1327,7 +1507,8 @@ pub fn fix_vi(bytes: &[u8], vi_logical: &str, tree: &Tree, separate: bool) -> Re
             let Some(target) = target else { continue };
 
             // Relative and build-machine absolute paths become token paths.
-            if (o.path.is_relative() || o.path.is_drive())
+            if m.paths
+                && (o.path.is_relative() || o.path.is_drive())
                 && let Some(tok) = logical_to_token(&target)
             {
                 if o.path.is_relative() {
@@ -1342,7 +1523,7 @@ pub fn fix_vi(bytes: &[u8], vi_logical: &str, tree: &Tree, separate: bool) -> Re
             // Qualifier: the target's owner chain with our own chain's common
             // prefix removed, outermost first, then the existing last element
             // (the file name, or the class-API marker).
-            if &o.ident == b"DSDS" || o.qual.is_empty() {
+            if !m.qualifiers || &o.ident == b"DSDS" || o.qual.is_empty() {
                 continue;
             }
             let is_api = is_api_kind(&o.ident);
@@ -1596,7 +1777,7 @@ pub struct Outcome {
     pub result: Result<Changes>,
 }
 
-pub fn fix_tree(roots: &[PathBuf], dry_run: bool, separate: bool) -> Result<(Tree, Vec<Outcome>)> {
+pub fn fix_tree(roots: &[PathBuf], dry_run: bool, m: Methods) -> Result<(Tree, Vec<Outcome>)> {
     let tree = Tree::index(roots)?;
     let mut outcomes = Vec::new();
     // Anything addressed through an `.llb` path component stays as it is:
@@ -1607,12 +1788,22 @@ pub fn fix_tree(roots: &[PathBuf], dry_run: bool, separate: bool) -> Result<(Tre
         .files
         .values()
         .filter(|e| {
-            (is_vi_like(&e.physical) || separate && is_library_xml(&e.physical))
+            (is_vi_like(&e.physical) || m.source_only && is_library_xml(&e.physical))
                 && !lower(&e.logical).contains(".llb/")
         })
         .collect();
     entries.sort_by(|a, b| a.logical.cmp(&b.logical));
     for e in entries {
+        // Only the VIs stay as packaged. Their libraries and classes still get
+        // the source-only property: measured 2026-10-25, a source-only child
+        // class (JSON Serializer) over an unmarked 9.0 parent crashes the
+        // compiler just like the link edits do, and marking both loads clean.
+        if !is_library_xml(&e.physical)
+            && let Some(why) = tree.keep_as_packaged(e)
+        {
+            outcomes.push(Outcome { path: e.physical.clone(), result: Err(anyhow::anyhow!(why)) });
+            continue;
+        }
         let bytes = match std::fs::read(&e.physical) {
             Ok(b) => b,
             Err(err) => {
@@ -1638,7 +1829,7 @@ pub fn fix_tree(roots: &[PathBuf], dry_run: bool, separate: bool) -> Result<(Tre
             if bytes.len() < 32 || &bytes[..4] != b"RSRC" || !matches!(&bytes[8..12], b"LVIN" | b"LVCC") {
                 continue;
             }
-            fix_vi(&bytes, &e.logical, &tree, separate).and_then(|(new, ch)| {
+            fix_vi(&bytes, &e.logical, &tree, m).and_then(|(new, ch)| {
                 if let Some(new) = new
                     && !dry_run
                 {
@@ -1802,14 +1993,24 @@ mod tests {
     }
 
     #[test]
+    fn library_major_reads_lvversion() {
+        assert_eq!(library_major(r#"<Library LVVersion="9008000">"#), Some(9));
+        assert_eq!(library_major(r#"<LVClass LVVersion="10008000">"#), Some(10));
+        assert_eq!(library_major(r#"<LVClass LVVersion="26008000">"#), Some(26));
+        assert_eq!(library_major("<Library>"), None);
+    }
+
+    #[test]
     fn salt_is_recovered_from_the_stored_hash() {
         let prefix = b"password-md5 + LIBN + LVSR";
         let mut salt = [0u8; 12];
         salt[..4].copy_from_slice(&3u32.to_le_bytes());
         salt[8..].copy_from_slice(&7u32.to_le_bytes());
         let hash1 = md5_of(&[prefix, &salt]);
-        assert_eq!(find_salt(prefix, &hash1), Some(salt));
+        assert_eq!(find_salt(prefix, &hash1), Some(salt.to_vec()));
         assert_eq!(find_salt(prefix, &[0u8; 16]), None);
+        // LabVIEW 2010: no salt at all.
+        assert_eq!(find_salt(prefix, &md5_of(&[prefix])), Some(Vec::new()));
     }
 
     #[test]
@@ -1818,10 +2019,11 @@ mod tests {
         let class = "vi.lib/P/C/C.lvclass";
         let mut files = HashMap::new();
         for l in [lib, class] {
-            files.insert(lower(l), Entry { logical: l.to_string(), physical: PathBuf::from(l) });
+            files.insert(lower(l), Entry { logical: l.to_string(), physical: PathBuf::from(l), root: 0 });
         }
         let owner = HashMap::from([(lower(class), lib.to_string())]);
-        let tree = Tree { files, owner, by_name: HashMap::new() };
+        let tree =
+            Tree { files, owner, by_name: HashMap::new(), old_roots: HashSet::new(), old_methods: HashSet::new() };
         assert_eq!(tree.chain("vi.lib/P/C/C.lvclass/C.ctl"), vec![class.to_string(), lib.to_string()]);
     }
 
