@@ -32,6 +32,9 @@ pub fn uninstall(env: &OpEnv, package: Option<&str>, all: bool) -> Result<()> {
         "no packages are installed in this target"
     );
 
+    // From here a cancel is refused: the first file goes.
+    env.cancel.begin_unpack()?;
+
     // One VI Server connection for the whole sweep, and one palette refresh at
     // the end — the hooks are per package, the rebuild is not.
     let mut session = InstallSession::new(dest);
@@ -282,6 +285,22 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, Event::PhaseStarted { .. }))
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_uninstall_after_an_accepted_cancel_deletes_nothing_and_one_that_ran_refuses_a_cancel() {
+        let (dir, file) = scratch_with_alpha("cancelled");
+        let sink = Recorder::default();
+        let mut env = env_for(&sink, &dir);
+        assert!(env.cancel.cancel());
+        let why = uninstall(&env, Some("alpha"), false).unwrap_err();
+        assert!(why.is::<crate::errors::Cancelled>(), "{why:#}");
+        assert!(file.exists(), "a cancel that returned true deleted a file");
+
+        env.cancel = crate::cancel::CancelToken::new();
+        uninstall(&env, Some("alpha"), false).unwrap();
+        assert!(!env.cancel.cancel(), "the uninstall had begun to delete");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
