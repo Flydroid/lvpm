@@ -757,6 +757,10 @@ pub(super) fn write_manifest_and_lock(
 /// never rename each other's half-written file into place; whatever fails,
 /// the staged file does not stay.
 fn write_atomically(path: &Path, text: &str) -> anyhow::Result<()> {
+    #[cfg(test)]
+    if tests::write_is_made_to_fail(path) {
+        anyhow::bail!("writing {} failed, as a test asked", path.display());
+    }
     let staged = staging_path(path);
     let replaced = std::fs::write(&staged, text)
         .with_context(|| format!("writing {}", staged.display()))
@@ -794,9 +798,20 @@ mod tests {
     use crate::lockfile::{LOCAL_SOURCE, StaleReason};
     use crate::ops::testing::CancelOn;
     use crate::solve::Unresolved;
+    use std::cell::RefCell;
     use std::io::Write;
     use std::path::PathBuf;
     use std::sync::Mutex;
+
+    thread_local! {
+        /// The one file this test's thread cannot write: the seam that lets a
+        /// test fail a write that comes after the manifest's own.
+        static UNWRITABLE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn write_is_made_to_fail(path: &Path) -> bool {
+        UNWRITABLE.with(|file| file.borrow().as_deref() == Some(path))
+    }
 
     // ---- the pure parts ----
 
@@ -1595,6 +1610,43 @@ mod tests {
         assert!(format!("{failure:#}").contains("writing"), "{failure:#}");
         assert_eq!(std::fs::read(&manifest_path).unwrap(), manifest_before);
         assert!(!lock_path.exists());
+    }
+
+    #[test]
+    fn an_upgrade_whose_lock_write_fails_after_the_manifest_was_rewritten_puts_both_back() {
+        let project = ProjectDir::new(
+            "upgrade-restore",
+            PINNED_GAMMA,
+            &[("gamma", "1.0", "23.0", ""), ("gamma", "1.5", "23.0", "")],
+        );
+        lock(&project.env(&Recorder::default())).unwrap();
+        let manifest_path = project.root.join(crate::project::FILE_NAME);
+        let (manifest_before, lock_before) = (
+            std::fs::read(&manifest_path).unwrap(),
+            std::fs::read(project.lock_path()).unwrap(),
+        );
+        let upgrade_gamma = Upgrade::Packages(vec![target("gamma@1.5")]);
+
+        UNWRITABLE.with(|file| *file.borrow_mut() = Some(project.lock_path()));
+        let sink = Recorder::default();
+        let why = upgrade(&project.env(&sink), &upgrade_gamma).unwrap_err();
+        UNWRITABLE.with(|file| *file.borrow_mut() = None);
+
+        assert!(matches!(why, LockError::Other(_)), "{why:?}");
+        assert_eq!(std::fs::read(&manifest_path).unwrap(), manifest_before);
+        assert_eq!(std::fs::read(project.lock_path()).unwrap(), lock_before);
+        assert!(
+            sink.events()
+                .iter()
+                .all(|event| matches!(event, Event::LockHashing { .. })),
+            "nothing is reported as done: {:?}",
+            sink.events()
+        );
+
+        // The same upgrade, with the write able to succeed, does what the
+        // failed one would have.
+        upgrade(&project.env(&Recorder::default()), &upgrade_gamma).unwrap();
+        assert_ne!(std::fs::read(&manifest_path).unwrap(), manifest_before);
     }
 
     #[test]
