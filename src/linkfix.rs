@@ -775,10 +775,19 @@ impl Tree {
         self.files.get(&lower(logical))
     }
 
-    /// Owner chain, innermost first: [class, library, ...].
+    /// Owner chain, innermost first: [class, library, ...]. A class's
+    /// private-data control (`X.lvclass/X.ctl`) has no file of its own and
+    /// is owned by the class it lives in; dropping that element from its
+    /// qualified name sends LabVIEW searching for the class on load.
     fn chain(&self, logical: &str) -> Vec<String> {
         let mut out = Vec::new();
         let mut cur = lower(logical);
+        if !self.owner.contains_key(&cur)
+            && let Some(class) = self.exists(parent(logical)).filter(|e| lower(&e.logical).ends_with(".lvclass"))
+        {
+            out.push(class.logical.clone());
+            cur = lower(&class.logical);
+        }
         while let Some(o) = self.owner.get(&cur) {
             if out.len() > 8 || out.contains(o) {
                 break;
@@ -1223,6 +1232,19 @@ mod tests {
         );
         let same = vec![b"".to_vec(), b"UTF-8 String.lvclass".to_vec()];
         assert_eq!(resolve_relative("vi.lib/a/b", &same).unwrap(), "vi.lib/a/b/UTF-8 String.lvclass");
+    }
+
+    #[test]
+    fn class_private_data_control_is_owned_by_its_class() {
+        let lib = "vi.lib/P/P.lvlib";
+        let class = "vi.lib/P/C/C.lvclass";
+        let mut files = HashMap::new();
+        for l in [lib, class] {
+            files.insert(lower(l), Entry { logical: l.to_string(), physical: PathBuf::from(l) });
+        }
+        let owner = HashMap::from([(lower(class), lib.to_string())]);
+        let tree = Tree { files, owner, by_name: HashMap::new() };
+        assert_eq!(tree.chain("vi.lib/P/C/C.lvclass/C.ctl"), vec![class.to_string(), lib.to_string()]);
     }
 
     #[test]
