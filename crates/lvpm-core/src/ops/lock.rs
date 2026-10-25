@@ -16,7 +16,7 @@ use crate::events::{Event, LockChange};
 use crate::index::{self, Entry, Index};
 use crate::lockfile::{self, Inputs, LockedPackage, LockedUnresolved, Lockfile};
 use crate::manifest_edit::{self, DependencyTable};
-use crate::project::{Constraint, Project};
+use crate::project::{Constraint, PackageArg, Project};
 use crate::solve::{self, Conflict, Fact, Resolution, SolveError};
 use crate::version::Version;
 use anyhow::Context;
@@ -65,19 +65,12 @@ pub struct UpgradeTarget {
 impl UpgradeTarget {
     /// `name`, or `name@version`.
     pub fn parse(text: &str) -> Result<UpgradeTarget, String> {
-        let (name, version) = match text.split_once('@') {
-            Some((name, version)) => (name.trim(), Some(version.trim())),
-            None => (text.trim(), None),
-        };
-        match (name, version) {
-            ("", _) | (_, Some("")) => {
-                Err(format!("{text:?} is not a package name or name@version"))
-            }
-            _ => Ok(UpgradeTarget {
-                name: name.to_string(),
-                version: version.map(str::to_string),
-            }),
-        }
+        let PackageArg { name, constraint } =
+            PackageArg::parse(text).map_err(|why| why.to_string())?;
+        Ok(UpgradeTarget {
+            name,
+            version: constraint,
+        })
     }
 }
 

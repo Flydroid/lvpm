@@ -19,7 +19,7 @@ use crate::index::Index;
 use crate::install;
 use crate::lockfile::{self, Lockfile, constraint_text};
 use crate::manifest_edit::{self, DependencyTable};
-use crate::project::{self, Constraint, Project};
+use crate::project::{self, Constraint, PackageArg, PackageArgError, Project};
 use crate::solve;
 use anyhow::{Context, anyhow};
 use std::path::PathBuf;
@@ -84,25 +84,14 @@ struct Request {
 
 impl Request {
     fn parse(spec: &str) -> Result<Request, EditError> {
-        let (name, constraint) = match spec.split_once('@') {
-            Some((name, constraint)) => (name.trim(), Some(constraint.trim())),
-            None => (spec.trim(), None),
-        };
-        if name.is_empty() {
-            return Err(anyhow!("{spec:?} is not a package name or name@constraint").into());
-        }
-        if let Some(written) = constraint {
-            if written.is_empty() {
-                return Err(EditError::EmptyConstraint {
-                    name: name.to_string(),
-                });
-            }
+        let PackageArg { name, constraint } = PackageArg::parse(spec).map_err(|why| match why {
+            PackageArgError::EmptyConstraint { name } => EditError::EmptyConstraint { name },
+            other => anyhow!(other).into(),
+        })?;
+        if let Some(written) = &constraint {
             Constraint::parse(written)?;
         }
-        Ok(Request {
-            name: name.to_string(),
-            constraint: constraint.map(str::to_string),
-        })
+        Ok(Request { name, constraint })
     }
 }
 

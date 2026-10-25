@@ -15,7 +15,7 @@ use super::uninstall::uninstall_one;
 use crate::cache::sha256_hex;
 use crate::events::{Event, HookKind, PackageFolders, PackageRef, Phase, PlannedFile, SkipReason};
 use crate::index::{Entry, Floor, Index};
-use crate::project::{self, Constraint};
+use crate::project::{self, Constraint, PackageArg};
 use crate::spec::Spec;
 use crate::target::Roots;
 use crate::version::Version;
@@ -201,10 +201,12 @@ pub(super) fn announce_target(env: &OpEnv, store: &Roots) {
 
 /// `name` or `name@version`, as a root of the resolution.
 fn named(package: &str) -> Result<(String, Constraint)> {
-    Ok(match package.split_once('@') {
-        Some((n, v)) => (n.to_string(), Constraint::parse(v)?),
-        None => (package.to_string(), Constraint::Any),
-    })
+    let PackageArg { name, constraint } = PackageArg::parse(package)?;
+    let constraint = match constraint {
+        Some(written) => Constraint::parse(&written)?,
+        None => Constraint::Any,
+    };
+    Ok((name, constraint))
 }
 
 /// Depth-first over the dependency graph, from every root at once. No
@@ -839,6 +841,17 @@ mod tests {
     use crate::errors::Cancelled;
     use crate::events::NullSink;
     use std::io::Write;
+
+    #[test]
+    fn a_named_package_with_no_name_or_an_empty_constraint_is_refused_not_read_as_any_version() {
+        let (name, constraint) = named("foo@>=1.0").unwrap();
+        assert_eq!(name, "foo");
+        assert!(matches!(constraint, Constraint::AtLeast(_)));
+        assert!(matches!(named("foo").unwrap().1, Constraint::Any));
+        for refused in ["foo@", "foo@ ", "@1.0", ""] {
+            assert!(named(refused).is_err(), "{refused:?}");
+        }
+    }
 
     /// A scratch destination and a one-package archive, removed with it.
     struct Scratch {

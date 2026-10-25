@@ -59,6 +59,49 @@ impl Constraint {
     }
 }
 
+/// A package as a command names it: `name`, or `name@constraint`. The
+/// constraint is as written, not yet read: [`Constraint::parse`] reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageArg {
+    pub name: String,
+    pub constraint: Option<String>,
+}
+
+/// What is wrong with a [`PackageArg`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum PackageArgError {
+    /// No name: `""` or `@1.0`.
+    #[error("{text:?} is not a package name or name@constraint")]
+    EmptyName { text: String },
+    /// `name@` with nothing after the `@`.
+    #[error("a constraint is expected after \"@\" in \"{name}@\"")]
+    EmptyConstraint { name: String },
+}
+
+impl PackageArg {
+    /// Splits at the first `@`; white space around either part is dropped.
+    pub fn parse(text: &str) -> Result<PackageArg, PackageArgError> {
+        let (name, constraint) = match text.split_once('@') {
+            Some((name, constraint)) => (name.trim(), Some(constraint.trim())),
+            None => (text.trim(), None),
+        };
+        if name.is_empty() {
+            return Err(PackageArgError::EmptyName {
+                text: text.to_string(),
+            });
+        }
+        if constraint == Some("") {
+            return Err(PackageArgError::EmptyConstraint {
+                name: name.to_string(),
+            });
+        }
+        Ok(PackageArg {
+            name: name.to_string(),
+            constraint: constraint.map(str::to_string),
+        })
+    }
+}
+
 impl fmt::Display for Constraint {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -207,6 +250,28 @@ fn parse_dependencies(table: &str, entries: toml::Table) -> Result<Vec<(String, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_package_arg_is_a_name_and_an_optional_constraint_and_neither_may_be_empty() {
+        let arg = |text| PackageArg::parse(text).unwrap();
+        assert_eq!(arg(" foo ").constraint, None);
+        assert_eq!(arg("foo@>=1.0").constraint.as_deref(), Some(">=1.0"));
+        assert_eq!(arg(" foo @ 1.0 "), arg("foo@1.0"));
+        for text in ["", "  ", "@1.0", " @1.0"] {
+            assert_eq!(
+                PackageArg::parse(text),
+                Err(PackageArgError::EmptyName { text: text.into() }),
+                "{text:?}"
+            );
+        }
+        for text in ["foo@", "foo@  "] {
+            assert_eq!(
+                PackageArg::parse(text),
+                Err(PackageArgError::EmptyConstraint { name: "foo".into() }),
+                "{text:?}"
+            );
+        }
+    }
 
     #[test]
     fn reads_every_table_in_file_order() {
