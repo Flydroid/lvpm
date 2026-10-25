@@ -5,6 +5,7 @@ use super::env::OpEnv;
 use crate::config;
 use crate::index::{self, Entry, Import};
 use crate::install::{self, Manifest};
+use crate::paths;
 use crate::target::LvTarget;
 use anyhow::Result;
 use std::path::Path;
@@ -33,15 +34,21 @@ pub fn config_get(env: &OpEnv, key: &str) -> Result<Vec<String>> {
 }
 
 /// Change a user-level setting. Writes the user's config file; `env.config`
-/// is what the command started with and is not updated.
-pub fn config_set(key: &str, values: &[String]) -> Result<()> {
-    config::set(key, values)
+/// is what the command started with and is not updated. A relative path is
+/// taken from the directory the command was run from.
+pub fn config_set(env: &OpEnv, key: &str, values: &[String]) -> Result<()> {
+    config::set(key, values, &env.cwd)
 }
 
 /// Import a package archive, or the packages directly inside a directory, into
-/// the shared cache.
+/// the shared cache. A relative `path` is taken from the directory the command
+/// was run from.
 pub fn cache_add(env: &OpEnv, path: &Path) -> Result<Vec<Import>> {
-    index::cache_add(&env.config.cache, path, env.refresh)
+    index::cache_add(
+        &env.config.cache,
+        &paths::resolve(&env.cwd, path),
+        env.refresh,
+    )
 }
 
 #[cfg(test)]
@@ -71,6 +78,34 @@ mod tests {
         assert_eq!(targets(&env).len(), 1);
         assert_eq!(targets(&env)[0].path, labview.path);
         assert!(targets(&env_with("cache", ".lv-venv", Vec::new())).is_empty());
+    }
+
+    #[test]
+    fn cache_add_takes_a_relative_path_from_the_environments_directory_not_the_processs() {
+        use std::io::Write;
+
+        let cwd = super::super::testing::scratch_dir("cache-add-cwd");
+        std::fs::create_dir_all(cwd.join("pkgs")).unwrap();
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        writer
+            .start_file("spec", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        writer
+            .write_all(b"[Package]\nName=alpha\nVersion=1.0\n")
+            .unwrap();
+        let bytes = writer.finish().unwrap().into_inner();
+        std::fs::write(cwd.join("pkgs").join("alpha-1.0.vip"), bytes).unwrap();
+
+        let config = Config {
+            cache: cwd.join("cache"),
+            local_sources: Vec::new(),
+            venv_dir: PathBuf::from(".lv-venv"),
+        };
+        let env = OpEnv::new(&NullSink, config, Vec::new(), cwd.clone());
+        let imports = cache_add(&env, Path::new("pkgs")).unwrap();
+        assert_eq!(imports.len(), 1);
+        assert_eq!(imports[0].path, cwd.join("pkgs").join("alpha-1.0.vip"));
+        let _ = std::fs::remove_dir_all(&cwd);
     }
 
     #[test]

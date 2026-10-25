@@ -11,6 +11,7 @@ use crate::cancel::CancelToken;
 use crate::config::Config;
 use crate::events::{Event, EventSink};
 use crate::index::{self, Index};
+use crate::paths;
 use crate::project::{self, Project};
 use crate::target::{self, LvTarget, Roots};
 use crate::venv::{self, Venv};
@@ -222,9 +223,15 @@ impl<'a> OpEnv<'a> {
             (None, None, None) => project::find_manifest(&self.cwd),
         };
         match path {
-            Some(p) => Ok(Some((std::path::absolute(&p)?, project::read(&p)?))),
+            Some(p) => Ok(Some((paths::resolve(&self.cwd, &p), project::read(&p)?))),
             None => Ok(None),
         }
+    }
+
+    /// The configured local package folders, a relative one taken from `cwd`.
+    pub(super) fn local_sources(&self) -> Vec<PathBuf> {
+        let folders = self.config.local_sources.iter();
+        folders.map(|dir| paths::resolve(&self.cwd, dir)).collect()
     }
 
     /// Every index the command should see: global local folders plus hosted
@@ -240,7 +247,7 @@ impl<'a> OpEnv<'a> {
             &self.config.cache,
             self.refresh,
             &repos,
-            &self.config.local_sources,
+            &self.local_sources(),
             defaults,
             self.sink,
             &self.cancel,
@@ -252,6 +259,16 @@ impl<'a> OpEnv<'a> {
 mod tests {
     use super::*;
     use crate::events::NullSink;
+
+    #[test]
+    fn a_relative_local_source_is_taken_from_the_directory_the_command_ran_in() {
+        let cwd = std::env::temp_dir().join("lvpm-env-local-sources");
+        let elsewhere = std::env::temp_dir().join("lvpm-env-elsewhere");
+        let mut config = config();
+        config.local_sources = vec![PathBuf::from("./packages"), elsewhere.clone()];
+        let env = OpEnv::new(&NullSink, config, Vec::new(), cwd.clone());
+        assert_eq!(env.local_sources(), [cwd.join("packages"), elsewhere]);
+    }
 
     fn config() -> Config {
         Config {

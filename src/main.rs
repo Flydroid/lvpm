@@ -538,7 +538,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Config(ConfigCmd::Set { key, values }) => {
-            ops::query::config_set(key, values)?;
+            ops::query::config_set(&env, key, values)?;
             println!("set {key}");
             Ok(())
         }

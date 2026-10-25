@@ -10,5 +10,6 @@ disallowed-methods = [
     { path = "std::env::var", reason = "operations are handed what they need; only the config and target loaders read the environment" },
     { path = "std::env::var_os", reason = "operations are handed what they need; only the config and target loaders read the environment" },
     { path = "std::env::current_dir", reason = "operations are handed their working directory; only the config and target loaders read process state" },
+    { path = "std::path::absolute", reason = "a relative path is resolved against the working directory of the process: operations resolve it against the working directory they are handed" },
     { path = "std::process::Stdio::inherit", reason = "lvpm-core does not share the front end's terminal with child processes" },
 ]

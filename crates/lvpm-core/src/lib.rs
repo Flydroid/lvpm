@@ -12,6 +12,7 @@ pub mod fetch;
 pub mod index;
 pub mod install;
 pub mod launch;
+mod paths;
 pub mod project;
 pub mod refresh;
 pub mod relink;

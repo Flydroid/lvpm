@@ -5,9 +5,10 @@
 // `target`); the rest of core is handed what it needs.
 #![allow(clippy::disallowed_methods)]
 
+use crate::paths;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub(crate) const DEFAULT_VENV_DIR: &str = ".lv-venv";
 
@@ -68,18 +69,31 @@ fn resolve(file: &FileConfig, env: impl Fn(&str) -> Option<String>) -> Result<Co
     })
 }
 
-pub fn set(key: &str, values: &[String]) -> Result<()> {
+/// Write one setting to the user's config file. The local source directories
+/// are stored absolute: a relative one is taken from `cwd`, the directory the
+/// command was run from.
+pub fn set(key: &str, values: &[String], cwd: &Path) -> Result<()> {
     let mut file = read_file()?;
+    apply(&mut file, key, values, cwd)?;
+    let path = config_file();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let text = toml::to_string_pretty(&file)?;
+    std::fs::write(&path, text).with_context(|| format!("writing config {}", path.display()))
+}
+
+fn apply(file: &mut FileConfig, key: &str, values: &[String], cwd: &Path) -> Result<()> {
     match key {
         "cache" if values.len() == 1 => file.cache = Some(values[0].clone()),
-        "sources.local" if values.is_empty() => file.sources.local.clear(),
         "sources.local" => {
             file.sources.local = values
                 .iter()
-                .map(std::path::absolute)
-                .collect::<std::io::Result<Vec<_>>>()?
-                .into_iter()
-                .map(|p| p.to_string_lossy().into_owned())
+                .map(|v| {
+                    paths::resolve(cwd, Path::new(v))
+                        .to_string_lossy()
+                        .into_owned()
+                })
                 .collect();
         }
         "venv.dir" if values.len() == 1 => file.venv.dir = Some(values[0].clone()),
@@ -87,12 +101,7 @@ pub fn set(key: &str, values: &[String]) -> Result<()> {
         "venv.dir" => bail!("`config set venv.dir` expects one value"),
         _ => bail!("unknown config key {key:?}; supported keys: cache, sources.local, venv.dir"),
     }
-    let path = config_file();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let text = toml::to_string_pretty(&file)?;
-    std::fs::write(&path, text).with_context(|| format!("writing config {}", path.display()))
+    Ok(())
 }
 
 pub fn get(cfg: &Config, key: &str) -> Result<Vec<String>> {
@@ -223,6 +232,26 @@ mod tests {
             std::env::split_paths("packages-b").collect::<Vec<_>>()
         );
         assert_eq!(cfg.venv_dir, PathBuf::from(".custom-venv"));
+    }
+
+    #[test]
+    fn a_relative_local_source_is_stored_from_the_directory_the_command_ran_in() {
+        let cwd = std::env::temp_dir().join("lvpm-config-cwd");
+        let mut file = FileConfig::default();
+        let elsewhere = std::env::temp_dir().join("lvpm-config-elsewhere");
+        let values = vec!["packages-a".to_string(), elsewhere.to_string_lossy().into()];
+        apply(&mut file, "sources.local", &values, &cwd).unwrap();
+        assert_eq!(
+            file.sources.local,
+            [
+                cwd.join("packages-a").to_string_lossy(),
+                elsewhere.to_string_lossy()
+            ]
+        );
+        apply(&mut file, "sources.local", &[], &cwd).unwrap();
+        assert!(file.sources.local.is_empty());
+        assert!(apply(&mut file, "cache", &[], &cwd).is_err());
+        assert!(apply(&mut file, "nothing", &[], &cwd).is_err());
     }
 
     #[test]

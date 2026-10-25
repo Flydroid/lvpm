@@ -13,6 +13,7 @@
 //! and `--global` says the installation itself is meant.
 
 use crate::events::{Event, EventSink};
+use crate::paths;
 use crate::project;
 use crate::target::{self, LvTarget, Roots};
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -141,9 +142,10 @@ pub fn find(
     }
 }
 
-/// Read a venv's binding and find the LabVIEW it names among `targets`.
+/// Read a venv's binding and find the LabVIEW it names among `targets`. `repo`
+/// is an absolute path: the caller took it from the directory the command ran in.
 pub(crate) fn load(repo: &Path, venv_dir: &Path, targets: &[LvTarget]) -> Result<Venv> {
-    let repo = std::path::absolute(repo)?;
+    let repo = paths::clean(repo);
     let dir = repo.join(venv_dir);
     let bp = binding_path(&dir);
     let text = std::fs::read_to_string(&bp).with_context(|| {
@@ -179,7 +181,8 @@ pub(crate) fn load(repo: &Path, venv_dir: &Path, targets: &[LvTarget]) -> Result
 /// itself, with a manifest skeleton, when there is none) and bind it to one of
 /// the `targets`: `labview_version` if given, else the manifest's own — which is
 /// the project's *minimum*, so a newer IDE may be chosen over it, never an
-/// older one. Installs nothing; that is `lvpm install`.
+/// older one. Installs nothing; that is `lvpm install`. `start` is an absolute
+/// path: the caller took it from the directory the command ran in.
 pub fn create(
     start: &Path,
     labview_version: Option<&str>,
@@ -187,7 +190,7 @@ pub fn create(
     targets: &[LvTarget],
     sink: &dyn EventSink,
 ) -> Result<Venv> {
-    let start = std::path::absolute(start)?;
+    let start = paths::clean(start);
     let repo = match project::find_manifest(&start) {
         Some(m) => m.parent().map(Path::to_path_buf).unwrap_or(start),
         None => start,
@@ -387,10 +390,7 @@ mod tests {
             &NullSink,
         )
         .unwrap();
-        assert_eq!(
-            v.dir,
-            std::path::absolute(&repo).unwrap().join(".given-venv")
-        );
+        assert_eq!(v.dir, repo.join(".given-venv"));
         assert_eq!(v.target.path, labview_2026().path);
         assert!(binding_path(&v.dir).is_file());
         // Found again through the same two inputs, and no others.

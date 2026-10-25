@@ -212,7 +212,6 @@ fn scan_local_repo(
     vips.sort();
 
     for path in vips {
-        let path = std::path::absolute(path)?;
         let metadata = std::fs::metadata(&path)?;
         if !refresh && let Some(entry) = cache.local_entry(&path, &metadata)? {
             out.push(local_entry(
@@ -291,15 +290,15 @@ pub struct Import {
 /// `refresh` is set. New imports store bytes before recording metadata and hashes.
 /// Files changed during reading and invalid archives fail the command; imports
 /// completed earlier in the same call remain committed. Originals are never moved.
+/// `source` is recorded as given: the caller makes it absolute.
 pub fn cache_add(cache_dir: &Path, source: &Path, refresh: bool) -> Result<Vec<Import>> {
-    let source = std::path::absolute(source)?;
     let is_package = |path: &Path| {
         path.extension().is_some_and(|extension| {
             extension.eq_ignore_ascii_case("vip") || extension.eq_ignore_ascii_case("ogp")
         })
     };
     let mut files = if source.is_dir() {
-        std::fs::read_dir(&source)?
+        std::fs::read_dir(source)?
             .map(|entry| entry.map(|entry| entry.path()))
             .collect::<std::io::Result<Vec<_>>>()?
             .into_iter()
@@ -307,11 +306,11 @@ pub fn cache_add(cache_dir: &Path, source: &Path, refresh: bool) -> Result<Vec<I
             .collect::<Vec<_>>()
     } else {
         anyhow::ensure!(
-            source.is_file() && is_package(&source),
+            source.is_file() && is_package(source),
             "cache add expects a .vip/.ogp file or package directory: {}",
             source.display()
         );
-        vec![source]
+        vec![source.to_path_buf()]
     };
     files.sort();
     let cache = Cache::open(cache_dir)?;

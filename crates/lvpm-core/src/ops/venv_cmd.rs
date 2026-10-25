@@ -119,10 +119,7 @@ mod tests {
         env.flags.labview_version = Some("2026".into());
 
         let created = create(&env).unwrap();
-        assert_eq!(
-            created.dir,
-            std::path::absolute(&repo).unwrap().join(".lv-venv")
-        );
+        assert_eq!(created.dir, repo.join(".lv-venv"));
         assert!(!elsewhere.join(".lv-venv").exists());
 
         let _ = std::fs::remove_dir_all(&repo);

@@ -5,6 +5,7 @@
 
 use super::env::{Destination, OpEnv};
 use crate::launch;
+use crate::paths;
 use crate::venv::Venv;
 use anyhow::{Result, bail, ensure};
 use std::path::{Path, PathBuf};
@@ -33,7 +34,7 @@ pub fn launch(env: &OpEnv, lvproj: Option<&Path>) -> Result<Launched> {
     }
     let lvproj = match lvproj {
         Some(p) => {
-            let p = std::path::absolute(env.cwd.join(p))?;
+            let p = paths::resolve(&env.cwd, p);
             ensure!(p.is_file(), "no such project file: {}", p.display());
             Some(p)
         }

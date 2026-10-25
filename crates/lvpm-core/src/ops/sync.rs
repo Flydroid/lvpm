@@ -614,7 +614,7 @@ enum Source {
 impl Source {
     fn all(env: &OpEnv, project: &Project) -> anyhow::Result<Vec<Source>> {
         let mut sources = vec![Source::Imported];
-        sources.extend(env.config.local_sources.iter().cloned().map(Source::Folder));
+        sources.extend(env.local_sources().into_iter().map(Source::Folder));
         if project.default_sources {
             sources.push(Source::PublicFeeds);
         }
