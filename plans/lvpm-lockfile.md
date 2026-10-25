@@ -2000,6 +2000,6 @@ and version.
   - Commits 4a5a914. `CancelToken` is an `AtomicU8` state machine: `cancel()` is accepted until `begin_unpack()`, then refused. Typed `Cancelled` in `errors.rs`. Fetch reads in 64 KiB chunks and checks the token per chunk. `begin_unpack()` sits at the top of `unpack()`, in `apply_sync` before the first change, and before an upgrade's `uninstall_one` (so a replace never deletes files and then stops). PENDING: `LVPM_TEST_LABVIEW=1` run not done because LabVIEW closed when the machine crashed; rerun once LabVIEW 2026 is up. Small: a cancelled sync reads "locking was cancelled".
 
 #### Wave 14
-- [ ] Slice 16: Documentation and help text
-  - [ ] Step 16.1: README, roadmap, `--help`
-
+- [x] Slice 16: Documentation and help text
+  - [x] Step 16.1: README, roadmap, `--help`
+  - Commits 8f06135. README gains a lock-file section (lock, --check, sync, --locked/--frozen/--no-locked, --no-dev, add/remove, upgrades, CI quick start); roadmap updated; every subcommand, flag and positional argument has help text (walked by a test). Moved `src/*.rs` paths fixed in README, PROVENANCE.md and docs/. Steps live in `tests/steps/docs.rs` (cucumber cannot run in `workspace.rs`). Small open: README's top sample output predates sync; the README Layout table lacks the post-split modules.
