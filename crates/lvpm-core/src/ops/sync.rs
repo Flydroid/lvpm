@@ -358,10 +358,19 @@ pub fn plan_sync(lock: &Lockfile, installed: &[Manifest], no_dev: bool) -> SyncP
         .map(|manifest| (name_key(&manifest.name), manifest))
         .collect();
 
+    // No source lists these, so the lock cannot hold them: what is installed
+    // under such a name meets a requirement and stays.
+    let unresolved: HashSet<String> = lock
+        .unresolved
+        .iter()
+        .map(|requirement| name_key(&requirement.name))
+        .collect();
+
     let mut steps: Vec<SyncStep> = installed
         .iter()
         .filter_map(|manifest| {
             let reason = match locked.get(&name_key(&manifest.name)) {
+                None if unresolved.contains(&name_key(&manifest.name)) => return None,
                 None => RemoveReason::NotInLock,
                 Some(package) if !wanted_here(package) => RemoveReason::DevOnly,
                 Some(_) => return None,
@@ -735,6 +744,27 @@ mod tests {
             [remove("gamma", "1.0", RemoveReason::NotInLock)]
         );
         assert!(plan.wanted.is_empty(), "a removal fetches nothing");
+    }
+
+    #[test]
+    fn a_package_the_lock_records_as_an_unresolved_requirement_is_not_removed() {
+        let mut lock = alpha_and_beta();
+        lock.unresolved = vec![lockfile::LockedUnresolved {
+            name: "Ni_Lib".to_string(),
+            required_by: "beta".to_string(),
+        }];
+        let here = [
+            installed("alpha", "2.0"),
+            installed("beta", "1.0"),
+            installed("ni_lib", "1.0"),
+            installed("gamma", "1.0"),
+        ];
+        // No source listed ni_lib, so the lock cannot hold it; it is there
+        // because the requirement is met by hand.
+        assert_eq!(
+            plan_sync(&lock, &here, false).steps,
+            [remove("gamma", "1.0", RemoveReason::NotInLock)]
+        );
     }
 
     #[test]
