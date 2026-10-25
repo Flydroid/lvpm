@@ -55,6 +55,31 @@ CREATE TABLE IF NOT EXISTS packages (
 CREATE INDEX IF NOT EXISTS packages_by_sha256 ON packages(sha256);
 CREATE INDEX IF NOT EXISTS packages_by_md5 ON packages(md5);";
 
+fn has_sha256(db: &Connection) -> Result<bool> {
+    Ok(db
+        .prepare("PRAGMA table_info(local_files)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .iter()
+        .any(|name| name == "sha256"))
+}
+
+/// Bring an older database to the current schema. The write lock is taken
+/// first and the column looked for again under it: two processes that opened
+/// the same old cache both saw the column missing, and only one may add it.
+fn migrate(db: &Connection) -> Result<()> {
+    let migration =
+        rusqlite::Transaction::new_unchecked(db, rusqlite::TransactionBehavior::Immediate)?;
+    if !has_sha256(&migration)? {
+        migration.execute_batch("ALTER TABLE local_files ADD COLUMN sha256 TEXT")?;
+    }
+    let version: i32 = migration.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if version < CACHE_SCHEMA_VERSION {
+        migration.pragma_update(None, "user_version", CACHE_SCHEMA_VERSION)?;
+    }
+    Ok(migration.commit()?)
+}
+
 /// Persisted resolver metadata shared by local-file shortcuts and package rows.
 /// Versions and dependency floors retain their original textual representation.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -122,17 +147,10 @@ impl Cache {
         // WAL so a search and an install can read the cache concurrently.
         db.pragma_update(None, "journal_mode", "WAL")?;
         db.execute_batch(SCHEMA)?;
-        let has_sha256 = db
-            .prepare("PRAGMA table_info(local_files)")?
-            .query_map([], |row| row.get::<_, String>(1))?
-            .collect::<rusqlite::Result<Vec<_>>>()?
-            .iter()
-            .any(|name| name == "sha256");
-        if !has_sha256 {
-            db.execute_batch("ALTER TABLE local_files ADD COLUMN sha256 TEXT")?;
-        }
-        if version < CACHE_SCHEMA_VERSION {
-            db.pragma_update(None, "user_version", CACHE_SCHEMA_VERSION)?;
+        // Only an old cache takes the write lock to migrate: the rest open
+        // without it.
+        if !has_sha256(&db)? || version < CACHE_SCHEMA_VERSION {
+            migrate(&db)?;
         }
         Ok(Cache {
             db,
@@ -548,6 +566,55 @@ mod tests {
         assert_eq!(size, "12");
         assert!(sha.is_none());
         drop(cache);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// A cache from before the import column. It is in WAL mode already, as
+    /// every cache lvpm made is, so opening it does not switch the mode.
+    fn old_cache(name: &str) -> PathBuf {
+        let root = temp_root(name);
+        std::fs::create_dir_all(&root).unwrap();
+        Connection::open(root.join(DB_FILE))
+            .unwrap()
+            .execute_batch(
+                "PRAGMA journal_mode=WAL;
+                 CREATE TABLE local_files (path TEXT PRIMARY KEY, size TEXT NOT NULL, modified TEXT NOT NULL, entry TEXT NOT NULL);
+                 PRAGMA user_version=1;",
+            )
+            .unwrap();
+        root
+    }
+
+    #[test]
+    fn a_migration_that_finds_the_column_already_added_by_another_process_is_fine() {
+        let root = old_cache("migration-twice");
+        let db = Connection::open(root.join(DB_FILE)).unwrap();
+        // Both openers saw the column missing; the second runs after the first.
+        migrate(&db).unwrap();
+        migrate(&db).unwrap();
+        assert!(has_sha256(&db).unwrap());
+        drop(db);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn many_processes_opening_an_old_cache_at_once_all_open_it() {
+        let root = old_cache("migration-race");
+        let gate = std::sync::Barrier::new(8);
+        let opened: Vec<Result<()>> = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        gate.wait();
+                        Cache::open(&root).map(drop)
+                    })
+                })
+                .collect();
+            workers.into_iter().map(|w| w.join().unwrap()).collect()
+        });
+        for open in opened {
+            open.unwrap();
+        }
         std::fs::remove_dir_all(root).ok();
     }
 
