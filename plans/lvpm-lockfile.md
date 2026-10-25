@@ -1904,8 +1904,8 @@ Strategic and Parallelization.
 | Acceptance | needs-revision (8 blockers) | needs-revision (4 blockers) | **Fixed after round 2 without a third run (round limit):** no-project recordings for AC-N1; `source = local` and a two-root lock comparison; a `@core` routing table test plus `@labview` install-is-add; deterministic apply-time failures. Most round-2 warnings are folded in. Still open as accepted warnings: AC-K6 is only checked by the manual `@labview` run, and there are a few lock edge cases (cycle, empty manifest) |
 
 Remaining warnings accepted for build time: AC-K6 has manual-only coverage;
-Ctrl+C in the CLI is deferred; legacy install manifests are matched by name
-and version.
+Ctrl+C in the CLI is deferred. (Legacy install manifests were first matched by
+name and version; since 84e42bd a record with no `archive_sha256` is replaced.)
 
 ## Build Progress
 
