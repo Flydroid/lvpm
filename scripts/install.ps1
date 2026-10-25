@@ -22,7 +22,7 @@
     removed), so SmartScreen and LabVIEW do not treat them as untrusted.
 
 .PARAMETER Version
-    Release tag to install, e.g. v0.2.0. Default: the newest release.
+    Release tag to install, e.g. v0.4.0. Default: the newest release.
 
 .PARAMETER Stable
     Skip pre-releases when picking the newest release. By default
@@ -39,7 +39,7 @@
     Do not add InstallDir to the user PATH.
 
 .PARAMETER Repo
-    GitHub repository as owner/name. Default: Flydroid/lvpm
+    GitHub repository as owner/name. Default: ThatsTheEnd/lvpm
 
 .PARAMETER BuildLocal
     Build this checkout with cargo build --release --locked, package it,
@@ -57,7 +57,7 @@
     .\install.ps1 -BuildLocal
 
 .EXAMPLE
-    .\install.ps1 -Version v0.2.0 -InstallDir C:\tools\lvpm -NoPath
+    .\install.ps1 -Version v0.4.0 -InstallDir C:\tools\lvpm -NoPath
 
 .EXAMPLE
     .\install.ps1 -Sha256 1a86ce51553b705566cc1071a8e1c7cd8acc2df664d2e14b6ea46beba3799931
@@ -71,7 +71,7 @@ param(
     [string]$Sha256,
     [switch]$NoPath,
     [ValidatePattern('^[\w.-]+/[\w.-]+$')]
-    [string]$Repo = 'Flydroid/lvpm',
+    [string]$Repo = 'ThatsTheEnd/lvpm',
     [switch]$BuildLocal,
     [string]$Archive
 )
@@ -141,6 +141,15 @@ function Invoke-GitHubApi([string]$Path) {
     Invoke-RestMethod -Uri "$api/$Path" -Headers $headers -MaximumRedirection 5
 }
 
+# The newest release that is not a draft (a failed release run leaves one),
+# and, with -Stable, not a pre-release. ci/lint/install-drafts.sh tests it.
+function Select-Release($Releases, [bool]$Stable) {
+    # Piping a variable enumerates it; see the note where this is called.
+    @($Releases) |
+        Where-Object { -not $_.draft -and (-not $Stable -or -not $_.prerelease) } |
+        Select-Object -First 1
+}
+
 # ------------------------------------------------------ resolve release ----
 
 if ($Archive) {
@@ -156,9 +165,7 @@ if ($Archive) {
     # whole array instead of each release and matches nothing. Bind it to a
     # variable first; piping a variable enumerates it.
     $releases = Invoke-GitHubApi 'releases?per_page=30'
-    $release = @($releases) |
-        Where-Object { -not $_.draft -and (-not $Stable -or -not $_.prerelease) } |
-        Select-Object -First 1
+    $release = Select-Release $releases $Stable
     if (-not $release) {
         throw "no release found in $Repo" + $(if ($Stable) { ' (every release is a pre-release; drop -Stable)' })
     }

@@ -1,0 +1,60 @@
+name: Build
+
+# The one build definition: pr.yml and release.yml both call it, so a PR
+# builds exactly what main releases.
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: The commit to check out; empty means the commit that triggered the run
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build (${{ matrix.os }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows, runner: windows-2022, bin: lvpm.exe }
+          - { os: linux, runner: ubuntu-latest, bin: lvpm }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - name: Install Rust stable
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+        shell: bash
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: build-${{ matrix.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: build-${{ matrix.os }}-
+      - name: cargo build --release
+        run: cargo build --release --locked
+        shell: bash
+      - name: Check the binary runs and reports the workspace version
+        run: |
+          want=$(bash ci/version-check.sh --print-version)
+          got=$(target/release/${{ matrix.bin }} --version)
+          echo "$got"
+          [[ "$got" == *"$want"* ]] || { echo "::error::lvpm --version printed '$got', expected $want"; exit 1; }
+        shell: bash
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lvpm-${{ matrix.os }}
+          path: target/release/${{ matrix.bin }}
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true

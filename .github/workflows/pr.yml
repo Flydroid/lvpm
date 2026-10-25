@@ -59,12 +59,46 @@ jobs:
           echo "::endgroup::"
         shell: bash
 
+  # The same build and packaging main releases with.
+  build:
+    uses: ./.github/workflows/build.yml
+    with:
+      ref: ${{ github.event.pull_request.head.sha }}
+
+  package:
+    needs: [build]
+    uses: ./.github/workflows/package.yml
+    with:
+      ref: ${{ github.event.pull_request.head.sha }}
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Lint checks and self-tests
+        run: |
+          # Every check against the real files, then every self-test, each once.
+          status=0
+          for f in ci/lint/*.sh; do
+            [[ "$f" == *.test.sh ]] && continue
+            echo "::group::$f"; bash "$f" || status=1; echo "::endgroup::"
+          done
+          for f in ci/lint/*.test.sh ci/*.test.sh; do
+            echo "::group::$f"; bash "$f" || status=1; echo "::endgroup::"
+          done
+          exit $status
+
   # Branch protection should require only ci-ok (an admin sets it; see the
   # spec), so adding a job or a matrix row never changes the required checks.
   ci-ok:
     name: ci-ok
     if: always()
-    needs: [version, test]
+    needs: [version, test, build, package, lint]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

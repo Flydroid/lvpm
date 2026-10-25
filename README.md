@@ -50,7 +50,7 @@ except `lvpm --version` at the end. Read it first; it is short.
 
 ```powershell
 cd $env:TEMP
-irm https://raw.githubusercontent.com/Flydroid/lvpm/main/scripts/install.ps1 -OutFile install.ps1
+irm https://raw.githubusercontent.com/ThatsTheEnd/lvpm/main/scripts/install.ps1 -OutFile install.ps1
 .\install.ps1
 ```
 
@@ -60,7 +60,7 @@ to. `Access to the path 'C:\WINDOWS\system32\install.ps1' is denied` means
 you are in a directory that is not yours, not that anything is wrong with
 the download. lvpm installs per-user and needs no elevation.
 
-Options: `-Version v0.2.0` pins a release, `-InstallDir <DIR>` and
+Options: `-Version v0.4.0` pins a release, `-InstallDir <DIR>` and
 `-NoPath` control where it goes, `-Sha256 <hash>` adds a hash you obtained
 elsewhere as a further check, `-Stable` skips pre-releases. If PowerShell
 refuses to run scripts:
@@ -69,8 +69,58 @@ refuses to run scripts:
 ### By hand
 
 Download `lvpm-<version>-windows-x64.zip` from the
-[Releases](https://github.com/Flydroid/lvpm/releases) page, right-click it,
+[Releases](https://github.com/ThatsTheEnd/lvpm/releases) page, right-click it,
 tick **Unblock**, extract, and put the folder on your `PATH`.
+
+### On Linux
+
+Releases are pre-releases while the version is 0.x, so GitHub's "latest"
+link skips them. Open the
+[Releases](https://github.com/ThatsTheEnd/lvpm/releases) list and download
+`lvpm-<version>-linux-x64.tar.gz` and `SHA256SUMS` from the newest release,
+then:
+
+```sh
+sha256sum -c SHA256SUMS --ignore-missing
+tar -xzf lvpm-<version>-linux-x64.tar.gz
+./lvpm --version
+```
+
+Move `lvpm` to a folder on your `PATH`, for example `~/.local/bin`.
+
+### How releases are made
+
+Every merge to `main` publishes the version in `Cargo.toml` as release
+`v<version>`, holding the Windows zip, the Linux tar.gz and `SHA256SUMS`.
+Each PR must raise the version (see [CONTRIBUTING.md](CONTRIBUTING.md)).
+Releases run one at a time. If merges land faster than releases finish, a
+waiting release can be replaced by a newer one, so a version in between is
+never released; the next release has the higher version. A replaced run
+never starts, so it reports nothing: check the Releases list if a version is
+missing. The
+workflow is [release.yml](.github/workflows/release.yml); the design is in
+[the CI spec](docs/specs/lvpm-ci-pipeline.md).
+
+### Release failed
+
+Failed runs show as red **Release** runs on `main` under
+[Actions](https://github.com/ThatsTheEnd/lvpm/actions/workflows/release.yml).
+
+1. Read the run's job summary. It names the version, the job that failed and
+   what to do next.
+2. If **guard** says `tag v<version> already exists`, open the
+   [Releases](https://github.com/ThatsTheEnd/lvpm/releases) list first. A
+   published `v<version>` with 3 assets means the release is done and there
+   is nothing to fix. Otherwise the version is taken: raise it in a new PR.
+3. If **publish** failed at "Check the version is still not released", a
+   newer version was released after this run started: raise the version in a
+   new PR.
+4. For any other job, re-run the failed jobs, but not while another Release
+   run is in progress. A draft release left by the failed run is deleted and
+   created again, and the installer never picks a draft.
+
+Releases before v0.4.0 (v0.2.1 and older) are in the repository this one
+was forked from. Releases here start at v0.4.0.
 
 ### From source
 

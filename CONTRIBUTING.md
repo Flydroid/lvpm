@@ -85,4 +85,48 @@ Common types:
 - Mention any Windows-specific setup or build considerations.
 - Keep the patch scope narrow and explain any follow-up work.
 
+### Which PRs are considered
+
+Only PRs that followed the agentic dev-team workflow (`/specs`, then
+`/plan`, then `/build`) are considered. Such a PR contains:
+
+- a spec file, `docs/specs/<slug>.md`;
+- a plan file, `plans/<slug>.md`;
+- cucumber BDD scenarios for the changed behavior, as `.feature` files under
+  `tests/features/<slug>/`, registered in `FEATURE_FILES` in
+  `tests/acceptance.rs` so `cargo test` runs them.
+
+A PR without them is closed without review. CI does not check this rule;
+maintainers apply it when they review.
+
+### Raise the version in every PR
+
+Every merge to `main` publishes a release, so every PR must raise
+`[workspace.package] version` in `Cargo.toml` above `main`'s, and
+`Cargo.lock` must agree. The PR's `version` check fails otherwise.
+
+- **patch** (0.4.0 → 0.4.1): fixes, docs, CI and anything else that does not
+  change what lvpm does.
+- **minor** (0.4.0 → 0.5.0): new behavior, commands or flags.
+- **major** (0.4.0 → 1.0.0): a breaking change to commands, `lvpm.toml` or
+  `lvpm.lock`. While the major version is 0, breaking changes raise the
+  minor version.
+
+Edit the version in `Cargo.toml`, then update the lock file:
+
+```sh
+cargo update -w
+```
+
+### Main moved while my PR was open
+
+The `ci-ok` check is the only required check, and branches must be up to
+date with `main` before they merge. When another PR merges first:
+
+1. Rebase on `main` (or press **Update branch** on the PR).
+2. If `main`'s version is now equal to or above yours, the `version` check
+   fails with `version <yours> is not above origin/main's <main's>`. Raise
+   your version above it and run `cargo update -w` again.
+3. Push. CI runs again on the updated branch.
+
 Thank you for helping improve lvpm.

@@ -4,6 +4,7 @@ set -uo pipefail
 script="$(cd "$(dirname "$0")" && pwd)/version-check.sh"
 root=$(mktemp -d); trap 'cd /; rm -rf "$root"' EXIT # Windows can't delete the cwd
 failures=0; n=0
+export GITHUB_STEP_SUMMARY="$root/summary" # never write into the CI job's own summary
 
 write() { # write <toml version or empty> [<lock version>] [<lock-core version>]
   { echo '[workspace.package]'; [ -n "$1" ] && echo "version = \"$1\""
@@ -22,7 +23,7 @@ setup() { # setup <main version> [tags...]: a repo on branch pr forked from main
 }
 expect() { # expect <0|1> <name> [<substring>...]: run the check on branch pr against main
   local want=$1 name=$2; shift 2
-  local out; out=$(bash "$script" main 2>&1); local got=$?
+  local out; out=$(bash "$script" "${mode:-main}" 2>&1); local got=$?
   local ok=1; [ "$got" = "$want" ] || ok=0
   for s in "$@"; do [[ "$out" == *"$s"* ]] || ok=0; done
   if [ $ok = 1 ]; then echo "ok   $name"; else echo "FAIL $name (exit $got): $out"; failures=$((failures+1)); fi
@@ -51,6 +52,23 @@ setup 0.2.1 v0.2.1; pr ""; stray; expect 1 "only a stray version fails" "no work
 setup 0.2.1 v0.2.1; pr 0.3.0; rm Cargo.lock; commit nolock; expect 1 "missing lock fails" "Cargo.lock is missing"
 setup 0.2.1 v0.2.1; pr 0.3.0; git checkout -q main; git rm -q Cargo.toml; commit nobase; git checkout -q pr
 expect 1 "unreadable base fails" "could not read main:Cargo.toml"
+
+mode=--release
+setup 0.2.1 v0.2.1; pr 0.3.0; expect 0 "release of an untagged version passes" "v0.3.0 is not tagged yet"
+setup 0.3.0; expect 0 "release without a base comparison passes"
+setup 0.2.1 v0.3.0; pr 0.3.0; expect 1 "release of an existing tag fails" "tag v0.3.0 already exists" "Raise the version above 0.3.0 in a new PR."
+setup 0.2.1 v0.4.0; pr 0.3.0; expect 1 "release below the highest tag fails" 0.3.0 v0.4.0 "in a new PR."
+setup 0.2.1 v0.2.1; pr 0.3.0 0.2.1 0.3.0; expect 1 "release with a stale lock fails" "lvpm 0.2.1"
+: > "$GITHUB_STEP_SUMMARY"
+setup 0.2.1 v0.3.0; pr 0.3.0; expect 1 "release failure is written to the job summary"
+if grep -qF "tag v0.3.0 already exists" "$GITHUB_STEP_SUMMARY" && grep -qF "in a new PR." "$GITHUB_STEP_SUMMARY"
+then echo "ok   job summary holds the failure and the next action"
+else echo "FAIL job summary: $(cat "$GITHUB_STEP_SUMMARY")"; failures=$((failures+1)); fi
+mode=--print-version
+setup 0.2.1; pr 0.3.0
+if [ "$(bash "$script" --print-version)" = 0.3.0 ]; then echo "ok   print-version prints exactly the version"
+else echo "FAIL print-version printed '$(bash "$script" --print-version)'"; failures=$((failures+1)); fi
+mode=
 
 for row in 0.3.0:true 0.99.99:true 1.0.0:false; do
   got=$(bash "$script" --print-prerelease "${row%%:*}")

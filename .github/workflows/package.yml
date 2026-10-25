@@ -1,0 +1,71 @@
+name: Package
+
+# Packages the binaries from build.yml into the release assets and installs
+# the Windows zip with scripts/install.ps1. Call it after build.yml.
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: The commit to check out; empty means the commit that triggered the run
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: package
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: lvpm-*
+          path: bin
+      - name: Package
+        run: bash ci/package.sh "$(bash ci/version-check.sh --print-version)" bin/lvpm-windows/lvpm.exe bin/lvpm-linux/lvpm dist
+      - name: Check the Linux archive
+        run: |
+          cd dist && sha256sum -c SHA256SUMS
+          mkdir unpacked && tar -xzf lvpm-*-linux-x64.tar.gz -C unpacked && unpacked/lvpm --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-assets
+          path: |
+            dist/*.zip
+            dist/*.tar.gz
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true
+
+  verify-installer:
+    name: verify installer
+    needs: package
+    runs-on: windows-2022
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: dist
+      - name: Install the zip with install.ps1
+        shell: pwsh
+        run: |
+          $zip = Get-Item dist/lvpm-*-windows-x64.zip
+          $line = Get-Content dist/SHA256SUMS | Where-Object { $_ -like "*  $($zip.Name)" }
+          $hash = ($line -split '\s+')[0]
+          $prefix = Join-Path $env:RUNNER_TEMP 'lvpm-install'
+          ./scripts/install.ps1 -Archive $zip.FullName -Sha256 $hash -InstallDir $prefix -NoPath
+          $version = $zip.Name -replace '^lvpm-(.+)-windows-x64\.zip$', '$1'
+          $got = & (Join-Path $prefix 'lvpm.exe') --version
+          if ($got -notlike "*$version*") { throw "installed lvpm --version printed '$got', expected $version" }

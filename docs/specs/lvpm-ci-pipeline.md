@@ -73,7 +73,7 @@ The script prints each command and its output, so a failure is readable from the
 4. Verifies the zip by running `scripts/install.ps1 -Archive <zip> -Sha256 <hash>` into a temporary prefix and running `lvpm --version` from it.
 5. Creates tag `v<version>` on the merged commit and a draft GitHub release with auto-generated notes, uploads the three files, then publishes the draft. The release is a pre-release while the major version is `0`, and a normal release from `1.0.0`.
 
-The workflow uses `concurrency: release` with `cancel-in-progress: false`, so two merges release one after the other. It needs `permissions: contents: write` and uses only `GITHUB_TOKEN`.
+The workflow runs in one concurrency group with `cancel-in-progress: false`, so a running release is never cancelled. GitHub keeps only one waiting run per group: when merges land faster than releases finish, a waiting run is replaced and its version is never released, and the next run releases a higher version. Runs that cannot publish (dry runs, other branches) use a separate group. It needs `permissions: contents: write` and uses only `GITHUB_TOKEN`.
 
 ### Interfaces and contracts
 

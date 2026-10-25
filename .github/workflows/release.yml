@@ -1,0 +1,128 @@
+name: Release
+
+# Every merge to main releases the version in Cargo.toml. The release is a
+# draft until every asset is uploaded, so a failed run leaves at most a draft,
+# which install.ps1 skips and a re-run replaces. No tests run here: the PR's
+# required ci-ok check already ran them on this exact tree.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build, package and check the installer, but create no tag and no release. Run it on a branch whose version is not released yet; on main, guard fails because main's version is already tagged.
+        type: boolean
+        default: true
+
+# One release at a time; a running release is never cancelled. GitHub keeps
+# only one waiting run per group, so when merges land faster than releases
+# finish, a waiting run is replaced and its version is never released; the
+# newer run releases a higher version. See
+# https://docs.github.com/en/actions/using-jobs/using-concurrency
+# Runs that cannot publish (the same test as publish's `if`) get their own
+# group, so they never replace a waiting release.
+concurrency:
+  group: ${{ github.ref == 'refs/heads/main' && !inputs.dry_run && 'release' || 'release-no-publish' }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    name: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      prerelease: ${{ steps.check.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - name: Check the version is not released yet
+        id: check
+        run: |
+          bash ci/version-check.sh --release
+          version=$(bash ci/version-check.sh --print-version)
+          prerelease=$(bash ci/version-check.sh --print-prerelease "$version")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+          echo "Releasing v$version (pre-release: $prerelease)" >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    needs: [guard]
+    uses: ./.github/workflows/build.yml
+
+  package:
+    needs: [guard, build]
+    uses: ./.github/workflows/package.yml
+
+  publish:
+    name: publish
+    needs: [guard, package]
+    # Only main publishes; a dry run or a run on any other branch stops here.
+    if: github.ref == 'refs/heads/main' && !inputs.dry_run
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: v${{ needs.guard.outputs.version }}
+      PRERELEASE: ${{ needs.guard.outputs.prerelease }}
+    steps:
+      # Check again right before publishing: a re-run of an older run must not
+      # publish after a newer version did.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - name: Check the version is still not released
+        run: bash ci/version-check.sh --release
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: dist
+      - name: Remove drafts left by failed runs
+        run: |
+          # A published release would have failed the check above, because its tag exists.
+          # On its own line so a failed listing fails the step (a for loop would ignore it).
+          ids=$(gh api --paginate "repos/$GH_REPO/releases" -q ".[] | select(.draft and .tag_name == \"$TAG\") | .id")
+          for id in $ids; do
+            gh api -X DELETE "repos/$GH_REPO/releases/$id"
+            echo "Removed a leftover draft $TAG." >> "$GITHUB_STEP_SUMMARY"
+          done
+      - name: Create the draft release
+        run: gh release create "$TAG" --draft --generate-notes --target "$GITHUB_SHA" --title "$TAG" $([ "$PRERELEASE" = true ] && echo --prerelease)
+      - name: Upload the assets
+        run: gh release upload "$TAG" dist/*
+      - name: Publish the release
+        run: gh release edit "$TAG" --draft=false
+
+  # Reusable-workflow caller jobs cannot add steps, so this one job reports a
+  # failed or cancelled job anywhere in the run.
+  release-report:
+    name: release report
+    if: always() && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled'))
+    needs: [guard, build, package, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Say what failed and what to do next
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          VERSION: ${{ needs.guard.outputs.version }}
+        run: |
+          job=$(jq -r 'to_entries | map(select(.value.result == "failure" or .value.result == "cancelled")) | .[0].key // "unknown"' <<<"$NEEDS")
+          if [ "$job" = guard ]; then
+            next="the version is already released or below the highest tag; raise the version in a new PR (see guard's summary)."
+          else
+            next="if publish failed at \"Check the version is still not released\", a newer version is already released: raise the version in a new PR. Otherwise re-run the failed jobs; a leftover draft release is replaced. See the README's \"Release failed\" runbook."
+          fi
+          echo "Release v${VERSION:-<unknown>} failed in $job: $next" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "::error::Release v${VERSION:-<unknown>} failed in $job"
