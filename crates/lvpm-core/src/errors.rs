@@ -24,8 +24,44 @@ impl From<Cancelled> for LockError {
 }
 
 impl From<Cancelled> for SyncError {
-    fn from(cancelled: Cancelled) -> SyncError {
-        SyncError::Lock(cancelled.into())
+    fn from(_: Cancelled) -> SyncError {
+        SyncError::Cancelled
+    }
+}
+
+impl From<Cancelled> for EditError {
+    fn from(_: Cancelled) -> EditError {
+        EditError::Cancelled
+    }
+}
+
+// A cancel is one variant at every level, however many errors it passed
+// through, so a front end matches on one shape. These three are written out
+// because `#[from]` would wrap `LockError::Cancelled` instead.
+impl From<LockError> for SyncError {
+    fn from(cause: LockError) -> SyncError {
+        match cause {
+            LockError::Cancelled => SyncError::Cancelled,
+            other => SyncError::Lock(other),
+        }
+    }
+}
+
+impl From<LockError> for EditError {
+    fn from(cause: LockError) -> EditError {
+        match cause {
+            LockError::Cancelled => EditError::Cancelled,
+            other => EditError::Lock(other),
+        }
+    }
+}
+
+impl From<SyncError> for EditError {
+    fn from(cause: SyncError) -> EditError {
+        match cause {
+            SyncError::Cancelled => EditError::Cancelled,
+            other => EditError::Sync(other),
+        }
     }
 }
 
@@ -81,7 +117,7 @@ pub enum LockError {
         project_year: u32,
     },
     /// The operation's token was cancelled; nothing was written.
-    #[error("locking was cancelled")]
+    #[error("cancelled")]
     Cancelled,
     /// Anything else that went wrong while reading or writing: its own text.
     #[error(transparent)]
@@ -102,7 +138,7 @@ pub enum SyncError {
     /// The manifest or the lock cannot be used as they are, or a new lock
     /// could not be made: [`LockError`]'s own words.
     #[error(transparent)]
-    Lock(#[from] LockError),
+    Lock(LockError),
     /// Locked archives that no source holds as the lock has them, all of them:
     /// nothing was changed.
     #[error("{} locked archive(s) could not be had", .0.len())]
@@ -115,6 +151,9 @@ pub enum SyncError {
         left: Vec<SyncStep>,
         cause: String,
     },
+    /// The operation's token was cancelled; nothing was changed.
+    #[error("cancelled")]
+    Cancelled,
     /// Anything else that went wrong: its own text.
     #[error(transparent)]
     Other(#[from] anyhow::Error),
@@ -126,11 +165,14 @@ pub enum SyncError {
 pub enum EditError {
     /// The edit could not be locked: [`LockError`]'s own words.
     #[error(transparent)]
-    Lock(#[from] LockError),
+    Lock(LockError),
     /// The destination could not be synced to the new lock: [`SyncError`]'s own
     /// words. Both files are as they were.
     #[error(transparent)]
-    Sync(#[from] SyncError),
+    Sync(SyncError),
+    /// The operation's token was cancelled; both files are as they were.
+    #[error("cancelled")]
+    Cancelled,
     /// A package was written `name@` with nothing after the `@`.
     #[error("a constraint is expected after \"@\" in \"{name}@\"")]
     EmptyConstraint { name: String },
@@ -196,4 +238,50 @@ pub enum ArchiveFault {
     /// An archive of that name and version was found, and its bytes are not
     /// the locked ones: it is never installed.
     DiffersFromLock { found_sha256: String },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_cancel_is_one_variant_at_every_level_and_says_only_cancelled() {
+        assert!(matches!(
+            SyncError::from(LockError::Cancelled),
+            SyncError::Cancelled
+        ));
+        assert!(matches!(SyncError::from(Cancelled), SyncError::Cancelled));
+        assert!(matches!(
+            EditError::from(LockError::Cancelled),
+            EditError::Cancelled
+        ));
+        assert!(matches!(
+            EditError::from(SyncError::Cancelled),
+            EditError::Cancelled
+        ));
+        assert!(matches!(
+            EditError::from(SyncError::from(LockError::Cancelled)),
+            EditError::Cancelled
+        ));
+        assert!(matches!(EditError::from(Cancelled), EditError::Cancelled));
+        for text in [
+            LockError::Cancelled.to_string(),
+            SyncError::Cancelled.to_string(),
+            EditError::Cancelled.to_string(),
+        ] {
+            assert_eq!(text, "cancelled");
+        }
+    }
+
+    #[test]
+    fn any_other_lock_error_keeps_its_wrapper() {
+        assert!(matches!(
+            EditError::from(LockError::NoLabview),
+            EditError::Lock(LockError::NoLabview)
+        ));
+        assert!(matches!(
+            SyncError::from(LockError::NoLabview),
+            SyncError::Lock(LockError::NoLabview)
+        ));
+    }
 }

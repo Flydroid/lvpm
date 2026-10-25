@@ -354,7 +354,7 @@ fn edit_error(failure: anyhow::Error) -> EditError {
         return EditError::Other(failure);
     }
     match failure.downcast::<SyncError>() {
-        Ok(sync) => EditError::Sync(sync),
+        Ok(sync) => sync.into(),
         Err(other) => EditError::Other(other),
     }
 }
@@ -1013,10 +1013,7 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(sink.answered(), Some(true), "the cancel was not accepted");
-        assert!(
-            matches!(&why, EditError::Sync(SyncError::Lock(LockError::Cancelled))),
-            "{why:?}"
-        );
+        assert!(matches!(&why, EditError::Cancelled), "{why:?}");
         assert_eq!(world.manifest(), manifest);
         assert_eq!(world.lock().unwrap(), lock);
     }

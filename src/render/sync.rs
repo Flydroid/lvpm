@@ -109,6 +109,9 @@ pub fn error(error: &SyncError) -> String {
         SyncError::Lock(other) => lock_error(other),
         SyncError::Archives(problems) => archives_text(problems),
         SyncError::Incomplete { done, left, cause } => incomplete_text(done, left, cause),
+        SyncError::Cancelled => {
+            format!("{error}; nothing was changed\nnext: run `lvpm sync` again")
+        }
         SyncError::Other(cause) => format!("{cause:#}"),
     }
 }
@@ -412,6 +415,14 @@ mod tests {
             stale,
             "lvpm.lock is out of date: dependency \"gamma\" was added\n\
              next: run `lvpm lock` and commit lvpm.lock"
+        );
+    }
+
+    #[test]
+    fn a_cancelled_sync_says_cancelled_and_not_that_locking_was() {
+        assert_eq!(
+            error(&SyncError::Cancelled),
+            "cancelled; nothing was changed\nnext: run `lvpm sync` again"
         );
     }
 

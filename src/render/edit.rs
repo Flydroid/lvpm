@@ -92,6 +92,9 @@ pub fn error(error: &EditError, rerun: &str) -> String {
             incomplete_body(done, left, cause)
         ),
         EditError::Sync(cause) => sync_error(cause),
+        EditError::Cancelled => {
+            format!("{error}; lvpm.toml and lvpm.lock are unchanged\nnext: run {rerun} again")
+        }
         EditError::EmptyConstraint { name } => format!(
             "{error}\n\
              quote it, e.g. \"{name}@>=0.5\": an unquoted > sends the output to a file\n\
@@ -284,6 +287,15 @@ mod tests {
         let text = written(&EditError::Lock(LockError::NoLabview));
         assert!(text.ends_with("then run `lvpm add` again"), "{text}");
         assert!(!text.contains("`lvpm lock`"), "{text}");
+    }
+
+    #[test]
+    fn a_cancelled_edit_says_cancelled_and_that_both_files_are_unchanged() {
+        let text = written(&EditError::Cancelled);
+        assert_eq!(
+            text,
+            "cancelled; lvpm.toml and lvpm.lock are unchanged\nnext: run `lvpm add` again"
+        );
     }
 
     #[test]

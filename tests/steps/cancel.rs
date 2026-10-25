@@ -63,7 +63,7 @@ impl Ended {
     fn of_sync(result: Result<(), SyncError>) -> Ended {
         match result {
             Ok(()) => Ended::Succeeded,
-            Err(SyncError::Lock(LockError::Cancelled)) => Ended::Cancelled,
+            Err(SyncError::Cancelled) => Ended::Cancelled,
             Err(why) => Ended::Failed(why.to_string()),
         }
     }

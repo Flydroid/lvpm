@@ -1184,10 +1184,7 @@ mod tests {
         let lock = locked_as("alpha", "2.0", b"nobody has these bytes");
 
         let why = fetch_locked(&env, &project, &[lock]).unwrap_err();
-        assert!(
-            matches!(why, SyncError::Lock(LockError::Cancelled)),
-            "{why:?}"
-        );
+        assert!(matches!(why, SyncError::Cancelled), "{why:?}");
     }
 
     #[test]
@@ -1412,10 +1409,7 @@ mod tests {
         assert!(env.cancel.cancel());
         let outcome = sync(&env, &with(LockPolicy::Locked));
 
-        assert!(
-            matches!(outcome, Err(SyncError::Lock(LockError::Cancelled))),
-            "{outcome:?}"
-        );
+        assert!(matches!(outcome, Err(SyncError::Cancelled)), "{outcome:?}");
         assert_eq!(
             project.installed(),
             pairs(&[("alpha", "2.0"), ("beta", "1.0"), ("gamma", "1.0")])
