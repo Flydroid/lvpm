@@ -290,8 +290,8 @@ untouched: LabVIEW resolves what the linker tables miss by searching vi.lib,
 and an LVAddons overlay *is* vi.lib. Relinking replaces those absolutes with
 tokens and records the dependencies the packaged VI never listed (~0.9 paths
 per VI as packaged, ~4.4 relinked), which is a load-time cache, not
-correctness. `tools/audit.py` reports what a package would need; `tools/deptree.py
-check` is the correctness gate.
+correctness. `tools/linkfix/audit.py` reports what a package would need;
+`tools/linkfix/deptree.py check` is the correctness gate.
 
 With `--relink`, the pass drives a small relink VI over every installed
 package folder through VI Server — load, let LabVIEW resolve the links, save —
@@ -333,8 +333,8 @@ $ lvpm linkfix --tree .project --dry-run --verbose
 On the NovaXC venv: 6647 VIs, 5174 rewritten, 17 skipped (class-API link
 tails of a shape not yet decoded — reported, never guessed). Verified with
 LabVIEW's own `Save.To Buffer` on the fixed files: what it would save is what
-is on disk. `tools/predict_dirty.py` predicts which packaged VIs need this
-(100% recall on the IDE's list), `tools/linkobjs.py oracle` compares a fixed
+is on disk. `tools/linkfix/predict_dirty.py` predicts which packaged VIs need this
+(100% recall on the IDE's list), `tools/linkfix/linkobjs.py oracle` compares a fixed
 tree with IDE-saved files link by link.
 
 ### Script-VI hooks

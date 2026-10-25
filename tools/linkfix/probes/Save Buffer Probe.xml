@@ -1,0 +1,14 @@
+<VI _name="Save Buffer Probe.vi" description="Open a VI by path, ask LabVIEW for the bytes it would write on save (Save.To Buffer) without saving anything, and write those bytes to out path. Comparing that buffer's linker tables with the file on disk shows whether loading changed what LabVIEW wants to persist.">
+  <Control _name="vi path" conIdx="0" connection="required" outputs="value:10.value" type="string" uid="10" uid_parent="root" value=""/>
+  <Control _name="out path" conIdx="5" connection="required" outputs="value:11.value" type="string" uid="11" uid_parent="root" value=""/>
+  <Constant _name="no size prefix" outputs="value:12.value" type="bool" uid="12" uid_parent="root" value="false"/>
+  <Node _name="String To Path" inputs="string:10.value" outputs="path:20.path" uid="20" uid_parent="root"/>
+  <Node _name="String To Path" inputs="string:11.value" outputs="path:21.path" uid="21" uid_parent="root"/>
+  <Node _name="Open VI Reference" inputs="application reference (local):,vi path:20.path,options:,error in (no error):,type specifier VI Refnum (for type only):,password (&quot;&quot;):" outputs="vi reference:30.vi reference,error out:30.error out" uid="30" uid_parent="root"/>
+  <Node _name="Invoke Node" target="Save.To Buffer" type="{LV.VI}" inputs="reference:30.vi reference,error in (no error):30.error out,SaveOptions:,TargetOS:,TargetCPU:,App Builder:" outputs="reference out:40.ref,error out:40.err,Buffer:40.buf" uid="40" uid_parent="root"/>
+  <Node _name="Write to Binary File" inputs="file (use dialog):21.path,data:40.buf,byte order (0\3Abig-endian\2C network order):,error in:40.err,prompt (Choose or enter file path):,prepend array or string size? (T):12.value" outputs="refnum out:,cancelled:,error out:50.error out" uid="50" uid_parent="root"/>
+  <Node _name="Close Reference" inputs="reference:40.ref,error in (no error):50.error out" outputs="error out:70.error out" uid="70" uid_parent="root"/>
+  <Indicator _name="error out" conIdx="15" connection="recommended" inputs="value:70.error out" type="cluster{bool.status,int32.code,string.source}" uid="80" uid_parent="root" value="[false,0,]"/>
+  <Indicator _name="status" conIdx="4" connection="recommended" inputs="value:81.status" type="bool" uid="82" uid_parent="root" value="false"/>
+  <Node _name="Unbundle By Name" inputs="input cluster:70.error out" outputs="status:81.status" uid="81" uid_parent="root"/>
+</VI>

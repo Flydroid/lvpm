@@ -1,0 +1,15 @@
+<VI _name="Dirty Probe.vi" description="Open a VI by path and report its modification state. Reads the VI, block diagram and front panel modification bitsets and the User Changes flag over VI Server, then releases the reference. Used to test whether a VI that was patched on disk still loads clean.">
+  <Control _name="vi path" conIdx="0" connection="required" outputs="value:10.value" type="string" uid="10" uid_parent="root" value=""/>
+  <Node _name="String To Path" inputs="string:10.value" outputs="path:20.path" uid="20" uid_parent="root"/>
+  <Node _name="Open VI Reference" inputs="application reference (local):,vi path:20.path,options:,error in (no error):,type specifier VI Refnum (for type only):,password (&quot;&quot;):" outputs="vi reference:30.vi reference,error out:30.error out" uid="30" uid_parent="root"/>
+  <Node _name="Property Node" fields="read+Modifications\3AVI Modifications Bitset,read+Modifications\3ABlock Diagram Mods Bitset,read+Modifications\3AFront Panel Mods Bitset,read+Modifications\3AUser Changes" inputs="reference:30.vi reference,error in (no error):30.error out" outputs="Modifications\3AVI Modifications Bitset:40.vi,Modifications\3ABlock Diagram Mods Bitset:40.bd,Modifications\3AFront Panel Mods Bitset:40.fp,Modifications\3AUser Changes:40.uc,reference out:40.ref,error out:40.err" type="{LV.VI}" uid="40" uid_parent="root"/>
+  <Node _name="To Long Integer" inputs="number:40.vi" outputs="32bit integer:51.i" uid="51" uid_parent="root"/>
+  <Node _name="To Long Integer" inputs="number:40.bd" outputs="32bit integer:52.i" uid="52" uid_parent="root"/>
+  <Node _name="To Long Integer" inputs="number:40.fp" outputs="32bit integer:53.i" uid="53" uid_parent="root"/>
+  <Indicator _name="vi mods" conIdx="4" connection="recommended" inputs="value:51.i" type="int32" uid="61" uid_parent="root" value="0"/>
+  <Indicator _name="bd mods" conIdx="6" connection="recommended" inputs="value:52.i" type="int32" uid="62" uid_parent="root" value="0"/>
+  <Indicator _name="fp mods" conIdx="8" connection="recommended" inputs="value:53.i" type="int32" uid="63" uid_parent="root" value="0"/>
+  <Indicator _name="user changes" conIdx="10" connection="recommended" inputs="value:40.uc" type="bool" uid="64" uid_parent="root" value="false"/>
+  <Node _name="Close Reference" inputs="reference:40.ref,error in (no error):40.err" outputs="error out:70.error out" uid="70" uid_parent="root"/>
+  <Indicator _name="error out" conIdx="15" connection="recommended" inputs="value:70.error out" type="cluster{bool.status,int32.code,string.source}" uid="80" uid_parent="root" value="[false,0,]"/>
+</VI>

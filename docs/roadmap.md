@@ -52,7 +52,7 @@ wins over the overlay; `LVAddons.AdditionalLocations` needs LabVIEW 2024 Q1.
 - ~~**Relink by default.**~~ Inverted: the relink pass is now opt-in behind
   `--relink`. Measured across 10 packages saved between LabVIEW 8.6 and 2020,
   unrelinked VIs load and run from a venv untouched, and of 2412 installed
-  files only the 3 that were saved by hand ever changed. `tools/audit.py`
+  files only the 3 that were saved by hand ever changed. `tools/linkfix/audit.py`
   reports the two properties that decide it (embedded compiled code, and
   linker paths that are not `<vilib>`-relative).
 - ~~**Rewrite linker paths in Rust.**~~ Done: `lvpm linkfix` (`src/linkfix.rs`).
@@ -140,7 +140,7 @@ stored in the content cache.
 
 ## Dependency analysis: `lvpm check` / `lvpm tree`
 
-Port `tools/deptree.py` to Rust (`linker.rs`: RSRC block walker, `PTH0`
+Port `tools/linkfix/deptree.py` to Rust (`linker.rs`: RSRC block walker, `PTH0`
 records) and make it first-class:
 
 - `lvpm check [DIR]` — every declared dependency must resolve against the
