@@ -152,20 +152,25 @@ impl Project {
     /// (`[dependencies]`); `with` adds groups, `without` removes them after
     /// includes are expanded, and a non-empty `only` replaces the default.
     /// A package named by two selected groups must ask for the same version
-    /// in both.
+    /// in both. Names are trimmed and empty ones dropped, so `--with "a, b"`
+    /// and a trailing comma read as intended.
     pub fn select(&self, with: &[String], without: &[String], only: &[String]) -> Result<Selection> {
+        fn clean(list: &[String]) -> Vec<&str> {
+            list.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).collect()
+        }
+        let (with, without, only) = (clean(with), clean(without), clean(only));
         let roots: Vec<&str> = match only.is_empty() {
-            true => std::iter::once(MAIN_GROUP).chain(with.iter().map(String::as_str)).collect(),
-            false => only.iter().map(String::as_str).collect(),
+            true => std::iter::once(MAIN_GROUP).chain(with.iter().copied()).collect(),
+            false => only,
         };
-        for g in roots.iter().copied().chain(without.iter().map(String::as_str)) {
+        for g in roots.iter().chain(without.iter()).copied() {
             self.group_deps(g)?;
         }
         let mut order: Vec<&str> = Vec::new();
         for g in roots {
             self.expand(g, &mut Vec::new(), &mut order)?;
         }
-        order.retain(|g| !without.iter().any(|w| w.as_str() == *g));
+        order.retain(|g| !without.contains(g));
 
         let mut dependencies: Vec<(String, Constraint)> = Vec::new();
         let mut owner: Vec<&str> = Vec::new();
@@ -527,5 +532,95 @@ vipm_package_builder = "*"
         assert!(parse("[dependency-groups.t]\ninclude-groups = \"u\"\n").is_err(), "not an array");
         assert!(parse("[dependency-groups.t]\ninclude-groups = [\"u\"]\n").is_err(), "unknown include");
         assert!(parse("[dependency-groups.t]\nx = 1.0\n").is_err(), "unquoted version");
+    }
+
+    #[test]
+    fn several_groups_per_flag_and_duplicates() {
+        let p = parse(GROUPS).unwrap();
+        let none: Vec<String> = Vec::new();
+
+        let s = p.select(&strings(&["test", "build"]), &none, &none).unwrap();
+        assert_eq!(s.groups, ["main", "test", "build"]);
+        assert_eq!(names(&s), ["delacor_lib_qmh", "jki_lib_caraya", "oglib_error", "vipm_package_builder"]);
+
+        let s = p.select(&strings(&["test", "test"]), &none, &none).unwrap();
+        assert_eq!(s.groups, ["main", "test"]);
+        let s = p.select(&strings(&["ci", "test"]), &none, &none).unwrap();
+        assert_eq!(s.groups, ["main", "test", "ci"], "test once, before the group including it");
+        let s = p.select(&strings(&["main"]), &none, &none).unwrap();
+        assert_eq!(s.groups, ["main"]);
+
+        let s = p.select(&strings(&["ci", "build"]), &strings(&["test", "build"]), &none).unwrap();
+        assert_eq!(s.groups, ["main", "ci"]);
+        assert_eq!(names(&s), ["delacor_lib_qmh", "ni_vi_analyzer_tests"]);
+    }
+
+    #[test]
+    fn only_takes_several_groups_and_expands_includes() {
+        let p = parse(GROUPS).unwrap();
+        let none: Vec<String> = Vec::new();
+
+        let s = p.select(&none, &none, &strings(&["main", "build"])).unwrap();
+        assert_eq!(s.groups, ["main", "build"]);
+        let s = p.select(&none, &none, &strings(&["build", "main"])).unwrap();
+        assert_eq!(s.groups, ["build", "main"], "order as given");
+
+        let s = p.select(&none, &none, &strings(&["ci"])).unwrap();
+        assert_eq!(s.groups, ["test", "ci"]);
+        assert_eq!(names(&s), ["jki_lib_caraya", "oglib_error", "ni_vi_analyzer_tests"]);
+        assert!(p.select(&none, &none, &strings(&["nope"])).is_err());
+    }
+
+    #[test]
+    fn without_a_group_that_was_not_selected_changes_nothing() {
+        let p = parse(GROUPS).unwrap();
+        let none: Vec<String> = Vec::new();
+        let s = p.select(&none, &strings(&["build"]), &none).unwrap();
+        assert_eq!(s.groups, ["main"]);
+        let s = p.select(&none, &strings(&["main"]), &strings(&[])).unwrap();
+        assert!(s.groups.is_empty() && s.dependencies.is_empty());
+    }
+
+    #[test]
+    fn a_shared_include_is_expanded_once_in_a_stable_order() {
+        let p = parse(
+            r#"
+[dependency-groups.d]
+pkg_d = "*"
+[dependency-groups.b]
+include-groups = ["d"]
+pkg_b = "*"
+[dependency-groups.c]
+include-groups = ["d"]
+pkg_c = "*"
+[dependency-groups.a]
+include-groups = ["b", "c"]
+pkg_a = "*"
+"#,
+        )
+        .unwrap();
+        let none: Vec<String> = Vec::new();
+        let s = p.select(&strings(&["a"]), &none, &none).unwrap();
+        assert_eq!(s.groups, ["main", "d", "b", "c", "a"]);
+        assert_eq!(names(&s), ["pkg_d", "pkg_b", "pkg_c", "pkg_a"]);
+
+        let s = p.select(&strings(&["a"]), &strings(&["d"]), &none).unwrap();
+        assert_eq!(s.groups, ["main", "b", "c", "a"], "--without applies after includes");
+    }
+
+    #[test]
+    fn names_are_trimmed_empty_entries_dropped_and_case_kept() {
+        let p = parse(GROUPS).unwrap();
+        let none: Vec<String> = Vec::new();
+
+        let s = p.select(&strings(&[" test", "build ", ""]), &none, &none).unwrap();
+        assert_eq!(s.groups, ["main", "test", "build"]);
+        let s = p.select(&strings(&["ci"]), &strings(&[" test "]), &none).unwrap();
+        assert_eq!(s.groups, ["main", "ci"]);
+        let s = p.select(&none, &strings(&["  "]), &strings(&["", " "])).unwrap();
+        assert_eq!(s.groups, ["main"], "an all-empty --only falls back to the default");
+
+        let err = p.select(&strings(&["Test"]), &none, &none).unwrap_err().to_string();
+        assert!(err.contains("\"Test\""), "group names are case-sensitive: {err}");
     }
 }

@@ -1909,3 +1909,48 @@ fn read_spec(zip: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>) -> Result<Stri
     // spec files are latin-1-ish; lossy is fine for the fields we read.
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn install(args: &[&str]) -> Result<GroupArgs, clap::Error> {
+        let cli = Cli::try_parse_from(["lvpm", "install"].iter().chain(args))?;
+        match cli.cmd {
+            Cmd::Install { groups, .. } => Ok(groups),
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn group_flags_split_on_commas_and_accumulate() {
+        let g = install(&["--with", "test,ci"]).unwrap();
+        assert_eq!(g.with, ["test", "ci"]);
+        let g = install(&["--with", "test", "--with", "ci"]).unwrap();
+        assert_eq!(g.with, ["test", "ci"]);
+        let g = install(&["--with", "a,b", "--with", "c", "--without", "b,d"]).unwrap();
+        assert_eq!(g.with, ["a", "b", "c"]);
+        assert_eq!(g.without, ["b", "d"]);
+        let g = install(&["--only", "main,build"]).unwrap();
+        assert_eq!(g.only, ["main", "build"]);
+        assert!(g.with.is_empty() && g.without.is_empty());
+    }
+
+    #[test]
+    fn group_flags_keep_spaces_for_select_to_trim() {
+        let g = install(&["--with", "test, ci", "--without", "x,"]).unwrap();
+        assert_eq!(g.with, ["test", " ci"]);
+        assert_eq!(g.without, ["x", ""]);
+    }
+
+    #[test]
+    fn group_flags_refuse_contradictory_combinations() {
+        assert!(install(&["--only", "a", "--with", "b"]).is_err());
+        assert!(install(&["--only", "a", "--without", "b"]).is_err());
+        assert!(install(&["oglib_error", "--with", "a"]).is_err());
+        assert!(install(&["oglib_error", "--without", "a"]).is_err());
+        assert!(install(&["oglib_error", "--only", "a"]).is_err());
+        assert!(install(&["--manifest", "vipm.toml", "--with", "dev"]).is_ok());
+        assert!(install(&["--with", "a", "--without", "b"]).is_ok());
+    }
+}

@@ -202,8 +202,10 @@ taking a comma-separated list:
 
 `--without` applies after includes are expanded. `--only` replaces the
 default and cannot be combined with `--with` or `--without`; none of the
-three apply to a single-package `lvpm install <name>`. The install banner
-names the groups in effect and lists the ones not selected.
+three apply to a single-package `lvpm install <name>`. Each flag may also be
+repeated (`--with test --with build` is `--with test,build`); names are
+trimmed, empty entries ignored, and group names are case-sensitive. The
+install banner names the groups in effect and lists the ones not selected.
 
 ## `[nipm.dependencies]`
 
