@@ -68,18 +68,38 @@ pub fn remove(env: &OpEnv, venv: &Venv, confirmed: bool) -> Result<()> {
 mod tests {
     use super::super::testing::{self, scratch_dir};
     use super::*;
+    use std::net::{Ipv4Addr, TcpListener};
+    use std::path::PathBuf;
+
+    /// A repo with a venv whose VI Server port is free to bind. The port
+    /// follows from the venv's path, so a path is taken whose port nothing
+    /// listens on rather than hoping that none does.
+    fn repo_with_a_venv_on_a_free_port(tag: &str) -> (PathBuf, Venv) {
+        for attempt in 0..100 {
+            let repo = scratch_dir(&format!("{tag}-{attempt}"));
+            let venv = testing::venv_in(&repo);
+            if TcpListener::bind((Ipv4Addr::LOCALHOST, venv.port)).is_ok() {
+                return (repo, venv);
+            }
+            let _ = std::fs::remove_dir_all(&repo);
+        }
+        panic!("no scratch path in 100 tries has a free venv port");
+    }
 
     #[test]
     fn status_finds_the_venv_from_below_and_counts_what_is_in_it() {
-        let repo = scratch_dir("venv-status");
-        let created = testing::venv_in(&repo);
+        let (repo, created) = repo_with_a_venv_on_a_free_port("venv-status");
         let deep = repo.join("src");
         std::fs::create_dir_all(&deep).unwrap();
 
         let found = status(&testing::env(&deep)).unwrap().unwrap();
         assert_eq!(found.venv.dir, created.dir);
         assert_eq!((found.installed, found.not_relinked), (0, 0));
-        assert!(!found.running);
+        assert!(!found.running, "nothing listens on port {}", created.port);
+
+        let _listener = TcpListener::bind((Ipv4Addr::LOCALHOST, created.port)).unwrap();
+        let found = status(&testing::env(&deep)).unwrap().unwrap();
+        assert!(found.running, "something listens on port {}", created.port);
 
         let _ = std::fs::remove_dir_all(&repo);
     }
