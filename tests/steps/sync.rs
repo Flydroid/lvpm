@@ -338,6 +338,14 @@ async fn a_lock_a_new_dependency_and_a_package_to_remove(
     world.note_the_project();
 }
 
+/// Something the lock does not list, which a sync that got as far as removing
+/// would take out.
+#[given(regex = r#"^"([^"]+)" (\S+) is installed in dest$"#)]
+async fn an_extra_package_is_installed(world: &mut CliWorld, name: String, version: String) {
+    world.install_into_dest(&name, &version);
+    world.note_the_project();
+}
+
 #[given(regex = r#"^no lvpm\.lock exists and "([^"]+)" (\S+) installed in dest$"#)]
 async fn no_lock_and_a_package_installed(world: &mut CliWorld, name: String, version: String) {
     assert!(world.lock_bytes().is_none(), "a lock exists");
@@ -611,6 +619,12 @@ async fn run_with_no_input(world: &mut CliWorld, command_line: String) {
 async fn run_in_two_worlds(world: &mut CliWorld, first: String, second: String) {
     let twin = Sandbox::new();
     set_up_project(&twin);
+    // The twin starts from the manifest and the lock this world has.
+    std::fs::write(twin.work_dir().join(MANIFEST_FILE), world.manifest_bytes())
+        .expect("copy the manifest");
+    if let Some(lock) = world.lock_bytes() {
+        std::fs::write(twin.work_dir().join("lvpm.lock"), lock).expect("copy the lock");
+    }
     world.run(&first, None);
     let output = twin.run_lvpm(&arguments(&second), None);
     let output = twin.normalised(&output);
@@ -1023,6 +1037,18 @@ async fn fails_saying_there_is_no_manifest(world: &mut CliWorld) {
 }
 
 // ---- two worlds ----
+
+#[then(regex = r"^both runs (succeeded|failed)$")]
+async fn both_runs_ended_so(world: &mut CliWorld, outcome: String) {
+    let twin = world.sync.twin.as_ref().expect("a second world");
+    for (which, output) in [("the first", world.output()), ("the second", &twin.output)] {
+        assert_eq!(
+            output.exit_code == 0,
+            outcome == "succeeded",
+            "{which} run {outcome}?\n{output:?}"
+        );
+    }
+}
 
 #[then("both destinations, locks and normalised outputs are identical")]
 async fn both_worlds_are_identical(world: &mut CliWorld) {

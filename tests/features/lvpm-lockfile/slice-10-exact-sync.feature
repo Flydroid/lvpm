@@ -75,9 +75,11 @@ Feature: lvpm sync makes the destination equal the lock
 
   Scenario Outline: an archive with different bytes is never installed
     Given <where> holds an "alpha" 2.0 archive whose bytes differ from the locked SHA-256, and nothing else holds it
+    And "gamma" 1.0 is installed in dest
     When I run "lvpm sync --prefix dest"
     Then the command fails saying the archive of "alpha" 2.0 does not match lvpm.lock
     And "alpha" 2.0 is not installed
+    And "gamma" is installed
 
     Examples:
       | where              |
@@ -121,17 +123,23 @@ Feature: lvpm sync makes the destination equal the lock
     When I run "lvpm sync --no-dev --prefix dest"
     Then "alpha" is installed
 
+  # --locked and --frozen only differ from a plain sync when there is a lock to
+  # be strict about, so those rows run with one, current and stale.
   Scenario Outline: bare install is sync with the same flags
+    Given the lock is <lock>
     When I run "lvpm install <flags>" and, in an identical world, "lvpm sync <flags>"
-    Then both destinations, locks and normalised outputs are identical
+    Then both runs <outcome>
+    And both destinations, locks and normalised outputs are identical
 
     Examples:
-      | flags                     |
-      | --prefix dest             |
-      | --dry-run --prefix dest   |
-      | --locked --prefix dest    |
-      | --frozen --prefix dest    |
-      | --no-dev --prefix dest    |
+      | lock    | flags                   | outcome   |
+      | missing | --prefix dest           | succeeded |
+      | missing | --dry-run --prefix dest | succeeded |
+      | missing | --no-dev --prefix dest  | succeeded |
+      | current | --locked --prefix dest  | succeeded |
+      | current | --frozen --prefix dest  | succeeded |
+      | stale   | --locked --prefix dest  | failed    |
+      | stale   | --frozen --prefix dest  | succeeded |
 
   Scenario: an unresolved requirement is warned about at sync
     Given lvpm.lock records "ni_lib_missing" as unresolved, required by "beta"

@@ -1344,6 +1344,32 @@ mod tests {
     }
 
     #[test]
+    fn a_locked_version_below_the_installed_one_is_installed_as_a_replace() {
+        let project = project("downgrade", &["alpha"]);
+        project.sync(&SyncOptions::default()).0.unwrap();
+        assert_eq!(project.installed(), pairs(&[("alpha", "2.0")]));
+
+        // The manifest now pins alpha 1.0, and the lock follows it down.
+        std::fs::write(
+            project.root.join(crate::project::FILE_NAME),
+            format!("{MANIFEST_HEAD}[dependencies]\nalpha = \"1.0\"\n"),
+        )
+        .unwrap();
+        let (outcome, events) = project.sync(&SyncOptions::default());
+        outcome.unwrap();
+
+        assert_eq!(project.installed(), pairs(&[("alpha", "1.0")]));
+        let planned = events.iter().find_map(|event| match event {
+            Event::SyncPlanned {
+                steps,
+                dry_run: false,
+            } => Some(steps),
+            _ => None,
+        });
+        assert_eq!(planned, Some(&vec![replace("alpha", "2.0", "1.0")]));
+    }
+
+    #[test]
     fn a_second_sync_of_the_same_project_has_nothing_to_do() {
         let project = project("nothing-to-do", &["beta"]);
         project.sync(&SyncOptions::default()).0.unwrap();

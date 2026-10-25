@@ -54,11 +54,15 @@ async fn the_project(world: &mut CliWorld) {
 
 // ---- the lock ----
 
-#[given(regex = r"^the lock is (missing|stale)$")]
+#[given(regex = r"^the lock is (missing|current|stale)$")]
 async fn the_lock_is(world: &mut CliWorld, state: String) {
     match state.as_str() {
         "missing" => {
             assert!(world.lock_bytes().is_none(), "a lock exists");
+            world.note_the_project();
+        }
+        "current" => {
+            world.lock_the_project();
             world.note_the_project();
         }
         _ => world.make_the_lock_stale(),

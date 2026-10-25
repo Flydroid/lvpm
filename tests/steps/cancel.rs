@@ -13,13 +13,13 @@ use crate::CliWorld;
 use crate::support::events::RecordingSink;
 use cucumber::{given, then, when};
 use lvpm_core::cancel::CancelToken;
-use lvpm_core::errors::{Cancelled, LockError, SyncError};
+use lvpm_core::errors::{Cancelled, EditError, LockError, SyncError};
 use lvpm_core::events::{Event, EventSink};
 use lvpm_core::install;
 use lvpm_core::manifest_edit::DependencyTable;
 use lvpm_core::ops::install::InstallOptions;
 use lvpm_core::ops::sync::SyncOptions;
-use lvpm_core::ops::{self, OpEnv};
+use lvpm_core::ops::{self, OpEnv, add_remove};
 use lvpm_core::target::Roots;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -64,6 +64,14 @@ impl Ended {
         match result {
             Ok(()) => Ended::Succeeded,
             Err(SyncError::Cancelled) => Ended::Cancelled,
+            Err(why) => Ended::Failed(why.to_string()),
+        }
+    }
+
+    fn of_edit(result: Result<(), EditError>) -> Ended {
+        match result {
+            Ok(()) => Ended::Succeeded,
+            Err(EditError::Cancelled) => Ended::Cancelled,
             Err(why) => Ended::Failed(why.to_string()),
         }
     }
@@ -252,6 +260,76 @@ async fn cancelled_while_syncing(world: &mut CliWorld) {
     world.cancel.ended = Some(Ended::of_sync(result));
 }
 
+/// What a scenario asks core to do to the manifest.
+enum Edit<'a> {
+    Add(&'a str),
+    Remove(&'a str),
+}
+
+/// Run `edit` with a token that is cancelled at the first event that
+/// `matches`, keeping how it ended and what `cancel` answered.
+fn edit_cancelled_at(
+    world: &mut CliWorld,
+    edit: Edit<'_>,
+    matches: impl Fn(&Event) -> bool + Send + Sync,
+) {
+    let token = CancelToken::new();
+    let sink = CancelOn::new(&token, matches);
+    let env = Paths::of(world).env(&sink, &token);
+    let options = InstallOptions::default();
+    let table = DependencyTable::Dependencies;
+    let result = match edit {
+        Edit::Add(name) => add_remove::add(&env, name, table, &options),
+        Edit::Remove(name) => add_remove::remove(&env, name, table, &options),
+    };
+    assert!(
+        sink.answered().is_some(),
+        "the token was never cancelled: {:#?}",
+        sink.events.events()
+    );
+    world.cancel.accepted = sink.answered();
+    world.cancel.ended = Some(Ended::of_edit(result));
+}
+
+#[given(
+    expr = "the project depends on {string} {string}, locked and synced into the scratch destination"
+)]
+async fn locked_and_synced(world: &mut CliWorld, name: String, constraint: String) {
+    world.depend(DependencyTable::Dependencies, &name, &constraint);
+    world.lock_the_project();
+    // Core runs in this process, so the install records need absolute paths.
+    let dest = dest_dir(world);
+    let prefix = dest.to_str().expect("a path of text");
+    world.sandbox.setup_lvpm(&["sync", "--prefix", prefix]);
+    world.lock.manifest_before = Some(world.manifest_bytes());
+    world.lock.before = world.lock_bytes();
+    world.cancel.dest_before = Some(snapshot(&dest));
+}
+
+#[when(expr = "core adds {string} and the token is cancelled while an archive is being hashed")]
+async fn add_cancelled_while_locking(world: &mut CliWorld, package: String) {
+    let hashing = |event: &Event| matches!(event, Event::LockHashing { .. });
+    edit_cancelled_at(world, Edit::Add(&package), hashing);
+}
+
+#[when(
+    expr = "core removes {string} and the token is cancelled when the first resolve event arrives"
+)]
+async fn remove_cancelled_at_resolve(world: &mut CliWorld, package: String) {
+    let resolving = |event: &Event| phase_of(event).as_deref() == Some("resolve");
+    edit_cancelled_at(world, Edit::Remove(&package), resolving);
+}
+
+#[when(expr = "core {word} {string} and the token is cancelled when the sync plan is announced")]
+async fn edit_cancelled_at_the_plan(world: &mut CliWorld, call: String, package: String) {
+    let planned = |event: &Event| matches!(event, Event::SyncPlanned { dry_run: false, .. });
+    let edit = match call.as_str() {
+        "adds" => Edit::Add(&package),
+        _ => Edit::Remove(&package),
+    };
+    edit_cancelled_at(world, edit, planned);
+}
+
 // ---- what is left ----
 
 #[then("cancel reports it was not accepted")]
@@ -268,6 +346,35 @@ async fn the_install_succeeded(world: &mut CliWorld, package: String) {
     );
     let roots = Roots::scratch(&dest_dir(world));
     assert!(install::is_installed(&roots, &package), "{package}");
+}
+
+fn assert_the_edit_succeeded(world: &CliWorld) {
+    let ended = world.cancel.ended().expect("an edit ran");
+    assert!(
+        matches!(ended, Ended::Succeeded),
+        "the edit did not succeed: it {ended}"
+    );
+}
+
+fn is_locked_and_installed(world: &CliWorld, package: &str) -> (bool, bool) {
+    let locked = world
+        .locked_versions()
+        .iter()
+        .any(|(name, _)| name == package);
+    let installed = install::is_installed(&Roots::scratch(&dest_dir(world)), package);
+    (locked, installed)
+}
+
+#[then(expr = "the edit succeeds and {string} is locked and installed")]
+async fn the_edit_added(world: &mut CliWorld, package: String) {
+    assert_the_edit_succeeded(world);
+    assert_eq!(is_locked_and_installed(world, &package), (true, true));
+}
+
+#[then(expr = "the edit succeeds and {string} is neither locked nor installed")]
+async fn the_edit_removed(world: &mut CliWorld, package: String) {
+    assert_the_edit_succeeded(world);
+    assert_eq!(is_locked_and_installed(world, &package), (false, false));
 }
 
 /// A package's files and its install manifest are all files, and a cancelled

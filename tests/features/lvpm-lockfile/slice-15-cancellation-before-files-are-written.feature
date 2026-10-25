@@ -36,3 +36,29 @@ Feature: A long operation can be cancelled until it starts writing files
     When core syncs and the token is cancelled while archives are being fetched
     Then the result is "cancelled"
     And the destination is unchanged
+
+  Scenario: cancel during add leaves both files and the destination untouched
+    Given the project depends on "alpha" ">=1.0", locked and synced into the scratch destination
+    When core adds "beta" and the token is cancelled while an archive is being hashed
+    Then the result is "cancelled"
+    And lvpm.toml and lvpm.lock are byte-identical to before
+    And the destination is unchanged
+
+  Scenario: cancel during remove leaves both files and the destination untouched
+    Given the project depends on "alpha" ">=1.0", locked and synced into the scratch destination
+    When core removes "alpha" and the token is cancelled when the first resolve event arrives
+    Then the result is "cancelled"
+    And lvpm.toml and lvpm.lock are byte-identical to before
+    And the destination is unchanged
+
+  Scenario: cancel after add has begun writing is refused and the add completes
+    Given the project depends on "alpha" ">=1.0", locked and synced into the scratch destination
+    When core adds "beta" and the token is cancelled when the sync plan is announced
+    Then cancel reports it was not accepted
+    And the edit succeeds and "beta" is locked and installed
+
+  Scenario: cancel after remove has begun writing is refused and the remove completes
+    Given the project depends on "alpha" ">=1.0", locked and synced into the scratch destination
+    When core removes "alpha" and the token is cancelled when the sync plan is announced
+    Then cancel reports it was not accepted
+    And the edit succeeds and "alpha" is neither locked nor installed

@@ -106,11 +106,17 @@ fn create_dir_avoiding(taken: &HashSet<u16>) -> TempDir {
     panic!("no sandbox path in {MAX_DIR_ATTEMPTS} tries has a free venv port");
 }
 
-/// The subcommands that put packages on a destination or take them off it.
-const CHANGES_PACKAGES: &[&str] = &["sync", "install", "uninstall", "add", "remove"];
+/// The subcommands that put packages on a destination, take them off it, or
+/// relink what is on it: each acts on the destination the way `install` does.
+const CHANGES_PACKAGES: &[&str] = &["sync", "install", "uninstall", "add", "remove", "relink"];
 /// Of those, the ones that make the destination equal a lock, so that they
 /// take out whatever the lock does not list, whatever package they name.
 const SYNCS: &[&str] = &["sync", "add", "remove"];
+/// The subcommands that run in the LabVIEW `--labview-version` names, whatever
+/// venv is about: hooks, a palette refresh, a start.
+const ACTS_ON_A_LABVIEW: &[&str] = &["run-hooks", "refresh", "start"];
+/// Of those, the ones that name no package.
+const NAMES_NO_PACKAGE: &[&str] = &["refresh", "start"];
 
 /// The LabVIEW installations on this machine, read once.
 static MACHINE_TARGETS: LazyLock<Vec<LvTarget>> =
@@ -134,7 +140,9 @@ fn flag_value<'a>(
 /// a venv, or it would fail before reaching one. A `sync`, and so an `add` or a
 /// `remove`, takes out every package its lock does not list, so no scenario may
 /// point one at the user's own installation. `install <package>` inside a
-/// project is an `add`, and settles its destination the same way.
+/// project is an `add`, and settles its destination the same way. So does a
+/// `relink`. `run-hooks`, `refresh` and `start` act in the LabVIEW that
+/// `--labview-version` names, venv or not, and are settled that way.
 ///
 /// The destination is found the way `lvpm` finds it: core's own settling of the
 /// flags, the project's venv and `targets`, which are the machine's. A child
@@ -142,8 +150,10 @@ fn flag_value<'a>(
 /// `headless` here must repeat): it inherits nothing that says so. A headless
 /// child is how a project without a venv reaches an installation, so it is
 /// settled that way here too. The one exception is the fixture scenario that
-/// has proved the installation clean: it may install and uninstall the fixture
-/// package, and nothing else.
+/// has proved the installation clean, and which has a LabVIEW answering VI
+/// Server already: it may install, relink, run the hooks of and uninstall the
+/// fixture package, and refresh and start (which then starts nothing), and
+/// nothing else.
 pub fn real_installation_risk(
     args: &[&str],
     cwd: &Path,
@@ -168,7 +178,8 @@ pub fn real_installation_risk(
         }
     }
     let command = *positional.first()?;
-    if !CHANGES_PACKAGES.contains(&command) {
+    let by_labview = ACTS_ON_A_LABVIEW.contains(&command);
+    if !CHANGES_PACKAGES.contains(&command) && !by_labview {
         return None;
     }
     let sink = RecordingSink::default();
@@ -181,12 +192,19 @@ pub fn real_installation_risk(
     env.flags = flags;
     env.headless = headless;
     // Where it does not resolve, the command fails before it changes anything.
-    let Ok(Destination::Global(roots)) = env.destination() else {
-        return None;
+    let roots = match by_labview {
+        true => env.roots().ok().filter(|roots| roots.target.is_some())?,
+        false => {
+            let Ok(Destination::Global(roots)) = env.destination() else {
+                return None;
+            };
+            roots
+        }
     };
-    let names_only_the_fixture = positional
-        .get(1)
-        .is_some_and(|package| package.split('@').next() == Some(global::FIXTURE_NAME));
+    let names_only_the_fixture = NAMES_NO_PACKAGE.contains(&command)
+        || positional
+            .get(1)
+            .is_some_and(|package| package.split('@').next() == Some(global::FIXTURE_NAME));
     if fixture_armed && !SYNCS.contains(&command) && names_only_the_fixture {
         return None;
     }
@@ -854,6 +872,118 @@ mod tests {
             "uninstall alpha --labview-version 2026",
             "sync --labview-version 2026",
             "sync lvpm_test_fixture --labview-version 2026",
+        ] {
+            assert!(risky(command, true), "{command} while armed");
+        }
+    }
+
+    /// Is `command_line`, run in a project that has a venv bound to LabVIEW
+    /// 2026, a risk to a real installation?
+    fn risky_in_a_project_with_a_venv(command_line: &str) -> bool {
+        let args: Vec<&str> = command_line.split_whitespace().collect();
+        let cwd = tempfile::tempdir().expect("a working directory");
+        std::fs::write(
+            cwd.path().join(MANIFEST_FILE),
+            "[project]\nname = \"demo\"\nlabview = \"2026\"\n",
+        )
+        .expect("write a manifest");
+        let lvpm_dir = cwd.path().join(VENV_DIR).join(".lvpm");
+        std::fs::create_dir_all(&lvpm_dir).expect("create the venv");
+        let binding = serde_json::json!({
+            "target_key": "LabVIEW-2026-64bit",
+            "target_path": "LabVIEW 2026",
+            "version": 26.3,
+            "bitness": 64,
+            "port": 3400,
+            "created_at": 0,
+        });
+        std::fs::write(lvpm_dir.join("venv.json"), binding.to_string()).expect("write the binding");
+        real_installation_risk(&args, cwd.path(), &[labview_2026()], false, false).is_some()
+    }
+
+    #[test]
+    fn a_relink_settles_like_an_install_so_it_is_refused_at_a_real_installation() {
+        for command in [
+            "relink beta --labview-version 2026",
+            "relink --all --global --labview-version 2026",
+            "relink beta --global --labview-version=2026",
+        ] {
+            assert!(risky(command, false), "{command}");
+        }
+        for command in [
+            "relink beta --prefix dest",
+            "relink --all --prefix=dest",
+            "relink beta",
+        ] {
+            assert!(!risky(command, false), "{command}");
+        }
+        // The venv wins, as it does for an install: its LabVIEW is not the installation.
+        assert!(!risky_in_a_project_with_a_venv(
+            "relink beta --labview-version 2026"
+        ));
+        assert!(risky_headless_in_a_project("relink beta"));
+    }
+
+    #[test]
+    fn a_run_hooks_is_refused_at_the_installation_the_flag_names_even_beside_a_venv() {
+        for command in [
+            "run-hooks beta --labview-version 2026",
+            "run-hooks --all --labview-version=2026",
+        ] {
+            assert!(risky(command, false), "{command}");
+            assert!(
+                risky_in_a_project_with_a_venv(command),
+                "{command} in a venv"
+            );
+        }
+        for command in [
+            "run-hooks beta --prefix dest",
+            "run-hooks beta",
+            "run-hooks --all --global",
+        ] {
+            assert!(!risky(command, false), "{command}");
+        }
+    }
+
+    #[test]
+    fn a_refresh_is_refused_at_the_installation_the_flag_names_even_beside_a_venv() {
+        assert!(risky("refresh --labview-version 2026", false));
+        assert!(risky_in_a_project_with_a_venv(
+            "refresh --labview-version 2026"
+        ));
+        for command in ["refresh --prefix dest", "refresh", "refresh --global"] {
+            assert!(!risky(command, false), "{command}");
+        }
+    }
+
+    #[test]
+    fn a_start_is_refused_at_the_installation_the_flag_names_even_beside_a_venv() {
+        assert!(risky("start --labview-version 2026", false));
+        assert!(risky_in_a_project_with_a_venv(
+            "start --labview-version=2026"
+        ));
+        for command in ["start --prefix dest", "start", "start --global"] {
+            assert!(!risky(command, false), "{command}");
+        }
+    }
+
+    #[test]
+    fn once_the_installation_is_proved_clean_the_fixture_may_be_relinked_and_run_and_the_rest_is_refused()
+     {
+        for command in [
+            "relink lvpm_test_fixture --labview-version 2026",
+            "run-hooks lvpm_test_fixture --labview-version 2026",
+            "refresh --labview-version 2026",
+            "start --labview-version 2026",
+        ] {
+            assert!(!risky(command, true), "{command} while armed");
+            assert!(risky(command, false), "{command} before it is armed");
+        }
+        for command in [
+            "relink beta --labview-version 2026",
+            "relink --all --labview-version 2026",
+            "run-hooks beta --labview-version 2026",
+            "run-hooks --all --labview-version 2026",
         ] {
             assert!(risky(command, true), "{command} while armed");
         }
