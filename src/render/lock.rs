@@ -3,7 +3,7 @@
 //! the manifest and the commands to type are the CLI's.
 
 use super::{Renderer, Stream};
-use lvpm_core::errors::{ArchiveFailure, LockError};
+use lvpm_core::errors::{ArchiveFailure, ArchiveFault, LockError, LockedArchiveProblem};
 use lvpm_core::events::{Event, LockChange};
 use lvpm_core::lockfile::StaleReason;
 use lvpm_core::solve::{Conflict, Fact};
@@ -119,6 +119,7 @@ pub(super) fn error_for(error: &LockError, rerun: &str) -> String {
         ),
         LockError::Conflict(conflict) => conflict_text(conflict, rerun),
         LockError::ArchivesUnavailable(failures) => archives_text(failures, rerun),
+        LockError::LockedArchives(problems) => locked_archives_text(problems, rerun),
         // `lvpm lock --check` fails with one line: a script reads it.
         LockError::NoLock { .. } => {
             "there is no lvpm.lock; run `lvpm lock` to create it".to_string()
@@ -236,11 +237,62 @@ fn archives_text(failures: &[ArchiveFailure], rerun: &str) -> String {
     text
 }
 
+fn locked_archives_text(problems: &[LockedArchiveProblem], rerun: &str) -> String {
+    let plural = if problems.len() == 1 { "" } else { "s" };
+    let mut text = format!(
+        "cannot lock: {} locked archive{plural} could not be had, and lvpm.lock was not changed:",
+        problems.len()
+    );
+    for LockedArchiveProblem {
+        name,
+        version,
+        sha256,
+        fault,
+    } in problems
+    {
+        text.push_str("\n  ");
+        text.push_str(&match fault {
+            ArchiveFault::NotFound => format!(
+                "{name} {version}: no archive with SHA-256 {sha256} is in the cache or in any source"
+            ),
+            ArchiveFault::DiffersFromLock { found_sha256 } => format!(
+                "{name} {version}: the archive has SHA-256 {found_sha256} and lvpm.lock has \
+                 {sha256}, so it was not locked again"
+            ),
+        });
+    }
+    text.push_str(&format!(
+        "\nnext: add the archive lvpm.lock was made from with `lvpm cache add <file>`, or delete \
+         lvpm.lock to lock the archives as they are now, then run {rerun} again"
+    ));
+    text
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::tests::renderer;
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn an_archive_that_is_not_the_locked_one_is_named_with_both_hashes_and_the_way_out() {
+        let text = error(&LockError::LockedArchives(vec![LockedArchiveProblem {
+            name: "alpha".into(),
+            version: "2.0".into(),
+            sha256: "aaa".into(),
+            fault: ArchiveFault::DiffersFromLock {
+                found_sha256: "bbb".into(),
+            },
+        }]));
+        assert_eq!(
+            text,
+            "cannot lock: 1 locked archive could not be had, and lvpm.lock was not changed:\n\
+             \x20 alpha 2.0: the archive has SHA-256 bbb and lvpm.lock has aaa, so it was not \
+             locked again\n\
+             next: add the archive lvpm.lock was made from with `lvpm cache add <file>`, or \
+             delete lvpm.lock to lock the archives as they are now, then run `lvpm lock` again"
+        );
+    }
 
     #[test]
     fn a_dry_run_lists_how_the_lock_would_change_on_stdout() {

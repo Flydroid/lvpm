@@ -48,6 +48,11 @@ pub enum LockError {
     /// them: one run reports every one it could not get.
     #[error("{} archive(s) could not be fetched", .0.len())]
     ArchivesUnavailable(Vec<ArchiveFailure>),
+    /// Versions the lock already holds whose archive no source has with the
+    /// locked SHA-256, all of them. Locking again keeps a version's SHA-256:
+    /// other bytes under it are never pinned in its place.
+    #[error("{} locked archive(s) could not be had", .0.len())]
+    LockedArchives(Vec<LockedArchiveProblem>),
     /// There is no lock where it should be.
     #[error("there is no lvpm.lock at {}", .path.display())]
     NoLock { path: PathBuf },

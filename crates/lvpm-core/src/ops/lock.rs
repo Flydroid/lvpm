@@ -9,6 +9,7 @@
 use super::env::OpEnv;
 use super::session::Downloads;
 use super::snapshot::restoring_on_failure;
+use super::sync::Search;
 use crate::cache::sha256_hex;
 use crate::errors::{ArchiveFailure, Cancelled, LockError};
 use crate::events::{Event, LockChange};
@@ -403,7 +404,7 @@ fn relock_in(
     let gate = lv_gate(labview)?;
     let preferences = preferences(previous, moving);
     let resolution = resolve(env, project, index, &preferences, pins, gate)?;
-    let hashes = hash_archives(env, &resolution)?;
+    let hashes = hash_archives(env, index, &resolution, previous)?;
     let feeds = index::feeds(&project.resolved_sources()?, project.default_sources);
     let lock = build(project, labview, &resolution, &hashes, &feeds);
 
@@ -532,9 +533,15 @@ fn wanted_by(constraint: &Constraint) -> String {
 /// The SHA-256 of every chosen archive, by lowercased name. Each archive
 /// comes through the cache, so a cached one needs no network. Every archive
 /// that cannot be had is collected, and they are reported together.
+///
+/// A version `previous` already locks keeps the SHA-256 it was locked with, and
+/// only bytes that hash to it count: other bytes under that version are an
+/// error, never a new pin.
 fn hash_archives(
     env: &OpEnv,
+    index: &Index,
     resolution: &Resolution,
+    previous: Option<&Lockfile>,
 ) -> Result<HashMap<String, String>, LockError> {
     let total = resolution.packages.len();
     // Nothing to fetch opens nothing: a manifest with no dependencies needs
@@ -544,6 +551,7 @@ fn hash_archives(
     };
     let mut hashes = HashMap::new();
     let mut failures = Vec::new();
+    let mut not_as_locked = Vec::new();
     for (position, (key, entry)) in resolution.packages.iter().enumerate() {
         if env.cancel.is_cancelled() {
             return Err(Cancelled.into());
@@ -554,6 +562,26 @@ fn hash_archives(
             position: position + 1,
             total,
         });
+        let kept = previous
+            .iter()
+            .flat_map(|lock| &lock.packages)
+            .find(|package| {
+                package.name.to_lowercase() == *key
+                    && Version::parse(&package.version) == entry.version
+            });
+        if let Some(locked) = kept {
+            let mut search = Search::in_cache(&downloads, locked);
+            if !search.found {
+                search.look_in(&downloads, index)?;
+            }
+            match search.problem() {
+                None => {
+                    hashes.insert(key.clone(), locked.sha256.clone());
+                }
+                Some(problem) => not_as_locked.push(problem),
+            }
+            continue;
+        }
         match downloads.fetch(entry) {
             Ok(bytes) => {
                 hashes.insert(key.clone(), sha256_hex(&bytes));
@@ -566,9 +594,10 @@ fn hash_archives(
             }),
         }
     }
-    match failures.is_empty() {
-        true => Ok(hashes),
-        false => Err(LockError::ArchivesUnavailable(failures)),
+    match (not_as_locked.is_empty(), failures.is_empty()) {
+        (false, _) => Err(LockError::LockedArchives(not_as_locked)),
+        (true, false) => Err(LockError::ArchivesUnavailable(failures)),
+        (true, true) => Ok(hashes),
     }
 }
 

@@ -825,6 +825,33 @@ mod tests {
     }
 
     #[test]
+    fn a_locked_version_is_not_pinned_to_other_bytes_when_the_lock_is_made_again() {
+        let world = World::new("repin", PROJECT);
+        run_add(&world, "gamma@0.5", &InstallOptions::default()).unwrap();
+        let (manifest, lock) = (world.manifest(), world.lock().unwrap());
+
+        // The feed now serves other bytes for alpha 2.0, and the cache is gone.
+        let altered = world.root.join("packages/alpha-2.0.vip");
+        write_vip_for_labview(&altered, ("alpha", "2.0", ""), "21.0");
+        std::fs::remove_dir_all(world.root.join("cache")).unwrap();
+
+        let why = run_add(&world, "gamma", &InstallOptions::default()).unwrap_err();
+        let EditError::Lock(LockError::LockedArchives(problems)) = why else {
+            panic!("expected archives that differ from the lock, got {why:?}");
+        };
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert_eq!(problems[0].name, "alpha");
+        assert_eq!(
+            problems[0].fault,
+            crate::errors::ArchiveFault::DiffersFromLock {
+                found_sha256: crate::cache::sha256_hex(&std::fs::read(&altered).unwrap())
+            }
+        );
+        assert_eq!(world.manifest(), manifest);
+        assert_eq!(world.lock().unwrap(), lock);
+    }
+
+    #[test]
     fn a_sync_that_fails_part_way_puts_the_manifest_and_the_lock_back() {
         let world = World::new("restore", PROJECT);
         run_add(&world, "alpha", &InstallOptions::default()).unwrap();

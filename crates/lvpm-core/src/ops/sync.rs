@@ -484,16 +484,16 @@ pub fn fetch_locked(
 }
 
 /// The hunt for one locked archive.
-struct Search<'a> {
+pub(super) struct Search<'a> {
     locked: &'a LockedPackage,
     /// The archive is in the cache, with the locked bytes.
-    found: bool,
+    pub(super) found: bool,
     /// The SHA-256 of an archive that was found and is not the locked one.
     differs: Option<String>,
 }
 
 impl<'a> Search<'a> {
-    fn in_cache(downloads: &Downloads, locked: &'a LockedPackage) -> Search<'a> {
+    pub(super) fn in_cache(downloads: &Downloads, locked: &'a LockedPackage) -> Search<'a> {
         let mut search = Search {
             locked,
             found: false,
@@ -514,7 +514,11 @@ impl<'a> Search<'a> {
     /// Try every entry of the index that has the locked name and version. One
     /// that cannot be read holds nothing; one with other bytes is noted and
     /// never used.
-    fn look_in(&mut self, downloads: &Downloads, index: &Index) -> Result<(), SyncError> {
+    pub(super) fn look_in(
+        &mut self,
+        downloads: &Downloads,
+        index: &Index,
+    ) -> Result<(), LockError> {
         let version = Version::parse(&self.locked.version);
         for entry in index
             .versions_of(&self.locked.name)
@@ -538,7 +542,7 @@ impl<'a> Search<'a> {
     }
 
     /// What is wrong, when the archive was not found.
-    fn problem(&self) -> Option<LockedArchiveProblem> {
+    pub(super) fn problem(&self) -> Option<LockedArchiveProblem> {
         let fault = match (&self.found, &self.differs) {
             (true, _) => return None,
             (false, Some(found_sha256)) => ArchiveFault::DiffersFromLock {
