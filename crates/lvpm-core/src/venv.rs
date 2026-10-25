@@ -209,6 +209,9 @@ pub fn create(
         false => None,
     };
     let min_lv = proj.as_ref().and_then(|p| p.labview.as_deref());
+    // Read before anything is chosen, so a `labview` that is no year is refused
+    // whichever way the installation is picked.
+    let min_year = min_lv.map(project::labview_year).transpose()?;
 
     ensure!(!targets.is_empty(), "no LabVIEW installations detected");
     let want = labview_version.or(min_lv).ok_or_else(|| {
@@ -224,15 +227,7 @@ pub fn create(
         "{} cannot mount a venv: LVAddons.AdditionalLocations needs LabVIEW 2024 Q1 or later",
         target.label()
     );
-    if let Some(min) = min_lv.and_then(|v| v.trim().parse::<u32>().ok())
-        && target.year() < min
-    {
-        bail!(
-            "{} is older than the project's labview = {min} — a venv may bind to a newer LabVIEW \
-             than the project's minimum, not an older one",
-            target.label()
-        );
-    }
+    target::require_minimum(&target, min_year)?;
 
     // A project that has no manifest yet gets one, pinned to the LabVIEW it
     // was just bound to — that is what the minimum means from here on.
@@ -375,6 +370,30 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_venv_is_refused_for_a_manifest_labview_that_is_no_year_or_newer_than_the_installation() {
+        for (labview, said) in [("soon", "not a year"), ("2030", "is older than")] {
+            let repo = scratch_dir(&format!("minimum-{labview}"));
+            std::fs::write(
+                repo.join(project::FILE_NAME),
+                format!("[project]\nlabview = \"{labview}\"\n"),
+            )
+            .unwrap();
+            let why = create(
+                &repo,
+                Some("2026"),
+                Path::new(".lv-venv"),
+                &[labview_2026()],
+                &NullSink,
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(why.contains(said), "{labview}: {why}");
+            assert!(!repo.join(".lv-venv").exists());
+            let _ = std::fs::remove_dir_all(&repo);
+        }
     }
 
     #[test]

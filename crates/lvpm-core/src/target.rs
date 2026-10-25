@@ -154,6 +154,24 @@ pub fn select(targets: &[LvTarget], want: &str) -> Result<LvTarget> {
     );
 }
 
+/// The project's `labview` is a minimum: a newer LabVIEW may stand in for it,
+/// an older one may not. `minimum` is the year [`labview_year`] read, if the
+/// project names one.
+///
+/// [`labview_year`]: crate::project::labview_year
+pub(crate) fn require_minimum(t: &LvTarget, minimum: Option<u32>) -> Result<()> {
+    if let Some(year) = minimum
+        && t.year() < year
+    {
+        bail!(
+            "{} is older than the project's labview = {year} — a newer LabVIEW may stand in for \
+             the project's minimum, not an older one",
+            t.label()
+        );
+    }
+    Ok(())
+}
+
 /// Which kind of place a `Target Dir` token names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenClass {

@@ -160,6 +160,9 @@ impl<'a> OpEnv<'a> {
         let manifest_path = repo.join(project::FILE_NAME);
         let proj = project::read(&manifest_path)?;
         let min_lv = proj.labview.as_deref();
+        // Read before anything is chosen, so a `labview` that is no year is
+        // refused whichever way the installation is picked.
+        let min_year = min_lv.map(project::labview_year).transpose()?;
         let want = self
             .flags
             .labview_version
@@ -177,15 +180,7 @@ impl<'a> OpEnv<'a> {
             "no LabVIEW installations detected"
         );
         let t = target::select(&self.targets, want)?;
-        if let Some(min) = min_lv.and_then(|v| v.trim().parse::<u32>().ok())
-            && t.year() < min
-        {
-            bail!(
-                "{} is older than the project's labview = {min} — a newer LabVIEW may stand in for \
-                 the project's minimum, not an older one",
-                t.label()
-            );
-        }
+        target::require_minimum(&t, min_year)?;
         self.sink.emit(Event::HeadlessInstallationChosen {
             repo: repo.to_path_buf(),
             labview: t.label(),
@@ -303,6 +298,33 @@ mod tests {
         );
         let why = env.roots().unwrap_err().to_string();
         assert!(why.starts_with("pick a destination:"), "{why}");
+    }
+
+    #[test]
+    fn a_headless_install_reads_the_manifests_labview_the_way_locking_does() {
+        for (labview, said) in [
+            ("soon", Some("not a year")),
+            ("26", Some("not a year")),
+            ("2030", Some("is older than")),
+            ("2024", None),
+        ] {
+            let repo = scratch_dir(&format!("headless-{labview}"));
+            std::fs::write(
+                repo.join(project::FILE_NAME),
+                format!("[project]\nlabview = \"{labview}\"\n"),
+            )
+            .unwrap();
+            let mut env = OpEnv::new(&NullSink, config(), vec![labview_2026()], repo.clone());
+            env.flags.labview_version = Some("2026".into());
+            match (env.headless_roots(&repo), said) {
+                (Ok(_), None) => {}
+                (Err(why), Some(said)) => {
+                    assert!(format!("{why:#}").contains(said), "{labview}: {why:#}")
+                }
+                (outcome, _) => panic!("{labview}: {:?}", outcome.map(|_| ())),
+            }
+            let _ = std::fs::remove_dir_all(&repo);
+        }
     }
 
     #[test]

@@ -25,6 +25,7 @@
 //! `labview` is a minimum: a venv binds to that version or a newer one, never
 //! an older one.
 
+use crate::errors::LockError;
 use crate::version::Version;
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -99,6 +100,17 @@ impl PackageArg {
             name: name.to_string(),
             constraint: constraint.map(str::to_string),
         })
+    }
+}
+
+/// The year a manifest's `labview` names, `"2024"` for LabVIEW 2024. The one
+/// reading of that value: locking, a headless install and a venv all use it.
+pub fn labview_year(labview: &str) -> Result<u32, LockError> {
+    match labview.trim().parse::<u32>() {
+        Ok(year) if year >= 2000 => Ok(year),
+        _ => Err(LockError::LabviewNotAYear {
+            value: labview.to_string(),
+        }),
     }
 }
 

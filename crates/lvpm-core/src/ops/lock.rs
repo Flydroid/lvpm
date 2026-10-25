@@ -477,12 +477,7 @@ pub(super) fn read_lock(path: &Path) -> Result<Lockfile, LockError> {
 
 /// The project's LabVIEW in the units of an index's `lv_min`: 24.0 for 2024.
 pub(super) fn lv_gate(labview: &str) -> Result<f64, LockError> {
-    match labview.trim().parse::<u32>() {
-        Ok(year) if year >= 2000 => Ok(f64::from(year - 2000)),
-        _ => Err(LockError::LabviewNotAYear {
-            value: labview.to_string(),
-        }),
-    }
+    Ok(f64::from(crate::project::labview_year(labview)? - 2000))
 }
 
 /// The solver's answer for the manifest's direct and dev dependencies and the
