@@ -325,6 +325,14 @@ machine's absolutes replaced. `lvpm linkfix` writes those four things into the
 layouts pylabview documents (`src/linkfix.rs`). Files reached through an
 `.llb` path are left alone: LLB-relative links are canonical.
 
+A VI saved with its compiled code embedded asks to be saved for another
+reason: a newer LabVIEW recompiles it. `linkfix` also makes such a VI
+source-only, as LabVIEW would save it: it sets the "separate compiled code"
+flag (recomputing the block-diagram password hashes that cover it), adds the
+`NI.LV.All.SourceOnly` VI tag, and removes the embedded code blocks. The same
+source-only property is set on `.lvlib` and `.lvclass` XML files;
+`--keep-compiled-code` skips both changes.
+
 ```console
 $ lvpm linkfix                         # the venv in effect
 $ lvpm linkfix --tree .project --dry-run --verbose

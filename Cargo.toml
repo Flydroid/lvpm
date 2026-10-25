@@ -8,6 +8,8 @@ repository = "https://github.com/Flydroid/lvpm"
 [dependencies]
 anyhow = "1.0.104"
 clap = { version = "4.6.6", features = ["derive"] }
+flate2 = "1.1.9"
+quick-xml = "0.38.3"
 md-5 = "0.11.0"
 reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "default-tls"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }

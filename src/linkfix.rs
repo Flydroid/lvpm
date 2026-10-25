@@ -25,9 +25,21 @@
 //! object after an edit is re-padded; and files older than LabVIEW 2014 carry
 //! a qualified-name header in each link section that 2014 dropped, so a table
 //! is always rewritten in the file's own version, never transplanted.
+//!
+//! A VI saved with its compiled code embedded is recompiled when a newer
+//! LabVIEW loads it, and that recompile alone asks for a save; an old VI that
+//! is source-only loads clean. [`separate_compiled_code`] therefore makes such
+//! a VI source-only the way LabVIEW stores it: the "separate compiled code"
+//! flag, the `NI.LV.All.SourceOnly` VI tag, and no embedded code blocks.
+//! The flag alone is not enough: without the tag LabVIEW recompiles and saves
+//! the code back in (measured 2026-10-25, ths-config-validation venv).
 
 use anyhow::{bail, ensure, Context, Result};
+use md5::{Digest, Md5};
+use quick_xml::events::{BytesStart, Event};
+use quick_xml::Reader;
 use std::collections::{BTreeMap, HashMap};
+use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
@@ -127,6 +139,293 @@ impl Rsrc {
         let v = be32(&s.data, 0)?;
         Ok((((v >> 28) & 0xF) * 10 + ((v >> 24) & 0xF), (v >> 20) & 0xF))
     }
+
+    fn section(&self, ident: &[u8; 4]) -> Option<&Section> {
+        self.sections.iter().find(|s| &s.ident == ident)
+    }
+
+    fn section_mut(&mut self, ident: &[u8; 4]) -> Option<&mut Section> {
+        self.sections.iter_mut().find(|s| &s.ident == ident)
+    }
+
+    /// Remove every section of the `drop` blocks, optionally append a new
+    /// one-section block, and rebuild the block list. Returns how many
+    /// sections were removed.
+    ///
+    /// The list is `u32 count-1`, `count` 12-byte block headers `(ident,
+    /// u32 sections-1, u32 offset)`, then all 20-byte section starts in block
+    /// order; the section-names list follows it and is kept as is. A table
+    /// that is not laid out like that, or a named section in a dropped block,
+    /// is refused.
+    fn edit_blocks(&mut self, drop: &[[u8; 4]], add: Option<([u8; 4], Vec<u8>)>) -> Result<usize> {
+        let old = &self.info;
+        let base = (be32(old, 12)? as usize).checked_sub(32).context("block list inside the header copy")?;
+        let list_end = (be32(old, 16)? as usize).checked_sub(32).context("block list size too small")?;
+        let nblocks = be32(old, base)? as usize + 1;
+        let mut expect = 4 + 12 * nblocks;
+        let mut kept: Vec<([u8; 4], Vec<usize>)> = Vec::new();
+        let mut dropped = 0;
+        for i in 0..nblocks {
+            let hdr = base + 4 + 12 * i;
+            let ident: [u8; 4] = old.get(hdr..hdr + 4).context("truncated block list")?.try_into()?;
+            let scount = be32(old, hdr + 4)? as usize + 1;
+            ensure!(be32(old, hdr + 8)? as usize == expect, "block list is not contiguous");
+            let starts: Vec<usize> = (0..scount).map(|j| base + expect + 20 * j).collect();
+            expect += 20 * scount;
+            if drop.contains(&ident) {
+                for &st in &starts {
+                    ensure!(be32(old, st + 4)? == u32::MAX, "named section in {}", String::from_utf8_lossy(&ident));
+                }
+                dropped += scount;
+            } else {
+                kept.push((ident, starts));
+            }
+        }
+        ensure!(base + expect == list_end, "block list size does not match its contents");
+        if dropped == 0 && add.is_none() {
+            return Ok(0);
+        }
+        if let Some((ident, _)) = &add {
+            ensure!(!kept.iter().any(|(k, _)| k == ident), "block {} already present", String::from_utf8_lossy(ident));
+        }
+        let blocks = kept.len() + usize::from(add.is_some());
+
+        let mut list = ((blocks - 1) as u32).to_be_bytes().to_vec();
+        let mut soff = 4 + 12 * blocks;
+        for (ident, starts) in &kept {
+            list.extend_from_slice(ident);
+            list.extend_from_slice(&((starts.len() - 1) as u32).to_be_bytes());
+            list.extend_from_slice(&(soff as u32).to_be_bytes());
+            soff += 20 * starts.len();
+        }
+        if let Some((ident, _)) = &add {
+            list.extend_from_slice(ident);
+            list.extend_from_slice(&0u32.to_be_bytes());
+            list.extend_from_slice(&(soff as u32).to_be_bytes());
+        }
+        let mut moved = HashMap::new();
+        for (_, starts) in &kept {
+            for &st in starts {
+                moved.insert(st + 12, base + list.len() + 12);
+                list.extend_from_slice(&old[st..st + 20]);
+            }
+        }
+        // Section start: index 0, no name, data offset filled in by `write`.
+        let added_field = base + list.len() + 12;
+        if add.is_some() {
+            list.extend_from_slice(&[0, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF]);
+            list.extend_from_slice(&[0; 12]);
+        }
+        let mut info = old[..base].to_vec();
+        info.extend_from_slice(&list);
+        info.extend_from_slice(&old[list_end..]);
+        info[16..20].copy_from_slice(&((32 + base + list.len()) as u32).to_be_bytes());
+
+        self.sections.retain(|s| !drop.contains(&s.ident));
+        for s in self.sections.iter_mut() {
+            s.off_field = *moved.get(&s.off_field).context("section start not in the block list")?;
+        }
+        if let Some((ident, data)) = add {
+            self.sections.push(Section { ident, off_field: added_field, data });
+        }
+        self.info = info;
+        Ok(dropped)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Separate compiled code: one LVSR flag, and the BDPW hashes that cover it.
+// ---------------------------------------------------------------------------
+
+/// `viFlags2` bit in `LVSR` (bytes 8..12): "code saved in a separate file".
+const SOURCE_ONLY: u32 = 0x400;
+
+/// The VI tag LabVIEW keeps the "separate compiled code" setting in. Without
+/// it LabVIEW ignores [`SOURCE_ONLY`], recompiles, and saves the code back in.
+const SOURCE_ONLY_TAG: &[u8] = b"NI.LV.All.SourceOnly";
+
+/// The tag's value after its version word: a variant holding one Boolean,
+/// true, with no attributes. Same bytes in every file from LabVIEW 2012 to 2024.
+const SOURCE_ONLY_TRUE: [u8; 17] = [0, 0, 0, 1, 0, 4, 0, 0x21, 0, 1, 0, 0, 1, 0, 0, 0, 0];
+
+/// Blocks a VI carries only while its compiled code is embedded: measured on
+/// 97 VIPM packages, present in embedded VIs and in at most 0.1% of separate
+/// ones.
+const COMPILED_BLOCKS: [[u8; 4]; 23] = [
+    *b"VICD", *b"DFDS", *b"LIds", *b"TM80", *b"GCPR", *b"CCST", *b"CCSG", *b"CPMp", *b"DLDR", *b"FPTD", *b"SCSR",
+    *b"BFAL", *b"BNID", *b"NUID", *b"SUID", *b"CNST", *b"LPIN", *b"IPSR", *b"OBSG", *b"GCDI", *b"CPD2", *b"CPSP",
+    *b"CPST",
+];
+
+/// Upper bound per terminal count when recovering the BDPW salt.
+const SALT_LIMIT: u32 = 64;
+
+fn md5_of(parts: &[&[u8]]) -> [u8; 16] {
+    let mut h = Md5::new();
+    for p in parts {
+        h.update(p);
+    }
+    h.finalize().into()
+}
+
+/// `LIBN` names joined with `:`, as the BDPW hash takes them; empty if absent.
+fn library_names(rsrc: &Rsrc) -> Result<Vec<u8>> {
+    let Some(s) = rsrc.section(b"LIBN") else { return Ok(Vec::new()) };
+    let count = be32(&s.data, 0)? as usize;
+    let mut p = 4;
+    let mut names: Vec<&[u8]> = Vec::with_capacity(count);
+    for _ in 0..count {
+        let n = *s.data.get(p).context("truncated LIBN")? as usize;
+        names.push(s.data.get(p + 1..p + 1 + n).context("truncated LIBN")?);
+        p += 1 + n;
+    }
+    Ok(names.join(&b":"[..]))
+}
+
+/// MD5 of the block-diagram heap's content, which the second BDPW hash covers.
+fn heap_hash(rsrc: &Rsrc) -> Result<Option<[u8; 16]>> {
+    let raw = if let Some(s) = rsrc.section(b"BDHc").or_else(|| rsrc.section(b"BDHb")) {
+        let mut out = Vec::new();
+        flate2::read::ZlibDecoder::new(s.data.get(4..).context("truncated heap")?)
+            .read_to_end(&mut out)
+            .context("inflating the block-diagram heap")?;
+        out
+    } else if let Some(s) = rsrc.section(b"BDHP") {
+        s.data.clone()
+    } else {
+        return Ok(None);
+    };
+    let n = be32(&raw, 0)? as usize;
+    Ok(Some(md5_of(&[raw.get(4..4 + n).context("truncated heap content")?])))
+}
+
+/// The salt is three little-endian terminal counts of the connector pane;
+/// rather than count terminals, find the one the stored hash was made with.
+fn find_salt(prefix: &[u8], hash1: &[u8]) -> Option<[u8; 12]> {
+    let mut base = Md5::new();
+    base.update(prefix);
+    for sum in 0..3 * SALT_LIMIT {
+        for a in 0..=sum.min(SALT_LIMIT - 1) {
+            for b in 0..=(sum - a).min(SALT_LIMIT - 1) {
+                let c = sum - a - b;
+                if c >= SALT_LIMIT {
+                    continue;
+                }
+                let mut salt = [0u8; 12];
+                salt[..4].copy_from_slice(&a.to_le_bytes());
+                salt[4..8].copy_from_slice(&b.to_le_bytes());
+                salt[8..].copy_from_slice(&c.to_le_bytes());
+                let mut h = base.clone();
+                h.update(salt);
+                if h.finalize().as_slice() == hash1 {
+                    return Some(salt);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Add the `NI.LV.All.SourceOnly = true` tag to `VITS` unless it is there.
+///
+/// `VITS` is `u32 count` then per tag an `LStr` name and a variant; from
+/// LabVIEW 2016 each variant is preceded by its `u32` length. The layout is
+/// taken from the file's first tag, or from its version when it has none; a
+/// file without a `VITS` block gets one. Returns whether the tag was added,
+/// or `None` (changing nothing) when the layout cannot be told.
+fn tag_source_only(rsrc: &mut Rsrc) -> Result<Option<bool>> {
+    let lvsr_version = be32(&rsrc.section(b"LVSR").context("no LVSR block")?.data, 0)?;
+    let ver = rsrc.version()?;
+    let sized_by_version = if ver >= (16, 0) {
+        Some(true)
+    } else if ver <= (14, 0) {
+        Some(false)
+    } else {
+        None
+    };
+    if rsrc.section(b"VITS").is_none() {
+        if sized_by_version.is_none() {
+            return Ok(None);
+        }
+        rsrc.edit_blocks(&[], Some((*b"VITS", vec![0; 4])))?;
+    }
+    let vits = rsrc.section_mut(b"VITS").expect("present or just added");
+    let d = &vits.data;
+    let mut name = (SOURCE_ONLY_TAG.len() as u32).to_be_bytes().to_vec();
+    name.extend_from_slice(SOURCE_ONLY_TAG);
+    if d.windows(name.len()).any(|w| w == name) {
+        return Ok(Some(false));
+    }
+    let count = be32(d, 0)?;
+    let sized = if count > 0 {
+        let after = 8 + be32(d, 4)? as usize;
+        be32(d, after)? != lvsr_version
+    } else if let Some(sized) = sized_by_version {
+        sized
+    } else {
+        return Ok(None);
+    };
+    let mut tag = name;
+    if sized {
+        tag.extend_from_slice(&(4 + SOURCE_ONLY_TRUE.len() as u32).to_be_bytes());
+    }
+    tag.extend_from_slice(&lvsr_version.to_be_bytes());
+    tag.extend_from_slice(&SOURCE_ONLY_TRUE);
+    let mut out = (count + 1).to_be_bytes().to_vec();
+    out.extend_from_slice(&tag);
+    out.extend_from_slice(&d[4..]);
+    vits.data = out;
+    Ok(Some(true))
+}
+
+/// Make a VI that embeds its compiled code source-only, as LabVIEW saves
+/// such a VI: set the "separate compiled code" flag, add the matching
+/// [`SOURCE_ONLY_TAG`], and remove the [`COMPILED_BLOCKS`]. Returns false when
+/// there is nothing to do, or when the tag layout cannot be told.
+/// A VI an earlier lvpm left flagged and stripped but untagged gets the tag.
+///
+/// `BDPW` hashes `LVSR` (not the tags or the removed blocks), so both of its
+/// hashes are recomputed — with the salt recovered from, and the heap hash
+/// checked against, the hashes already stored. A VI whose hashes do not
+/// verify is refused, never guessed at.
+pub fn separate_compiled_code(rsrc: &mut Rsrc) -> Result<bool> {
+    let lvsr = rsrc.section(b"LVSR").context("no LVSR block")?.data.clone();
+    let flags = be32(&lvsr, 8)?;
+    if rsrc.section(b"VICD").is_none() {
+        return Ok(flags & SOURCE_ONLY != 0 && tag_source_only(rsrc)? == Some(true));
+    }
+    ensure!(rsrc.version()? >= (10, 0), "separate compiled code needs LabVIEW 2010 or later");
+    if tag_source_only(rsrc)?.is_none() {
+        return Ok(false);
+    }
+    if flags & SOURCE_ONLY != 0 {
+        rsrc.edit_blocks(&COMPILED_BLOCKS, None)?;
+        return Ok(true);
+    }
+    let mut new_lvsr = lvsr.clone();
+    new_lvsr[8..12].copy_from_slice(&(flags | SOURCE_ONLY).to_be_bytes());
+
+    if let Some(pw) = rsrc.section(b"BDPW").map(|s| s.data.clone()) {
+        ensure!(pw.len() >= 48, "BDPW block of {} bytes", pw.len());
+        let (pass, hash1, hash2) = (&pw[..16], &pw[16..32], &pw[32..48]);
+        let libn = library_names(rsrc)?;
+        let salt = find_salt(&[pass, &libn[..], &lvsr[..]].concat(), hash1)
+            .context("block-diagram password salt not found")?;
+        let heap = heap_hash(rsrc)?;
+        let second = |h1: &[u8]| match heap {
+            Some(bd) => md5_of(&[h1, &bd]),
+            None => md5_of(&[]),
+        };
+        ensure!(second(hash1) == hash2, "block-diagram password hash does not verify");
+        let new1 = md5_of(&[pass, &libn, &new_lvsr, &salt]);
+        let mut new_pw = pw.clone();
+        new_pw[16..32].copy_from_slice(&new1);
+        new_pw[32..48].copy_from_slice(&second(&new1));
+        rsrc.section_mut(b"BDPW").expect("checked above").data = new_pw;
+    }
+    rsrc.section_mut(b"LVSR").expect("checked above").data = new_lvsr;
+    rsrc.edit_blocks(&COMPILED_BLOCKS, None)?;
+    Ok(true)
 }
 
 // ---------------------------------------------------------------------------
@@ -954,17 +1253,19 @@ pub struct Changes {
     pub absolute: usize,
     pub qualifier: usize,
     pub vils: usize,
+    /// 1 when this file was made source-only.
+    pub separated: usize,
 }
 
 impl Changes {
     pub fn total(&self) -> usize {
-        self.owner + self.relative + self.absolute + self.qualifier + self.vils
+        self.owner + self.relative + self.absolute + self.qualifier + self.vils + self.separated
     }
 }
 
-/// What to do to one VI's link sections. Returns the new file bytes when
-/// anything changed.
-pub fn fix_vi(bytes: &[u8], vi_logical: &str, tree: &Tree) -> Result<(Option<Vec<u8>>, Changes)> {
+/// What to do to one VI's link sections, and with `separate`, its compiled
+/// code flag. Returns the new file bytes when anything changed.
+pub fn fix_vi(bytes: &[u8], vi_logical: &str, tree: &Tree, separate: bool) -> Result<(Option<Vec<u8>>, Changes)> {
     let mut rsrc = Rsrc::parse(bytes)?;
     let ver = rsrc.version()?;
     ensure!(ver >= (8, 6), "LabVIEW {}.{} is older than this tool handles", ver.0, ver.1);
@@ -972,6 +1273,11 @@ pub fn fix_vi(bytes: &[u8], vi_logical: &str, tree: &Tree) -> Result<(Option<Vec
     let vi_chain = tree.chain(vi_logical);
     let mut changes = Changes::default();
     let mut touched = false;
+
+    if separate && separate_compiled_code(&mut rsrc)? {
+        changes.separated = 1;
+        touched = true;
+    }
 
     for sec in rsrc.sections.iter_mut() {
         if !matches!(&sec.ident, b"LIvi" | b"LIbd" | b"LIfp" | b"LIds") {
@@ -1114,13 +1420,183 @@ pub fn is_vi_like(p: &Path) -> bool {
     )
 }
 
-/// Fix every VI under the given roots. Returns per-file outcomes.
+fn is_library_xml(p: &Path) -> bool {
+    matches!(
+        p.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref(),
+        Some("lvlib" | "lvclass")
+    )
+}
+
+fn source_only_property(start: &BytesStart<'_>, reader: &Reader<Cursor<&[u8]>>) -> Result<bool> {
+    if start.name().as_ref() != b"Property" {
+        return Ok(false);
+    }
+    let mut is_source_only = false;
+    let mut is_bool = false;
+    for attr in start.attributes() {
+        let attr = attr?;
+        if attr.key.as_ref() == b"Name" {
+            is_source_only = attr.decode_and_unescape_value(reader.decoder())?.as_ref() == "NI.LV.All.SourceOnly";
+        } else if attr.key.as_ref() == b"Type" {
+            is_bool = attr.decode_and_unescape_value(reader.decoder())?.as_ref() == "Bool";
+        }
+    }
+    if is_source_only {
+        ensure!(is_bool, "NI.LV.All.SourceOnly property is not Boolean");
+    }
+    Ok(is_source_only)
+}
+
+fn xml_tag_range(bytes: &[u8], from: usize, closing: bool, name: &[u8]) -> Result<(usize, usize)> {
+    let mut token = Vec::with_capacity(name.len() + 3);
+    if closing {
+        token.extend_from_slice(b"</");
+    } else {
+        token.push(b'<');
+    }
+    token.extend_from_slice(name);
+    token.push(b'>');
+    let start = bytes[from..]
+        .windows(token.len())
+        .position(|window| window == token)
+        .map(|offset| from + offset)
+        .with_context(|| format!("XML event {:?} not found after byte {from}", String::from_utf8_lossy(&token)))?;
+    Ok((start, start + token.len()))
+}
+
+fn xml_empty_tag_range(bytes: &[u8], from: usize, name: &[u8]) -> Result<(usize, usize)> {
+    let mut token = Vec::with_capacity(name.len() + 4);
+    token.push(b'<');
+    token.extend_from_slice(name);
+    token.extend_from_slice(b"/>");
+    let start = bytes[from..]
+        .windows(token.len())
+        .position(|window| window == token)
+        .map(|offset| from + offset)
+        .with_context(|| format!("empty XML event {:?} not found after byte {from}", String::from_utf8_lossy(&token)))?;
+    Ok((start, start + token.len()))
+}
+
+/// Set the LabVIEW source-only tag on an XML library or class without
+/// reserializing its other content.
+fn set_xml_source_only(bytes: &[u8]) -> Result<Option<Vec<u8>>> {
+    let mut reader = Reader::from_reader(Cursor::new(bytes));
+    reader.config_mut().trim_text(false);
+    let mut buffer = Vec::new();
+    let mut depth = 0usize;
+    let mut root_seen = false;
+    let mut root_closed = false;
+    let mut property_content = None;
+    let mut property_element = None;
+    let mut property_open = None;
+    let mut insertion = None;
+    let mut insertion_indent = Vec::new();
+    let mut raw_position = 0usize;
+
+    loop {
+        let event = reader.read_event_into(&mut buffer)?;
+        match event {
+            Event::Start(start) => {
+                let name = start.name();
+                let (tag_start, tag_end) = xml_tag_range(bytes, raw_position, false, start.as_ref())?;
+                raw_position = tag_end;
+                if !root_seen {
+                    ensure!(matches!(name.as_ref(), b"Library" | b"LVClass"), "unexpected XML root");
+                    root_seen = true;
+                    depth = 1;
+                } else {
+                    if depth == 1 {
+                        if source_only_property(&start, &reader)? {
+                            property_open = Some(tag_end);
+                        } else if insertion.is_none() {
+                            insertion = Some(tag_start);
+                            let line = bytes[..tag_start].iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
+                            insertion_indent = bytes[line..tag_start].iter().take_while(|b| **b == b' ' || **b == b'\t').copied().collect();
+                        }
+                    }
+                    if property_open.is_some() && depth > 1 {
+                        bail!("nested element in NI.LV.All.SourceOnly property");
+                    }
+                    depth += 1;
+                }
+            }
+            Event::Empty(start) => {
+                let (tag_start, tag_end) = xml_empty_tag_range(bytes, raw_position, start.as_ref())?;
+                raw_position = tag_end;
+                if root_seen && depth == 1 {
+                    if source_only_property(&start, &reader)? {
+                        property_element = Some((tag_start, tag_end));
+                    } else if insertion.is_none() {
+                        insertion = Some(tag_start);
+                        let line = bytes[..tag_start].iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
+                        insertion_indent = bytes[line..tag_start].iter().take_while(|b| **b == b' ' || **b == b'\t').copied().collect();
+                    }
+                }
+            }
+            Event::End(end) => {
+                let (tag_start, tag_end) = xml_tag_range(bytes, raw_position, true, end.name().as_ref())?;
+                raw_position = tag_end;
+                if let Some(content_start) = property_open
+                    && end.name().as_ref() == b"Property"
+                    && depth == 2
+                {
+                    property_content = Some((content_start, tag_start));
+                    property_open = None;
+                }
+                if depth == 1 {
+                    root_closed = true;
+                    if insertion.is_none() {
+                        insertion = Some(tag_start);
+                        let line = bytes[..tag_start].iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
+                        insertion_indent = bytes[line..tag_start].iter().take_while(|b| **b == b' ' || **b == b'\t').copied().collect();
+                    }
+                }
+                depth = depth.saturating_sub(1);
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+        buffer.clear();
+    }
+
+    ensure!(root_seen && root_closed, "incomplete LabVIEW XML container");
+    if let Some((start, end)) = property_content {
+        if String::from_utf8_lossy(&bytes[start..end]).trim() == "true" {
+            return Ok(None);
+        }
+        let mut fixed = Vec::with_capacity(bytes.len() + 4);
+        fixed.extend_from_slice(&bytes[..start]);
+        fixed.extend_from_slice(b"true");
+        fixed.extend_from_slice(&bytes[end..]);
+        return Ok(Some(fixed));
+    }
+    if let Some((start, end)) = property_element {
+        let mut fixed = Vec::with_capacity(bytes.len() + 12);
+        fixed.extend_from_slice(&bytes[..start]);
+        fixed.extend_from_slice(b"<Property Name=\"NI.LV.All.SourceOnly\" Type=\"Bool\">true</Property>");
+        fixed.extend_from_slice(&bytes[end..]);
+        return Ok(Some(fixed));
+    }
+
+    let at = insertion.context("no place to add source-only property")?;
+    let newline: &[u8] = if bytes.windows(2).any(|w| w == b"\r\n") { b"\r\n" } else { b"\n" };
+    let mut fixed = Vec::with_capacity(bytes.len() + 80);
+    fixed.extend_from_slice(&bytes[..at]);
+    fixed.extend_from_slice(b"<Property Name=\"NI.LV.All.SourceOnly\" Type=\"Bool\">true</Property>");
+    fixed.extend_from_slice(newline);
+    fixed.extend_from_slice(&insertion_indent);
+    fixed.extend_from_slice(&bytes[at..]);
+    Ok(Some(fixed))
+}
+
+/// Fix every VI and source-only library/class property under the given roots.
+/// Returns per-file outcomes.
 pub struct Outcome {
     pub path: PathBuf,
     pub result: Result<Changes>,
 }
 
-pub fn fix_tree(roots: &[PathBuf], dry_run: bool) -> Result<(Tree, Vec<Outcome>)> {
+pub fn fix_tree(roots: &[PathBuf], dry_run: bool, separate: bool) -> Result<(Tree, Vec<Outcome>)> {
     let tree = Tree::index(roots)?;
     let mut outcomes = Vec::new();
     // Anything addressed through an `.llb` path component stays as it is:
@@ -1130,7 +1606,10 @@ pub fn fix_tree(roots: &[PathBuf], dry_run: bool) -> Result<(Tree, Vec<Outcome>)
     let mut entries: Vec<&Entry> = tree
         .files
         .values()
-        .filter(|e| is_vi_like(&e.physical) && !lower(&e.logical).contains(".llb/"))
+        .filter(|e| {
+            (is_vi_like(&e.physical) || separate && is_library_xml(&e.physical))
+                && !lower(&e.logical).contains(".llb/")
+        })
         .collect();
     entries.sort_by(|a, b| a.logical.cmp(&b.logical));
     for e in entries {
@@ -1141,21 +1620,35 @@ pub fn fix_tree(roots: &[PathBuf], dry_run: bool) -> Result<(Tree, Vec<Outcome>)
                 continue;
             }
         };
-        // Only VIs and controls: a `.vim` that is really an LLB (RSRC type
-        // LVAR) or anything else in the tree is not ours.
-        if bytes.len() < 32 || &bytes[..4] != b"RSRC" || !matches!(&bytes[8..12], b"LVIN" | b"LVCC") {
-            continue;
-        }
-        let result = fix_vi(&bytes, &e.logical, &tree).and_then(|(new, ch)| {
-            if let Some(new) = new
-                && !dry_run
-            {
-                let tmp = e.physical.with_extension("lvpm-tmp");
-                std::fs::write(&tmp, &new)?;
-                std::fs::rename(&tmp, &e.physical)?;
+        let result = if is_library_xml(&e.physical) {
+            set_xml_source_only(&bytes).and_then(|new| {
+                let mut changes = Changes::default();
+                if let Some(new) = new {
+                    if !dry_run {
+                        let tmp = e.physical.with_extension("lvpm-tmp");
+                        std::fs::write(&tmp, &new)?;
+                        std::fs::rename(&tmp, &e.physical)?;
+                    }
+                    changes.separated = 1;
+                }
+                Ok(changes)
+            })
+        } else {
+            // A `.vim` that is really an LLB (RSRC type LVAR) is not ours.
+            if bytes.len() < 32 || &bytes[..4] != b"RSRC" || !matches!(&bytes[8..12], b"LVIN" | b"LVCC") {
+                continue;
             }
-            Ok(ch)
-        });
+            fix_vi(&bytes, &e.logical, &tree, separate).and_then(|(new, ch)| {
+                if let Some(new) = new
+                    && !dry_run
+                {
+                    let tmp = e.physical.with_extension("lvpm-tmp");
+                    std::fs::write(&tmp, &new)?;
+                    std::fs::rename(&tmp, &e.physical)?;
+                }
+                Ok(ch)
+            })
+        };
         outcomes.push(Outcome { path: e.physical.clone(), result });
     }
     Ok((tree, outcomes))
@@ -1201,6 +1694,28 @@ mod tests {
     }
 
     #[test]
+    fn library_xml_sets_source_only_and_preserves_other_bytes() {
+        let explicit = b"<?xml version='1.0'?>\n<Library LVVersion=\"24008000\">\n\t<Property Name=\"NI.Lib.Version\" Type=\"Str\">1.0</Property>\n\t<Property Name=\"NI.LV.All.SourceOnly\" Type=\"Bool\">false</Property>\n\t<Item Name=\"A.vi\" Type=\"VI\"/>\n</Library>\n";
+        let explicit_expected = explicit
+            .windows(b"false".len())
+            .position(|w| w == b"false")
+            .map(|at| [&explicit[..at], b"true", &explicit[at + 5..]].concat())
+            .unwrap();
+        assert_eq!(set_xml_source_only(explicit).unwrap(), Some(explicit_expected));
+
+        let implicit = b"<LVClass LVVersion=\"24008000\">\n\t<Item Name=\"A.ctl\" Type=\"VI\"/>\n</LVClass>\n";
+        let updated = set_xml_source_only(implicit).unwrap().unwrap();
+        let inserted = updated.windows(b"NI.LV.All.SourceOnly".len()).position(|w| w == b"NI.LV.All.SourceOnly").unwrap();
+        let item = updated.windows(b"<Item".len()).position(|w| w == b"<Item").unwrap();
+        assert!(inserted < item);
+        assert!(updated.windows(b">true</Property>".len()).any(|w| w == b">true</Property>"));
+        assert_eq!(set_xml_source_only(&updated).unwrap(), None);
+
+        let already_true = b"<Library LVVersion=\"24008000\"><Property Name=\"NI.LV.All.SourceOnly\" Type=\"Bool\">true</Property></Library>";
+        assert_eq!(set_xml_source_only(already_true).unwrap(), None);
+    }
+
+    #[test]
     fn container_round_trips_byte_exactly() {
         let Some(b) = sample() else { return };
         let r = Rsrc::parse(&b).unwrap();
@@ -1224,6 +1739,58 @@ mod tests {
     }
 
     #[test]
+    fn dropped_blocks_leave_a_parseable_file() {
+        let Some(b) = sample() else { return };
+        let r = Rsrc::parse(&b).unwrap();
+        let gone = r.sections.iter().find(|s| &s.ident != b"LVSR").unwrap().ident;
+        let mut d = Rsrc::parse(&b).unwrap();
+        assert!(d.edit_blocks(&[gone], None).unwrap() > 0);
+        assert_eq!(d.edit_blocks(&[gone], None).unwrap(), 0);
+        let again = Rsrc::parse(&d.write()).unwrap();
+        let want: Vec<_> = r.sections.iter().filter(|s| s.ident != gone).map(|s| (s.ident, &s.data)).collect();
+        let got: Vec<_> = again.sections.iter().map(|s| (s.ident, &s.data)).collect();
+        assert_eq!(got, want);
+        assert_eq!(again.write(), d.write());
+
+        let mut a = Rsrc::parse(&b).unwrap();
+        a.edit_blocks(&[], Some((*b"ZZZZ", vec![1, 2, 3]))).unwrap();
+        let again = Rsrc::parse(&a.write()).unwrap();
+        assert_eq!(again.section(b"ZZZZ").unwrap().data, vec![1, 2, 3]);
+        assert_eq!(again.sections.len(), r.sections.len() + 1);
+    }
+
+    #[test]
+    fn source_only_tag_follows_the_file_layout() {
+        let rsrc = |version: u32, vits: Vec<u8>| Rsrc {
+            head: [0; 32],
+            info: Vec::new(),
+            sections: vec![
+                Section { ident: *b"LVSR", off_field: 0, data: [version.to_be_bytes(), [0; 4]].concat() },
+                Section { ident: *b"VITS", off_field: 0, data: vits },
+            ],
+        };
+        let mut lv13 = rsrc(0x1300_8000, vec![0, 0, 0, 0]);
+        assert_eq!(tag_source_only(&mut lv13).unwrap(), Some(true));
+        let mut want = vec![0, 0, 0, 1, 0, 0, 0, 20];
+        want.extend_from_slice(SOURCE_ONLY_TAG);
+        want.extend_from_slice(&[0x13, 0, 0x80, 0]);
+        want.extend_from_slice(&SOURCE_ONLY_TRUE);
+        assert_eq!(lv13.section(b"VITS").unwrap().data, want);
+        assert_eq!(tag_source_only(&mut lv13).unwrap(), Some(false));
+        assert_eq!(lv13.section(b"VITS").unwrap().data, want, "tag added twice");
+
+        let other = [&[0, 0, 0, 1, 0, 0, 0, 1, b'x', 0, 0, 0, 4][..], &[0x17, 0, 0x80, 0]].concat();
+        let mut lv17 = rsrc(0x1700_8000, other.clone());
+        assert_eq!(tag_source_only(&mut lv17).unwrap(), Some(true));
+        let d = &lv17.section(b"VITS").unwrap().data;
+        assert_eq!(&d[..4], &[0, 0, 0, 2]);
+        assert_eq!(&d[28..32], &21u32.to_be_bytes());
+        assert_eq!(&d[d.len() - other.len() + 4..], &other[4..]);
+
+        assert_eq!(tag_source_only(&mut rsrc(0x1500_8000, vec![0, 0, 0, 0])).unwrap(), None);
+    }
+
+    #[test]
     fn relative_paths_resolve_like_labview() {
         let up = vec![b"".to_vec(), b"".to_vec(), b"JKI JSON Serialization.lvlib".to_vec()];
         assert_eq!(
@@ -1232,6 +1799,17 @@ mod tests {
         );
         let same = vec![b"".to_vec(), b"UTF-8 String.lvclass".to_vec()];
         assert_eq!(resolve_relative("vi.lib/a/b", &same).unwrap(), "vi.lib/a/b/UTF-8 String.lvclass");
+    }
+
+    #[test]
+    fn salt_is_recovered_from_the_stored_hash() {
+        let prefix = b"password-md5 + LIBN + LVSR";
+        let mut salt = [0u8; 12];
+        salt[..4].copy_from_slice(&3u32.to_le_bytes());
+        salt[8..].copy_from_slice(&7u32.to_le_bytes());
+        let hash1 = md5_of(&[prefix, &salt]);
+        assert_eq!(find_salt(prefix, &hash1), Some(salt));
+        assert_eq!(find_salt(prefix, &[0u8; 16]), None);
     }
 
     #[test]

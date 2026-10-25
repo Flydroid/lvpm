@@ -264,12 +264,9 @@ enum Cmd {
         #[arg(long = "ini", value_name = "KEY=VALUE")]
         ini_keys: Vec<String>,
     },
-    /// Rewrite the linker tables of installed VIs the way a LabVIEW relink
-    /// would, without LabVIEW: owner paths, relative paths and build-machine
-    /// absolutes become `<vilib>`-token paths, and links into other libraries
-    /// get their qualifier. Stops the "save changes?" dialog a venv otherwise
-    /// raises on project close. Defaults to the venv in effect; `--tree` takes
-    /// any LabVIEW-shaped folder (or a venv store) instead.
+    /// Rewrite installed VI links and set libraries/classes source-only the
+    /// way LabVIEW saves them. Defaults to the venv in effect; `--tree` takes
+    /// any LabVIEW-shaped folder or venv store.
     Linkfix {
         /// A folder to fix instead of the venv: a venv `.project` store, or a
         /// LabVIEW-shaped tree with `vi.lib`, `user.lib`, ... at its top.
@@ -281,6 +278,10 @@ enum Cmd {
         /// Name every changed and every skipped file.
         #[arg(long, short)]
         verbose: bool,
+        /// Leave compiled-code settings unchanged. By default VIs are made
+        /// source-only and library/class XML is marked source-only too.
+        #[arg(long)]
+        keep_compiled_code: bool,
     },
     /// Show what lvpm has installed into the selected target.
     List,
@@ -379,7 +380,9 @@ fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Launch { lvproj, ini_keys } => cmd_launch(&cli, lvproj.as_deref(), ini_keys),
-        Cmd::Linkfix { tree, dry_run, verbose } => cmd_linkfix(&cli, tree.as_deref(), *dry_run, *verbose),
+        Cmd::Linkfix { tree, dry_run, verbose, keep_compiled_code } => {
+            cmd_linkfix(&cli, tree.as_deref(), *dry_run, *verbose, !*keep_compiled_code)
+        }
         Cmd::List => cmd_list(&cli),
         Cmd::Search { query } => cmd_search(&cli, query),
     }
@@ -1722,7 +1725,7 @@ fn cmd_app_probe(cli: &Cli, ids: &[String]) -> Result<()> {
 
 /// Fix linker tables in place — see [`linkfix`]. A venv store is a set of
 /// `<package>/1/` roots; anything else is one LabVIEW-shaped root.
-fn cmd_linkfix(cli: &Cli, tree: Option<&Path>, dry_run: bool, verbose: bool) -> Result<()> {
+fn cmd_linkfix(cli: &Cli, tree: Option<&Path>, dry_run: bool, verbose: bool, separate: bool) -> Result<()> {
     let roots: Vec<PathBuf> = match tree {
         Some(t) => {
             let store_like = linkfix::venv_roots(t)?;
@@ -1739,7 +1742,7 @@ fn cmd_linkfix(cli: &Cli, tree: Option<&Path>, dry_run: bool, verbose: bool) -> 
     ensure!(!roots.is_empty(), "nothing to fix: no package roots found");
     println!("{}fixing linker tables under {} root(s)", if dry_run { "dry run: " } else { "" }, roots.len());
 
-    let (_tree, outcomes) = linkfix::fix_tree(&roots, dry_run)?;
+    let (_tree, outcomes) = linkfix::fix_tree(&roots, dry_run, separate)?;
     let mut total = linkfix::Changes::default();
     let (mut changed, mut clean, mut skipped) = (0usize, 0usize, 0usize);
     for o in &outcomes {
@@ -1751,8 +1754,18 @@ fn cmd_linkfix(cli: &Cli, tree: Option<&Path>, dry_run: bool, verbose: bool) -> 
                 total.absolute += c.absolute;
                 total.qualifier += c.qualifier;
                 total.vils += c.vils;
+                total.separated += c.separated;
                 if verbose {
-                    println!("  {:<60} owner {} rel {} abs {} qual {} vils {}", o.path.display(), c.owner, c.relative, c.absolute, c.qualifier, c.vils);
+                    println!(
+                        "  {:<60} owner {} rel {} abs {} qual {} vils {} sep {}",
+                        o.path.display(),
+                        c.owner,
+                        c.relative,
+                        c.absolute,
+                        c.qualifier,
+                        c.vils,
+                        c.separated
+                    );
                 }
             }
             Ok(_) => clean += 1,
@@ -1765,13 +1778,14 @@ fn cmd_linkfix(cli: &Cli, tree: Option<&Path>, dry_run: bool, verbose: bool) -> 
         }
     }
     println!(
-        "\n{} VIs looked at: {changed} {}, {clean} already clean, {skipped} skipped",
+        "\n{} LabVIEW files looked at: {changed} {}, {clean} already clean, {skipped} skipped",
         outcomes.len(),
         if dry_run { "would change" } else { "changed" }
     );
     println!(
-        "  edits: owner paths {}, relative paths {}, build-machine absolutes {}, qualifiers {}, owner refs {}",
-        total.owner, total.relative, total.absolute, total.qualifier, total.vils
+        "  edits: owner paths {}, relative paths {}, build-machine absolutes {}, qualifiers {}, owner refs {}, \
+         compiled code separated {}",
+        total.owner, total.relative, total.absolute, total.qualifier, total.vils, total.separated
     );
     if skipped > 0 && !verbose {
         println!("  (--verbose names the skipped files and why)");
