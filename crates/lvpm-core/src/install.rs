@@ -407,7 +407,7 @@ pub fn check_record(roots: &Roots, manifest: &Manifest) -> Result<()> {
         .collect();
     if let Some(first) = outside.first() {
         bail!(
-            "refusing to remove {}: its install record names {} path(s) outside this \
+            "refusing {}: its install record names {} path(s) outside this \
              destination, the first {first:?}; nothing was removed or run",
             manifest.name,
             outside.len()

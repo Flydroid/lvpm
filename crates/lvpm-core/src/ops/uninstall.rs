@@ -12,7 +12,7 @@ use crate::events::{Event, HookKind, UnrunReason};
 use crate::install;
 use crate::project::{Constraint, same_name};
 use anyhow::{Context, Result, ensure};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Remove a package, or every package installed in the destination, and run
 /// their uninstall hooks. One bad package does not strand the rest of an `all`
@@ -108,6 +108,23 @@ fn say_if_still_listed(env: &OpEnv, package: &str) {
     }
 }
 
+/// Where the PostUninstall hook is copied to run from: a file directly in the
+/// temp directory, whatever the record's package name holds. The name comes
+/// from a file on disk, so anything but letters, digits, `_`, `-` and `.` (a
+/// separator, a drive or stream colon) is replaced.
+fn staged_hook_path(package: &str) -> PathBuf {
+    let name: String = package
+        .chars()
+        .map(
+            |c| match c.is_alphanumeric() || matches!(c, '_' | '-' | '.') {
+                true => c,
+                false => '_',
+            },
+        )
+        .collect();
+    std::env::temp_dir().join(format!("lvpm-{name}-PostUninstall.vi"))
+}
+
 /// Remove one package and run its uninstall hooks. Returns the file count, so
 /// the caller knows whether anything left disk and a palette rebuild is owed.
 pub fn uninstall_one(env: &OpEnv, session: &mut InstallSession, package: &str) -> Result<usize> {
@@ -145,7 +162,7 @@ pub fn uninstall_one(env: &OpEnv, session: &mut InstallSession, package: &str) -
     // hook VI itself, so it runs from a copy that outlives the uninstall.
     let post = match &before.post_uninstall_vi {
         Some(hook) if hooks => {
-            let tmp = std::env::temp_dir().join(format!("lvpm-{}-PostUninstall.vi", before.name));
+            let tmp = staged_hook_path(&before.name);
             match std::fs::copy(hook, &tmp) {
                 Ok(_) => Some(tmp),
                 Err(e) => {
@@ -257,6 +274,33 @@ mod tests {
         let mut env = OpEnv::new(sink, config, Vec::new(), dir.to_path_buf());
         env.flags.prefix = Some(dir.to_path_buf());
         env
+    }
+
+    #[test]
+    fn the_copy_a_post_uninstall_hook_runs_from_is_a_file_in_the_temp_directory_whatever_the_name()
+    {
+        let temp = std::env::temp_dir();
+        for name in [
+            "oglib_error",
+            "..\\..\\evil",
+            "../../evil",
+            "a/b\\c",
+            "C:\\evil",
+            "stream:name",
+            "..",
+        ] {
+            let staged = staged_hook_path(name);
+            assert_eq!(staged.parent(), Some(temp.as_path()), "{name}: {staged:?}");
+            let file = staged.file_name().unwrap().to_string_lossy();
+            assert!(
+                !file.contains(['/', '\\', ':']) && file.ends_with("-PostUninstall.vi"),
+                "{name}: {file}"
+            );
+        }
+        assert_eq!(
+            staged_hook_path("oglib_error").file_name().unwrap(),
+            "lvpm-oglib_error-PostUninstall.vi"
+        );
     }
 
     #[test]

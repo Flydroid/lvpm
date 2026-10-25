@@ -60,6 +60,16 @@ pub fn run_hooks(env: &OpEnv, package: Option<&str>, all: bool, timeout_secs: u6
     let mut conn: Option<Connection> = None;
     let mut failed = 0usize;
     for (m, vi) in &work {
+        // The record is a file anyone could have written, and the VI it names
+        // runs inside LabVIEW: it must be one lvpm extracted.
+        if let Err(why) = install::check_record(&roots, m) {
+            env.sink.emit(Event::RerunHookFailed {
+                package: m.name.clone(),
+                error: format!("{why:#}"),
+            });
+            failed += 1;
+            continue;
+        }
         if !vi.is_file() {
             env.sink.emit(Event::RerunHookViGone {
                 package: m.name.clone(),
@@ -215,6 +225,58 @@ pub fn run_hook_vi(
 mod tests {
     use super::super::testing;
     use super::*;
+
+    /// An install record for `name` in `fake`'s store whose PostInstall hook is
+    /// the VI `vi`.
+    fn record_with_hook(fake: &testing::FakeInstallation, name: &str, vi: &Path) {
+        let store = fake.roots().store_dir();
+        std::fs::create_dir_all(&store).unwrap();
+        let record = serde_json::json!({
+            "name": name, "version": "1.0", "display_name": null, "installed_at": 0,
+            "target": "fake", "files": [], "skipped_hooks": [],
+            "post_install_vi": vi.to_string_lossy().replace('\\', "/"),
+        });
+        std::fs::write(store.join(format!("{name}.json")), record.to_string()).unwrap();
+    }
+
+    #[test]
+    fn a_hook_vi_outside_the_hooks_directory_is_refused_and_not_run() {
+        let dir = testing::scratch_dir("hooks-record");
+        let fake = testing::FakeInstallation::new(&dir);
+        // Both hooks exist on disk. Only `kept` is where lvpm extracts hook VIs.
+        let kept = fake.roots().hooks_dir().join("kept").join("PostInstall.vi");
+        let planted = dir.join("planted.vi");
+        for vi in [&kept, &planted] {
+            std::fs::create_dir_all(vi.parent().unwrap()).unwrap();
+            std::fs::write(vi, "vi").unwrap();
+        }
+        record_with_hook(&fake, "kept", &kept);
+        record_with_hook(&fake, "planted", &planted);
+
+        let sink = testing::Recorded::default();
+        let mut env = testing::env_on(&sink, &dir);
+        fake.place(&mut env);
+        env.flags.labview_version = Some("2099".into());
+        let why = run_hooks(&env, None, true, 1).unwrap_err().to_string();
+        assert_eq!(why, "2 hook(s) failed");
+
+        let events = sink.events();
+        let started: Vec<&str> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::RerunHookStarting { package } => Some(package.as_str()),
+                _ => None,
+            })
+            .collect();
+        // The one in place is tried, and fails only because the fake has no VI Server.
+        assert_eq!(started, ["kept"], "{events:?}");
+        let refused = events.iter().any(|event| {
+            matches!(event, Event::RerunHookFailed { package, error }
+                if package == "planted" && error.contains("outside this destination"))
+        });
+        assert!(refused, "{events:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn a_scratch_prefix_has_no_labview_to_run_hooks_in() {
