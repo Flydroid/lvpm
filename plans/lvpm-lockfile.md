@@ -1995,8 +1995,9 @@ and version.
   - Commits a5274e4. New core ops: `start`, `venv_cmd` (create/status/existing/remove), `launch_cmd`, `relink`, `hooks::run_hooks`, `refresh`. `cmd_relink` and `finish` share `ops::relink::relink_in_destination`. `venv::create` takes injected venv dir and targets. Core has no terminal I/O (grep clean; clippy scenario). Unrecorded output change: `run-hooks` lines go through the stateful renderer (same open-line rule as Slice 7). Still open debt: text-valued error events; `relink --keep-open` and venv-relink paths have no recording.
 
 #### Wave 13
-- [ ] Slice 15: Cancellation before files are written
-  - [ ] Step 15.1: Point-of-no-return token; streaming fetch
+- [x] Slice 15: Cancellation before files are written
+  - [x] Step 15.1: Point-of-no-return token; streaming fetch
+  - Commits 4a5a914. `CancelToken` is an `AtomicU8` state machine: `cancel()` is accepted until `begin_unpack()`, then refused. Typed `Cancelled` in `errors.rs`. Fetch reads in 64 KiB chunks and checks the token per chunk. `begin_unpack()` sits at the top of `unpack()`, in `apply_sync` before the first change, and before an upgrade's `uninstall_one` (so a replace never deletes files and then stops). PENDING: `LVPM_TEST_LABVIEW=1` run not done because LabVIEW closed when the machine crashed; rerun once LabVIEW 2026 is up. Small: a cancelled sync reads "locking was cancelled".
 
 #### Wave 14
 - [ ] Slice 16: Documentation and help text
