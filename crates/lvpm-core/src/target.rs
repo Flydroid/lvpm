@@ -470,16 +470,16 @@ impl Roots {
             .unwrap_or_default()
     }
 
-    /// Guard against a package writing outside the sandbox, or the venv.
+    /// Guard against a package writing outside the sandbox, the venv, or the
+    /// places a LabVIEW install writes to. The same rule as for a record, so
+    /// what is installed can be uninstalled.
     pub(crate) fn check_contained(&self, p: &Path) -> Result<()> {
-        let bound = match (&self.scratch, &self.venv) {
-            (Some(root), _) => Some((root, "the scratch prefix")),
-            (None, Some(root)) => Some((root, "the venv")),
-            (None, None) => None,
+        let what = match (&self.scratch, &self.venv) {
+            (Some(_), _) => "the scratch prefix",
+            (None, Some(_)) => "the venv",
+            (None, None) => "the places a LabVIEW install writes to",
         };
-        if let Some((root, what)) = bound
-            && !p.starts_with(root)
-        {
+        if !self.is_inside(p) {
             bail!("refusing to write outside {what}: {}", p.display());
         }
         Ok(())
@@ -612,6 +612,11 @@ mod tests {
         assert!(r.is_inside(&r.expand("<vi.lib>/addons/x.vi").unwrap()));
         assert!(r.is_inside(&r.expand("<OS Public Application Data>/x/y.dat").unwrap()));
         assert!(!r.is_inside(&r.expand("<OS Boot Volume Root>/x.dll").unwrap()));
+        // Install refuses what a record may not name.
+        let drive_root = r.expand("<OS Boot Volume Root>/x.dll").unwrap();
+        assert!(r.check_contained(&drive_root).is_err());
+        r.check_contained(&r.expand("<vi.lib>/addons/x.vi").unwrap())
+            .unwrap();
         assert!(!r.is_inside(Path::new(r"C:\LV2026\..\Windows\evil.dll")));
     }
 
