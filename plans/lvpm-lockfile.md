@@ -1036,9 +1036,11 @@ Feature: lvpm sync makes the destination equal the lock
 
   Scenario Outline: an archive with different bytes is never installed
     Given <where> holds an "alpha" 2.0 archive whose bytes differ from the locked SHA-256, and nothing else holds it
+    And "gamma" 1.0 is installed in dest
     When I run "lvpm sync --prefix dest"
     Then the command fails saying the archive of "alpha" 2.0 does not match lvpm.lock
     And "alpha" 2.0 is not installed
+    And "gamma" is installed
 
     Examples:
       | where              |
@@ -1082,17 +1084,23 @@ Feature: lvpm sync makes the destination equal the lock
     When I run "lvpm sync --no-dev --prefix dest"
     Then "alpha" is installed
 
+  # --locked and --frozen only differ from a plain sync when there is a lock to
+  # be strict about, so those rows run with one, current and stale.
   Scenario Outline: bare install is sync with the same flags
+    Given the lock is <lock>
     When I run "lvpm install <flags>" and, in an identical world, "lvpm sync <flags>"
-    Then both destinations, locks and normalised outputs are identical
+    Then both runs <outcome>
+    And both destinations, locks and normalised outputs are identical
 
     Examples:
-      | flags                     |
-      | --prefix dest             |
-      | --dry-run --prefix dest   |
-      | --locked --prefix dest    |
-      | --frozen --prefix dest    |
-      | --no-dev --prefix dest    |
+      | lock    | flags                   | outcome   |
+      | missing | --prefix dest           | succeeded |
+      | missing | --dry-run --prefix dest | succeeded |
+      | missing | --no-dev --prefix dest  | succeeded |
+      | current | --locked --prefix dest  | succeeded |
+      | current | --frozen --prefix dest  | succeeded |
+      | stale   | --locked --prefix dest  | failed    |
+      | stale   | --frozen --prefix dest  | succeeded |
 
   Scenario: an unresolved requirement is warned about at sync
     Given lvpm.lock records "ni_lib_missing" as unresolved, required by "beta"
@@ -1115,7 +1123,18 @@ Feature: lvpm sync makes the destination equal the lock
     When I run "lvpm install --prefix dest"
     Then the command fails with: add labview = "<year>" under [project] in lvpm.toml
 
-  @labview
+  # Three scenarios in this file (the hook one, --global and headless) are
+  # tagged @unsafe and never run. A sync takes out every package its lock does
+  # not list, and they would run one against the user's own LabVIEW
+  # installation: the harness refuses (see `real_installation_risk` in
+  # tests/support/sandbox.rs). The hook scenario needs a PostInstall hook to
+  # fail, and a venv runs none, so it can only happen on the installation too.
+  # What they describe is checked by the scenarios that sync into --prefix
+  # trees, and by "sync into a venv". The --global and headless destinations
+  # run in core's unit tests against a fake installation (a_sync_with_global_is_
+  # exact_on_the_installation and a_headless_sync_..._is_exact_on_the_installation
+  # in ops/sync.rs).
+  @labview @unsafe
   Scenario: a hook failing mid-sync tells how to finish
     Given a lock with "hooked" whose PostInstall fails, in a venv
     When I run "lvpm sync"
@@ -1128,19 +1147,22 @@ Feature: lvpm sync makes the destination equal the lock
     When I run "lvpm sync"
     Then the venv's lvpm-installed packages equal the lock
 
-  @labview
+  @labview @unsafe
   Scenario: sync with --global on a workstation is exact
     Given the LabVIEW installation has an lvpm-installed package the lock does not list
     When I run "lvpm sync --global"
     Then that package is uninstalled and the locked set is installed
 
-  @labview
+  @labview @unsafe
   Scenario: headless sync into the manifest's LabVIEW is exact
     Given LV_RTE_HEADLESS is set, no venv, a current lock
     And that LabVIEW has an lvpm-installed package the lock does not list
     When I run "lvpm sync"
     Then that package is uninstalled and the locked set is installed
 ```
+
+The Gherkin above is the feature file as built (`tests/features/lvpm-lockfile/slice-10-exact-sync.feature`), synced back after review. A package whose name the lock records as unresolved is kept (AC-Y2 as amended); that is covered by the unit test `ops::sync::tests::a_package_the_lock_records_as_an_unresolved_requirement_is_not_removed`, since no fixture archive exists for an unresolved name.
+
 
 **Steps:**
 
@@ -1695,7 +1717,38 @@ Feature: A long operation can be cancelled until it starts writing files
     When core syncs and the token is cancelled while archives are being fetched
     Then the result is "cancelled"
     And the destination is unchanged
+
+  Scenario: cancel during add leaves both files and the destination untouched
+    Given the project depends on "alpha" ">=1.0", locked and synced into the scratch destination
+    When core adds "beta" and the token is cancelled while an archive is being hashed
+    Then the result is "cancelled"
+    And lvpm.toml and lvpm.lock are byte-identical to before
+    And the destination is unchanged
+
+  Scenario: cancel during remove leaves both files and the destination untouched
+    Given the project depends on "alpha" ">=1.0", locked and synced into the scratch destination
+    When core removes "alpha" and the token is cancelled when the first resolve event arrives
+    Then the result is "cancelled"
+    And lvpm.toml and lvpm.lock are byte-identical to before
+    And the destination is unchanged
+
+  Scenario: cancel after add has begun writing is refused and the add completes
+    Given the project depends on "alpha" ">=1.0", locked and synced into the scratch destination
+    When core adds "beta" and the token is cancelled when the sync plan is announced
+    Then cancel reports it was not accepted
+    And the edit succeeds and "beta" is locked and installed
+
+  Scenario: cancel after remove has begun writing is refused and the remove completes
+    Given the project depends on "alpha" ">=1.0", locked and synced into the scratch destination
+    When core removes "alpha" and the token is cancelled when the sync plan is announced
+    Then cancel reports it was not accepted
+    And the edit succeeds and "alpha" is neither locked nor installed
 ```
+
+The Gherkin above is the feature file as built (`tests/features/lvpm-lockfile/slice-15-cancellation-before-files-are-written.feature`), synced back after review: the add and remove scenarios were added there in the review fixes.
+
+Known limit: when `lvpm sync` has to make the lock, it writes it (and so passes the point where a cancel is accepted) before it fetches the archives. A fetch that fails then leaves the new lock with nothing synced, and a cancel during that fetch is refused. Recorded in `ops::sync::new_lock`; an in-memory lock written with the sync would close it.
+
 
 **Steps:**
 

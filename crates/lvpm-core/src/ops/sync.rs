@@ -214,6 +214,9 @@ fn new_lock(
     dry_run: bool,
 ) -> Result<Lockfile, LockError> {
     if !dry_run {
+        // shortcut: the lock is written, and cancel refused, before the
+        // archives are fetched, so a fetch that fails leaves the new lock with
+        // nothing synced. Lock in memory and write it with the sync if that bites.
         return locking::lock(env);
     }
     let previous = Lockfile::read(lock_path).ok();

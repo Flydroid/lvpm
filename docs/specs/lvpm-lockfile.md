@@ -123,6 +123,9 @@ to the per-user `sources.local` do not affect staleness.
   package, its version and the SHA-256, and gives the hint `lvpm cache add
   <file>` or a `sources.local` folder. A mismatching archive is never
   installed.
+- **Legacy install records:** a package installed before lvpm recorded the
+  archive's SHA-256 has no hash to compare. Sync cannot show it is the locked
+  archive, so it replaces it from the verified one, even at the same version.
 - **Dev dependencies** are synced by default and skipped with `--no-dev`.
 - Relink, hooks and palette refresh follow today's install rules for the
   destination, including the headless defaults. Uninstalls follow today's
@@ -226,7 +229,8 @@ when given. An explicit `--no-locked` flag restores re-locking. `lock`,
   equals the locked one.
 - AC-Y2: An lvpm-installed package that the lock does not list is
   uninstalled. Sync prints it with a reason before removing it and does not
-  prompt.
+  prompt. A package whose name the lock records as unresolved is kept: it
+  meets a requirement that no source could lock.
 - AC-Y3: A locked package whose recorded source is gone is installed from the
   cache or another configured source when an archive with the same SHA-256
   is there.
@@ -346,6 +350,8 @@ lvpm's existing docs (see the log).
 | CRUD: installed packages | `inferable` | inference | Fully driven by sync in projects. |
 | Authentication / authorization | `inferable` | inference | Local tool, anonymous feeds; unchanged. |
 | Audit | `inferable` | inference | The committed lock is the audit trail of what the project uses. Sync prints every change. |
+| Installed package named only as unresolved in the lock | `inferable` | inference | Kept by sync. The lock records the requirement as unresolved because no source lists it (the "Requirement listed in no source" answer); removing what is installed under that name would break the requirement the warning says is still there. Found in review, after build. |
+| Same-version legacy install without a SHA-256 | `inferable` | inference | Replaced from the verified archive and printed as `replace <name> <v> -> <v>`. Without a recorded hash, AC-Y1's SHA-256 equality cannot be shown any other way. |
 | Error handling: network failure at lock time | `inferable` | inference | Locking needs archives (SHA-256); cached ones are used offline. If any is unavailable, locking fails and the old lock stays (AC-L5 pattern). |
 
 ## Consistency Gate
