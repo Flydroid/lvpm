@@ -167,6 +167,18 @@ async fn install_help_says_what_it_does_in_a_project(world: &mut CliWorld) {
     }
 }
 
+#[then(expr = "it names the manifest key {string}")]
+async fn help_names_the_manifest_key(world: &mut CliWorld, key: String) {
+    let help = world
+        .output()
+        .stdout
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let quoted = format!("manifest's `{key}`");
+    assert!(help.contains(&quoted), "`{quoted}` is not in:\n{help}");
+}
+
 #[when("the README's add section is read")]
 async fn read_the_add_section(world: &mut CliWorld) {
     let text = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("README.md"))
