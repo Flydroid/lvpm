@@ -384,7 +384,15 @@ pub(super) fn resolved_version(
 ) -> Result<Option<Version>, LockError> {
     let gate = lv_gate(project.labview.as_deref().ok_or(LockError::NoLabview)?)?;
     let preferences = preferences(previous, &Moving::Nothing);
-    let resolution = resolve(env, project, index, &preferences, &[], gate)?;
+    let resolution = resolve(
+        env,
+        project,
+        index,
+        &preferences,
+        &[],
+        &Moving::Nothing,
+        gate,
+    )?;
     Ok(resolution
         .packages
         .get(&name.to_lowercase())
@@ -405,7 +413,7 @@ fn relock_in(
     let labview = project.labview.as_deref().ok_or(LockError::NoLabview)?;
     let gate = lv_gate(labview)?;
     let preferences = preferences(previous, moving);
-    let resolution = resolve(env, project, index, &preferences, pins, gate)?;
+    let resolution = resolve(env, project, index, &preferences, pins, moving, gate)?;
     let hashes = hash_archives(env, index, &resolution, previous)?;
     let feeds = index::feeds(&project.resolved_sources()?, project.default_sources);
     let lock = build(project, labview, &resolution, &hashes, &feeds);
@@ -470,13 +478,15 @@ pub(super) fn lv_gate(labview: &str) -> Result<f64, LockError> {
 
 /// The solver's answer for the manifest's direct and dev dependencies and the
 /// versions in `pins`, keeping the versions in `preferences` where they still
-/// fit.
+/// fit. The packages `moving` names are settled first: what they need moves a
+/// package that is held at its locked version, and not the other way round.
 fn resolve(
     env: &OpEnv,
     project: &Project,
     index: &Index,
     preferences: &[(String, Version)],
     pins: &[(String, Constraint)],
+    moving: &Moving,
     gate: f64,
 ) -> Result<Resolution, LockError> {
     let constraints: Vec<_> = project
@@ -486,8 +496,20 @@ fn resolve(
         .chain(pins)
         .cloned()
         .collect();
-    solve::solve(&constraints, index, preferences, Some(gate), &env.cancel).map_err(|why| match why
-    {
+    let first: Vec<String> = moving
+        .targets()
+        .iter()
+        .map(|target| target.name.clone())
+        .collect();
+    solve::solve(
+        &constraints,
+        index,
+        preferences,
+        &first,
+        Some(gate),
+        &env.cancel,
+    )
+    .map_err(|why| match why {
         SolveError::Conflict(conflict) => LockError::Conflict(name_pins(conflict, project, pins)),
         SolveError::Cancelled => Cancelled.into(),
     })
@@ -1385,6 +1407,49 @@ mod tests {
             sink.events()
         );
         assert_eq!(std::fs::read(project.lock_path()).unwrap(), written);
+    }
+
+    #[test]
+    fn upgrading_a_package_moves_what_its_newer_release_needs_whatever_the_manifest_order() {
+        for (tag, lines) in [
+            ("first", "alpha = \">=1.0\"\nbeta = \"*\"\n"),
+            ("second", "beta = \"*\"\nalpha = \">=1.0\"\n"),
+        ] {
+            let manifest = format!(
+                "[project]\nlabview = \"2023\"\n\n[sources]\ndefaults = false\n\n\
+                 [dependencies]\n{lines}"
+            );
+            let project = ProjectDir::new(
+                &format!("upgrade-order-{tag}"),
+                &manifest,
+                &[
+                    ("alpha", "1.0", "23.0", ""),
+                    ("beta", "1.0", "23.0", "alpha>=1.0"),
+                ],
+            );
+            lock(&project.env(&Recorder::default())).unwrap();
+            let packages = project.root.join("packages");
+            write_vip(
+                &packages.join("alpha-2.0.vip"),
+                ("alpha", "2.0", "23.0", ""),
+            );
+            write_vip(
+                &packages.join("beta-2.0.vip"),
+                ("beta", "2.0", "23.0", "alpha>=2.0"),
+            );
+
+            let moved = upgrade(
+                &project.env(&Recorder::default()),
+                &Upgrade::Packages(vec![target("beta")]),
+            )
+            .unwrap();
+            let locked: Vec<(&str, &str)> = moved
+                .packages
+                .iter()
+                .map(|package| (package.name.as_str(), package.version.as_str()))
+                .collect();
+            assert_eq!(locked, [("alpha", "2.0"), ("beta", "2.0")], "{lines}");
+        }
     }
 
     fn target(text: &str) -> UpgradeTarget {

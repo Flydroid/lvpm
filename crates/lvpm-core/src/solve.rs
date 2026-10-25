@@ -53,14 +53,17 @@ pub enum SolveError {
 /// against `index`.
 ///
 /// `prefs` are versions to keep when they still fit, such as the ones an
-/// existing lock holds: a new upstream release then changes nothing. `lv_gate`
-/// is the project's LabVIEW in the index's own units (`lv_min`, so 24.0 for
-/// LabVIEW 2024): no package that needs a newer LabVIEW is chosen. `None`
-/// applies no gate. A cancelled `cancel` stops the solver.
+/// existing lock holds: a new upstream release then changes nothing. `first`
+/// are packages to settle before the others, so that a preference of another
+/// package gives way to what they need, never the other way round: an upgrade's
+/// targets. `lv_gate` is the project's LabVIEW in the index's own units
+/// (`lv_min`, so 24.0 for LabVIEW 2024): no package that needs a newer LabVIEW
+/// is chosen. `None` applies no gate. A cancelled `cancel` stops the solver.
 pub fn solve(
     constraints: &[(String, Constraint)],
     index: &Index,
     prefs: &[(String, Version)],
+    first: &[String],
     lv_gate: Option<f64>,
     cancel: &CancelToken,
 ) -> Result<Resolution, SolveError> {
@@ -74,6 +77,7 @@ pub fn solve(
             .iter()
             .map(|(name, version)| (key(name), version.clone()))
             .collect(),
+        first: first.iter().map(|name| key(name)).collect(),
         lv_gate,
         cancel,
     };
@@ -234,6 +238,8 @@ struct Provider<'a> {
     /// The manifest's constraints, by lowercased name, in file order.
     direct: Vec<(String, Ranges<Version>)>,
     prefs: HashMap<String, Version>,
+    /// Lowercased names of the packages decided before the rest.
+    first: HashSet<String>,
     lv_gate: Option<f64>,
     cancel: &'a CancelToken,
 }
@@ -290,16 +296,19 @@ impl DependencyProvider for Provider<'_> {
     type P = Pkg;
     type V = Version;
     type VS = Ranges<Version>;
-    type Priority = ();
+    type Priority = bool;
     type M = Gated;
     type Err = Stopped;
 
+    /// The packages of `first` are decided first, and when one of them
+    /// conflicts with a package decided later, that one is what gives way.
     fn prioritize(
         &self,
-        _package: &Pkg,
+        package: &Pkg,
         _range: &Ranges<Version>,
         _conflicts: &PackageResolutionStatistics,
-    ) {
+    ) -> bool {
+        matches!(package, Pkg::Named(key) if self.first.contains(key))
     }
 
     fn should_cancel(&self) -> Result<(), Stopped> {
@@ -979,7 +988,7 @@ mod tests {
         };
         let token = CancelToken::new();
         token.cancel();
-        let result = solve(&manifest(&[("a", "*")]), &index, &[], None, &token);
+        let result = solve(&manifest(&[("a", "*")]), &index, &[], &[], None, &token);
         assert!(matches!(result, Err(SolveError::Cancelled)));
     }
 
@@ -1032,6 +1041,13 @@ mod tests {
         prefs: &[(String, Version)],
         lv_gate: Option<f64>,
     ) -> Result<Resolution, SolveError> {
-        solve(&manifest(lines), index, prefs, lv_gate, &CancelToken::new())
+        solve(
+            &manifest(lines),
+            index,
+            prefs,
+            &[],
+            lv_gate,
+            &CancelToken::new(),
+        )
     }
 }
