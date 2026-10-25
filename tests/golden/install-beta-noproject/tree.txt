@@ -1,8 +1,8 @@
 dest/
 dest/.lvpm/
 dest/.lvpm/installed/
-dest/.lvpm/installed/alpha.json 820051f2529df4e5185a9d53dc49520e8db70b65b96aedaf84c85da6e24515de
-dest/.lvpm/installed/beta.json ae0b1c94171f0bab681a21f74a5bcdf809b6c47c0d6f3a26ed64dee9bc282ff9
+dest/.lvpm/installed/alpha.json e0e8676ad4b71972e0b390ec2b9696f3fc0669bc99a655cafc5c465d9dcbf7bd
+dest/.lvpm/installed/beta.json 0cdd62c0df35e877e8b6e0294c237153943e10256c0bc19bc47c4b30521262d8
 dest/LabVIEW/
 dest/LabVIEW/vi.lib/
 dest/LabVIEW/vi.lib/lvpm_fixture/

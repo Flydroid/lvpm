@@ -97,7 +97,7 @@ pub fn detect() -> Result<Vec<LvTarget>> {
 }
 
 #[cfg(not(windows))]
-pub(crate) fn detect() -> Result<Vec<LvTarget>> {
+pub fn detect() -> Result<Vec<LvTarget>> {
     // LabVIEW on Linux lives under /usr/local/natinst/LabVIEW-<year>-64
     let mut out = Vec::new();
     if let Ok(rd) = std::fs::read_dir("/usr/local/natinst") {
@@ -520,18 +520,18 @@ mod tests {
         let t = LvTarget {
             version: 26.3,
             bitness: 64,
-            path: PathBuf::from(r"C:\Program Files\National Instruments\LabVIEW 2026"),
+            path: PathBuf::from("C:/Program Files/National Instruments/LabVIEW 2026"),
         };
         assert_eq!(t.year(), 2026);
         assert_eq!(t.key(), "LabVIEW-2026-64bit");
         let r = Roots::labview(&t);
         assert_eq!(
             r.expand("<vi.lib>/addons/HSE").unwrap(),
-            Path::new(r"C:\Program Files\National Instruments\LabVIEW 2026\vi.lib\addons\HSE")
+            Path::new("C:/Program Files/National Instruments/LabVIEW 2026/vi.lib/addons/HSE")
         );
         assert_eq!(
             r.expand("<menus>/Categories").unwrap(),
-            Path::new(r"C:\Program Files\National Instruments\LabVIEW 2026\menus\Categories")
+            Path::new("C:/Program Files/National Instruments/LabVIEW 2026/menus/Categories")
         );
     }
 
@@ -561,25 +561,25 @@ mod tests {
         let t = LvTarget {
             version: 26.3,
             bitness: 64,
-            path: PathBuf::from(r"C:\LV2026"),
+            path: PathBuf::from("C:/LV2026"),
         };
-        let venv = Path::new(r"C:\repo\.lv-venv");
+        let venv = Path::new("C:/repo/.lv-venv");
         let r = Roots::project(venv, &t, "oglib_error");
 
         assert_eq!(
             r.expand("<vi.lib>/_OpenG.lib/error").unwrap(),
-            Path::new(r"C:\repo\.lv-venv\oglib_error\1\vi.lib\_OpenG.lib\error")
+            Path::new("C:/repo/.lv-venv/oglib_error/1/vi.lib/_OpenG.lib/error")
         );
         assert_eq!(
             r.expand("<application>").unwrap(),
-            Path::new(r"C:\repo\.lv-venv\oglib_error\1")
+            Path::new("C:/repo/.lv-venv/oglib_error/1")
         );
         assert!(
             !r.expand("<OS Public Application Data>")
                 .unwrap()
-                .starts_with(r"C:\repo")
+                .starts_with("C:/repo")
         );
-        assert!(!r.expand("<temp>").unwrap().starts_with(r"C:\repo"));
+        assert!(!r.expand("<temp>").unwrap().starts_with("C:/repo"));
 
         // Nothing LabVIEW-class may leave the venv; machine roots are not
         // written to at all in venv mode, and the guard is what says so.
@@ -587,10 +587,7 @@ mod tests {
             .unwrap();
         assert!(r.check_contained(&r.expand("<temp>").unwrap()).is_err());
 
-        assert_eq!(
-            r.store_dir(),
-            Path::new(r"C:\repo\.lv-venv\.lvpm\installed")
-        );
+        assert_eq!(r.store_dir(), Path::new("C:/repo/.lv-venv/.lvpm/installed"));
         assert_eq!(Roots::project_store(venv, &t).store_dir(), r.store_dir());
         assert_eq!(Roots::project_store(venv, &t).application, venv);
         assert_eq!(r.venv(), Some(venv));

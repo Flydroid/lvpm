@@ -6,7 +6,7 @@
 
 use std::io::{Cursor, Write};
 use zip::write::SimpleFileOptions;
-use zip::{CompressionMethod, DateTime, ZipWriter};
+use zip::{CompressionMethod, DateTime, System, ZipWriter};
 
 /// Where a text fixture's payload file is installed (`<application>` is a
 /// scratch prefix under `--prefix`).
@@ -362,6 +362,8 @@ impl FixturePackage {
         let options = SimpleFileOptions::default()
             .compression_method(CompressionMethod::Stored)
             .last_modified_time(DateTime::default())
+            // The "made by" byte defaults to the host OS; pin it so the digest is the same everywhere.
+            .system(System::Unix)
             .unix_permissions(ZIP_ENTRY_MODE);
         let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
         let mut add = |member: &str, bytes: &[u8]| {
@@ -509,7 +511,7 @@ mod tests {
         let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
         assert_eq!(
             hex,
-            "22b602108e38af6ec1ed0a1a4fbbf851314934ee24b50d08295bf32c9b6166e3"
+            "70aa2ae4a939974873000c5bfdac3ce49484d2f251ddeafd9583c3529349ce22"
         );
     }
 

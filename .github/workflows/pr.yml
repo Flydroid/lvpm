@@ -1,0 +1,79 @@
+name: PR
+
+on:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    name: version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - name: Self-test the version check
+        run: bash ci/version-check.test.sh
+      - name: Check the version is raised
+        run: bash ci/version-check.sh origin/main
+
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      # rustup ships on both runner images; no third-party action to pin.
+      # core_io.rs runs clippy as part of the suite.
+      - name: Install Rust stable with clippy
+        run: rustup toolchain install stable --profile minimal --component clippy && rustup default stable
+        shell: bash
+      # tests/workspace.rs runs `cargo metadata --offline`, which needs every
+      # package already downloaded.
+      - name: cargo fetch
+        run: cargo fetch --locked
+        shell: bash
+      - name: cargo test
+        run: |
+          # --no-fail-fast: one run reports every failing test binary, not just the first.
+          echo "::group::cargo test --workspace --locked --no-fail-fast"
+          cargo test --workspace --locked --no-fail-fast
+          echo "::endgroup::"
+        shell: bash
+
+  # Branch protection should require only ci-ok (an admin sets it; see the
+  # spec), so adding a job or a matrix row never changes the required checks.
+  ci-ok:
+    name: ci-ok
+    if: always()
+    needs: [version, test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every job to pass
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          # Root causes (failure, cancelled) first, then jobs skipped because of them.
+          bad=$(jq -r 'to_entries | map(select(.value.result != "success")) | sort_by(.value.result == "skipped") | .[]
+            | "::error::\(.key): \(if .value.result == "skipped" then "skipped (downstream)" else .value.result end)"' <<<"$NEEDS")
+          [ -z "$bad" ] || { echo "$bad"; exit 1; }
+          echo "every PR job passed"

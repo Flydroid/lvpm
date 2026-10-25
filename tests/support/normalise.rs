@@ -3,9 +3,15 @@
 //! Only anchored patterns are replaced, never "anything that looks like a
 //! number": the sandbox's own root path, loopback address and venv port, the
 //! LabVIEW installation the venv is bound to (its directory and build number),
-//! ISO-8601 timestamps, epoch seconds under their JSON keys, and durations such
-//! as `0.3s`. A version like `2.0` or a word ending in `s` must come out
-//! unchanged, and so must a path that merely begins like an anchored one.
+//! the machine's temp dir (`<TEMP>`), the LabVIEW VI Server port (`<LV_PORT>`),
+//! lvpm's own version in the relink VI's name (`<LVPM_VERSION>`), ISO-8601
+//! timestamps, epoch seconds under their JSON keys, and durations such as
+//! `0.3s`; the `archive_sha256` field is removed with its comma; and a relative
+//! or token-rooted path such as `<SANDBOX>\work` or JSON's `dest\\LabVIEW` is
+//! spelled with `/`, so a recording made on Windows matches Linux; for the same
+//! reason the OS's "file not found" message becomes `<OS_NOT_FOUND>`. A version like
+//! `2.0` or a word ending in `s` must come out unchanged, and so must a path
+//! that merely begins like an anchored one.
 
 use regex::Regex;
 use std::path::Path;
@@ -21,6 +27,8 @@ pub const TEMP_TOKEN: &str = "<TEMP>";
 pub const EPOCH_TOKEN: &str = "<EPOCH>";
 pub const TIMESTAMP_TOKEN: &str = "<TS>";
 pub const DURATION_TOKEN: &str = "<DUR>";
+pub const LVPM_VERSION_TOKEN: &str = "<LVPM_VERSION>";
+pub const NOT_FOUND_TOKEN: &str = "<OS_NOT_FOUND>";
 /// What may follow an anchored path or address without being part of it. The
 /// end of the text counts; `\w` and `-` continue a name, so they do not.
 const BOUNDARY: &str = r"(?P<next>[^\w-]|$)";
@@ -28,6 +36,15 @@ const BOUNDARY: &str = r"(?P<next>[^\w-]|$)";
 static TIMESTAMP: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:?\d{2})?")
         .expect("timestamp pattern is valid")
+});
+/// lvpm's own version in the relink VI's file name, so a release bump leaves
+/// the recordings alone.
+static RELINK_VI_VERSION: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(&format!(
+        r"\blvpm-relink-package-{}\.vi\b",
+        regex::escape(env!("CARGO_PKG_VERSION"))
+    ))
+    .expect("relink VI pattern is valid")
 });
 static DURATION: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\b\d+(\.\d+)?s\b").expect("duration pattern is valid"));
@@ -42,6 +59,21 @@ static EPOCH_SECONDS: LazyLock<Regex> = LazyLock::new(|| {
 /// as it did without the field.
 static ARCHIVE_SHA256: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#",\s*"archive_sha256":\s*"[0-9a-f]{64}""#).expect("archive hash pattern is valid")
+});
+
+/// The OS's own "not found" message, which Windows and Linux word differently.
+static NOT_FOUND: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"The system cannot find the (?:path|file) specified\. \(os error [23]\)|No such file or directory \(os error 2\)")
+        .expect("not found pattern is valid")
+});
+
+/// A relative or token-rooted path written with `\` (or JSON's `\\`). A run
+/// right after `:` or `\`, or after a space inside an absolute Windows path,
+/// belongs to that path, which an anchor either already replaced or must leave
+/// alone, so it keeps its backslashes.
+static BACKSLASHED_PATH: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?P<pre>^|[^\w.<>:\\-])(?P<path>[\w.<>-]+(?:\\\\?[\w.<>-]+)+)")
+        .expect("backslashed path pattern is valid")
 });
 
 /// What is specific to one scenario's sandbox.
@@ -102,10 +134,29 @@ pub fn normalise(text: &str, anchors: &Anchors) -> String {
         }
     }
     let text = replace_regex(&text, &ARCHIVE_SHA256, "");
+    let text = replace_regex(
+        &text,
+        &RELINK_VI_VERSION,
+        &format!("lvpm-relink-package-{LVPM_VERSION_TOKEN}.vi"),
+    );
     let text = replace_regex(&text, &EPOCH_SECONDS, &format!("${{1}}{EPOCH_TOKEN}"));
-    // Timestamps before durations: a `12:00:00` must not be read as `00s`.
+    // Replace timestamps first so no later pattern sees their digits.
     let text = replace_regex(&text, &TIMESTAMP, TIMESTAMP_TOKEN);
-    replace_regex(&text, &DURATION, DURATION_TOKEN)
+    let text = replace_regex(&text, &DURATION, DURATION_TOKEN);
+    let text = replace_regex(&text, &NOT_FOUND, NOT_FOUND_TOKEN);
+    BACKSLASHED_PATH
+        .replace_all(&text, |caps: &regex::Captures| {
+            // shortcut: a relative path later in the same segment as an absolute
+            // one stays backslashed; split segments further if a recording needs it.
+            let before = &text[..caps.get(0).map_or(0, |m| m.start())];
+            let segment = &before[before.rfind(['\n', '"', '(']).map_or(0, |i| i + 1)..];
+            if segment.contains(":\\") {
+                return caps[0].to_string();
+            }
+            let path = caps["path"].replace(r"\\", "/").replace('\\', "/");
+            format!("{}{path}", &caps["pre"])
+        })
+        .into_owned()
 }
 
 /// `port 3412` in a message, `"port": 3412` in venv.json.
@@ -186,7 +237,7 @@ mod tests {
     fn the_sandbox_root_is_replaced_in_both_separator_spellings_and_either_drive_case() {
         assert_eq!(
             sandbox(r"wrote C:\Users\me\Temp\.tmpAb12\dest\a.txt"),
-            r"wrote <SANDBOX>\dest\a.txt"
+            "wrote <SANDBOX>/dest/a.txt"
         );
         assert_eq!(
             sandbox("wrote C:/Users/me/Temp/.tmpAb12/dest/a.txt"),
@@ -194,7 +245,7 @@ mod tests {
         );
         assert_eq!(
             sandbox(r"wrote c:\Users\me\Temp\.tmpAb12\dest"),
-            r"wrote <SANDBOX>\dest"
+            "wrote <SANDBOX>/dest"
         );
     }
 
@@ -304,7 +355,7 @@ mod tests {
     fn the_labview_install_dir_is_replaced_in_both_separator_spellings() {
         assert_eq!(
             sandbox(r"bound to C:\Program Files\National Instruments\LabVIEW 2026\LabVIEW.exe"),
-            r"bound to <LABVIEW>\LabVIEW.exe"
+            "bound to <LABVIEW>/LabVIEW.exe"
         );
         assert_eq!(
             sandbox("C:/Program Files/National Instruments/LabVIEW 2026/vi.lib"),
@@ -349,15 +400,22 @@ mod tests {
                 r"at C:\Users\me\AppData\Local\Temp\lvpm-relink.vi",
                 &anchors
             ),
-            r"at <TEMP>\lvpm-relink.vi"
+            "at <TEMP>/lvpm-relink.vi"
         );
     }
 
     #[test]
     fn the_machines_temp_dir_is_replaced_and_the_sandbox_inside_it_comes_first() {
         assert_eq!(
-            sandbox(r"with C:\Users\me\AppData\Local\Temp\lvpm-relink-package-0.2.1.vi"),
-            r"with <TEMP>\lvpm-relink-package-0.2.1.vi"
+            sandbox(r"with C:\Users\me\AppData\Local\Temp\lvpm-relink-package-0.0.1.vi"),
+            "with <TEMP>/lvpm-relink-package-0.0.1.vi"
+        );
+        assert_eq!(
+            sandbox(&format!(
+                r"with C:\Users\me\AppData\Local\Temp\lvpm-relink-package-{}.vi",
+                env!("CARGO_PKG_VERSION")
+            )),
+            "with <TEMP>/lvpm-relink-package-<LVPM_VERSION>.vi"
         );
         let mut anchors = Anchors::new(Path::new(
             r"C:\Users\me\AppData\Local\Temp\lvpm-acceptance-x",
@@ -368,7 +426,7 @@ mod tests {
                 r"C:\Users\me\AppData\Local\Temp\lvpm-acceptance-x\work and C:\Users\me\AppData\Local\Temp\other",
                 &anchors
             ),
-            r"<SANDBOX>\work and <TEMP>\other"
+            "<SANDBOX>/work and <TEMP>/other"
         );
         let sibling = r"C:\Users\me\AppData\Local\Temp2\x";
         assert_eq!(sandbox(sibling), sibling);
@@ -379,5 +437,37 @@ mod tests {
         let anchors = Anchors::new(Path::new("/w"));
         let text = r"port 3412 v26.3 at C:\Program Files\National Instruments\LabVIEW 2026";
         assert_eq!(normalise(text, &anchors), text);
+    }
+
+    #[test]
+    fn the_os_not_found_message_is_the_same_token_on_every_os() {
+        for message in [
+            "The system cannot find the path specified. (os error 3)",
+            "The system cannot find the file specified. (os error 2)",
+            "No such file or directory (os error 2)",
+        ] {
+            assert_eq!(sandbox(&format!("    {message}")), "    <OS_NOT_FOUND>");
+        }
+        let other = "Access is denied. (os error 5)";
+        assert_eq!(sandbox(other), other);
+    }
+
+    #[test]
+    fn relative_and_token_rooted_paths_are_spelled_with_slashes() {
+        assert_eq!(
+            sandbox(r"at dest\LabVIEW (dest\.lvpm\installed\beta.json)"),
+            "at dest/LabVIEW (dest/.lvpm/installed/beta.json)"
+        );
+        assert_eq!(
+            sandbox(r#""target": "scratch dest\\LabVIEW""#),
+            r#""target": "scratch dest/LabVIEW""#
+        );
+        assert_eq!(
+            sandbox(r"<SANDBOX>\work\.lv-venv"),
+            "<SANDBOX>/work/.lv-venv"
+        );
+        for untouched in [r"C:\x\y", r"a \ b", "dest/LabVIEW"] {
+            assert_eq!(sandbox(untouched), untouched);
+        }
     }
 }

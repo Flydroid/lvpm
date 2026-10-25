@@ -1,4 +1,4 @@
-created <SANDBOX>\work\.lv-venv
+created <SANDBOX>/work/.lv-venv
   bound to       LabVIEW 2026 (64-bit)  v<LV_VERSION>  (<LABVIEW>)
   VI Server port <PORT>
 

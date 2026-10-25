@@ -1,4 +1,4 @@
-Error: beta is not installed in this target (dest\.lvpm\installed\beta.json)
+Error: beta is not installed in this target (dest/.lvpm/installed/beta.json)
 
 Caused by:
-    The system cannot find the path specified. (os error 3)
+    <OS_NOT_FOUND>

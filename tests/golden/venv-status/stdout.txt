@@ -1,5 +1,5 @@
-<SANDBOX>\work\.lv-venv
-  project        <SANDBOX>\work
+<SANDBOX>/work/.lv-venv
+  project        <SANDBOX>/work
   bound to       LabVIEW 2026 (64-bit)  v<LV_VERSION>  (<LABVIEW>)
   VI Server port <PORT>
   packages       0 installed, 0 not yet relinked

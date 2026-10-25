@@ -1,5 +1,5 @@
-venv: <SANDBOX>\work\.lv-venv  [LabVIEW 2026 (64-bit)  v<LV_VERSION>]
-manifest: <SANDBOX>\work\lvpm.toml (fixture) — 0 dependencies
+venv: <SANDBOX>/work/.lv-venv  [LabVIEW 2026 (64-bit)  v<LV_VERSION>]
+manifest: <SANDBOX>/work/lvpm.toml (fixture) — 0 dependencies
       manifest says labview = "2026" (minimum)
 target: LabVIEW 2026 (64-bit)  v<LV_VERSION>  (<LABVIEW>)
   downloading feed http://<FEED>/feed/index.vipr (first run) ... 0.0 MB in <DUR>

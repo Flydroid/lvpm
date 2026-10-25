@@ -496,26 +496,23 @@ mod tests {
         let work = vec![
             (
                 "caraya".to_string(),
-                vec![PathBuf::from(r"C:\lv\vi.lib\addons\Caraya")],
+                vec![PathBuf::from("C:/lv/vi.lib/addons/Caraya")],
             ),
-            (
-                "h5".to_string(),
-                vec![PathBuf::from(r"C:\lv\vi.lib\addons")],
-            ),
+            ("h5".to_string(), vec![PathBuf::from("C:/lv/vi.lib/addons")]),
             (
                 "caraya_cli".to_string(),
-                vec![PathBuf::from(r"C:\lv\vi.lib\addons\Caraya")],
+                vec![PathBuf::from("C:/lv/vi.lib/addons/Caraya")],
             ),
             (
                 "dqmh".to_string(),
-                vec![PathBuf::from(r"C:\lv\project\DQMH")],
+                vec![PathBuf::from("C:/lv/project/DQMH")],
             ),
         ];
         let plan = collapse_work(&work);
         assert_eq!(plan.len(), 2);
-        assert_eq!(plan[0].0, PathBuf::from(r"C:\lv\project\DQMH"));
+        assert_eq!(plan[0].0, PathBuf::from("C:/lv/project/DQMH"));
         assert_eq!(plan[0].1, ["dqmh"]);
-        assert_eq!(plan[1].0, PathBuf::from(r"C:\lv\vi.lib\addons"));
+        assert_eq!(plan[1].0, PathBuf::from("C:/lv/vi.lib/addons"));
         assert_eq!(plan[1].1, ["h5", "caraya", "caraya_cli"]);
     }
 

@@ -3,7 +3,7 @@ no lvpm.lock found: writing one from lvpm.toml (commit lvpm.lock with the projec
 lvpm.toml: added beta = ">=1.0" to [dependencies]
 + alpha 2.0
 + beta 1.0
-wrote <SANDBOX>\work\lvpm.lock (2 packages); commit it with lvpm.toml
+wrote <SANDBOX>/work/lvpm.lock (2 packages); commit it with lvpm.toml
 sync: 2 to install
   install alpha 2.0
   install beta 1.0

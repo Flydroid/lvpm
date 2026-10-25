@@ -1,1 +1,1 @@
-venv: <SANDBOX>\work\.lv-venv  [LabVIEW 2026 (64-bit)  v<LV_VERSION>]
+venv: <SANDBOX>/work/.lv-venv  [LabVIEW 2026 (64-bit)  v<LV_VERSION>]

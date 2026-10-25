@@ -1,2 +1,2 @@
-venv: <SANDBOX>\work\.lv-venv  [LabVIEW 2026 (64-bit)  v<LV_VERSION>]
+venv: <SANDBOX>/work/.lv-venv  [LabVIEW 2026 (64-bit)  v<LV_VERSION>]
 starting LabVIEW 2026 (64-bit)  v<LV_VERSION> on the venv and waiting for VI Server on port <PORT>...

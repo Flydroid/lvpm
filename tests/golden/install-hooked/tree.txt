@@ -3,7 +3,7 @@ dest/.lvpm/
 dest/.lvpm/hooks/
 dest/.lvpm/hooks/hooked-PostInstall.vi ab2f4c440330faf3d4e28ea83538cfa88fc03ab5cadbe26e6f2a11539b0857fb
 dest/.lvpm/installed/
-dest/.lvpm/installed/hooked.json b9f1f6838d0fc145c0680d778f9051a18ce42cc18615829ebc392a96846ba599
+dest/.lvpm/installed/hooked.json e7f9558d98a82065c7de3639575a8e5d7d636bbcf8bac07829e3dfca71f8ce00
 dest/LabVIEW/
 dest/LabVIEW/vi.lib/
 dest/LabVIEW/vi.lib/lvpm_fixture/

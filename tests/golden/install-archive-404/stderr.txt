@@ -1,4 +1,4 @@
-target: scratch tree at dest\LabVIEW
+target: scratch tree at dest/LabVIEW
 loading indexes...
   downloading feed http://<FEED>/faulty/index.vipr (first run) ... 0.0 MB in <DUR>
   3 package versions known

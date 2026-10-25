@@ -1,1 +1,1 @@
-removed <SANDBOX>\work\.lv-venv
+removed <SANDBOX>/work/.lv-venv

@@ -6,7 +6,6 @@ Feature: Destination, index and queries live in core
 
     Examples:
       | name           |
-      | targets        |
       | search-a       |
       | search-none    |
       | list-beta      |
@@ -15,6 +14,12 @@ Feature: Destination, index and queries live in core
       | config-set     |
       | config-get     |
       | cache-add      |
+
+  # Lists the real LabVIEW 2026 installation, so it needs one.
+  @labview
+  Scenario: targets output is unchanged
+    When the characterization row "targets" runs
+    Then it still matches
 
   @core
   Scenario Outline: destination resolution is a function of the environment

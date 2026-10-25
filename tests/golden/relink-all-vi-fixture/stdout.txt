@@ -1,5 +1,5 @@
 
-relinking 1 folder(s) with <TEMP>\lvpm-relink-package-0.2.1.vi
+relinking 1 folder(s) with <TEMP>/lvpm-relink-package-<LVPM_VERSION>.vi
   lvpm_vi_fixture
-      <SANDBOX>\work\.lv-venv\lvpm_vi_fixture\1\vi.lib\lvpm_vi_fixture ... <DUR>
+      <SANDBOX>/work/.lv-venv/lvpm_vi_fixture/1/vi.lib/lvpm_vi_fixture ... <DUR>
         saved nothing
