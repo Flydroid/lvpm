@@ -559,6 +559,8 @@ fn wanted_by(constraint: &Constraint) -> String {
 /// The SHA-256 of every chosen archive, by lowercased name. Each archive
 /// comes through the cache, so a cached one needs no network. Every archive
 /// that cannot be had is collected, and they are reported together.
+/// shortcut: when a locked archive is also wrong, only those are reported and
+/// the fetch failures wait for the next run; give the error both lists if that bites.
 ///
 /// A version `previous` already locks keeps the SHA-256 it was locked with, and
 /// only bytes that hash to it count: other bytes under that version are an

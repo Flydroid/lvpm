@@ -229,17 +229,25 @@ const SHARED_TOKENS: [&str; 19] = [
 ];
 
 /// Is `p` at or below `root`, once `.` and `..` are resolved in both by name?
-/// A `..` that climbs out of the path puts it outside. Names are compared
+/// A `..` that climbs out of the path puts it outside, unless it leads a
+/// relative path (`..\box`), which then names the same place in both. Names are compared
 /// ignoring case on Windows, where the file system does. The file system is
 /// not asked, so a link inside `root` is followed by whatever opens the path.
 pub(crate) fn within(root: &Path, p: &Path) -> bool {
+    fn ups(p: &Path) -> usize {
+        p.components()
+            .take_while(|c| *c == Component::ParentDir)
+            .count()
+    }
     fn resolved(p: &Path) -> Option<PathBuf> {
         let mut out = PathBuf::new();
         for part in p.components() {
             match part {
                 Component::CurDir => {}
                 Component::ParentDir => {
-                    if !out.pop() {
+                    if out.components().all(|c| c == Component::ParentDir) {
+                        out.push("..");
+                    } else if !out.pop() {
                         return None;
                     }
                 }
@@ -252,7 +260,8 @@ pub(crate) fn within(root: &Path, p: &Path) -> bool {
         }
     }
     match (resolved(root), resolved(p)) {
-        (Some(root), Some(p)) => p.starts_with(root),
+        // `..\..\x` is not inside `..`: both must climb the same way.
+        (Some(root), Some(p)) => p.starts_with(&root) && ups(&p) == ups(&root),
         _ => false,
     }
 }
@@ -598,6 +607,12 @@ mod tests {
         assert!(!within(root, Path::new("/a/b/../../../c")));
         assert!(!within(root, Path::new("/a/bc")));
         assert!(!within(root, Path::new("c")));
+        let up = Path::new("../box");
+        assert!(within(up, Path::new("../box/LabVIEW/vi.lib/x.vi")));
+        assert!(within(up, Path::new("./../box/a/../b")));
+        assert!(!within(up, Path::new("../../box/x")));
+        assert!(!within(up, Path::new("../box/../../box/x")));
+        assert!(!within(Path::new(".."), Path::new("../../x")));
         assert_eq!(within(root, Path::new("/A/B/c")), cfg!(windows));
     }
 
@@ -608,7 +623,7 @@ mod tests {
             bitness: 64,
             path: PathBuf::from(r"C:\LV2026"),
         };
-        let r = Roots::labview(&t);
+        let r = Roots::labview_on(&t, Some(Path::new(r"C:\Machine")));
         assert!(r.is_inside(&r.expand("<vi.lib>/addons/x.vi").unwrap()));
         assert!(r.is_inside(&r.expand("<OS Public Application Data>/x/y.dat").unwrap()));
         assert!(!r.is_inside(&r.expand("<OS Boot Volume Root>/x.dll").unwrap()));
