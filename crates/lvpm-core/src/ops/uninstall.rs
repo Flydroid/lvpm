@@ -10,7 +10,7 @@ use super::install::{Applied, InstallOptions, finish};
 use super::session::InstallSession;
 use crate::events::{Event, HookKind, UnrunReason};
 use crate::install;
-use crate::project::Constraint;
+use crate::project::{Constraint, same_name};
 use anyhow::{Context, Result, ensure};
 use std::path::Path;
 
@@ -96,7 +96,7 @@ fn say_if_still_listed(env: &OpEnv, package: &str) {
     let listed = |entries: &[(String, Constraint)]| {
         entries
             .iter()
-            .find(|(entry, _)| entry.eq_ignore_ascii_case(package))
+            .find(|(entry, _)| same_name(entry, package))
             .map(|(entry, _)| entry.clone())
     };
     let found = match listed(&project.dependencies) {

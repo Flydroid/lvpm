@@ -136,7 +136,7 @@ impl Prepared {
         };
         entries
             .iter()
-            .find(|(entry, _)| entry.eq_ignore_ascii_case(name))
+            .find(|(entry, _)| project::same_name(entry, name))
     }
 
     /// The manifest with `name` in `table` asking for `constraint`.
@@ -367,7 +367,7 @@ fn announce_edit(env: &OpEnv, edit: &Edit, lock: &Lockfile, dry_run: bool) {
                 package
                     .requires
                     .iter()
-                    .any(|required| required.eq_ignore_ascii_case(name))
+                    .any(|required| project::same_name(required, name))
             })
             .map(|package| package.name.clone())
             .collect();

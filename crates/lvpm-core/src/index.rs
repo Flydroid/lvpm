@@ -11,6 +11,7 @@ use crate::cache::{Cache, LocalEntry, SourceState};
 use crate::cancel::CancelToken;
 use crate::errors::Cancelled;
 use crate::events::{Event, EventSink, FeedOutcome};
+use crate::project::same_name;
 use crate::version::{Version, split_id};
 use anyhow::{Context, Result};
 use md5::{Digest, Md5};
@@ -143,7 +144,7 @@ impl Index {
         let mut v: Vec<&Entry> = self
             .entries
             .iter()
-            .filter(|e| e.name.eq_ignore_ascii_case(name))
+            .filter(|e| same_name(&e.name, name))
             .collect();
         v.sort_by(|a, b| b.version.cmp(&a.version));
         v

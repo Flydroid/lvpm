@@ -236,7 +236,7 @@ pub fn resolve_greedy(
     let mut unresolved: Vec<String> = Vec::new();
 
     while let Some((n, req, is_root)) = queue.pop() {
-        if !done.insert(n.to_lowercase()) {
+        if !done.insert(project::name_key(&n)) {
             continue;
         }
         // A dependency the installed version already satisfies stays as it

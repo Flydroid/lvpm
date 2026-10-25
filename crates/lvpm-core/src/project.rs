@@ -102,6 +102,18 @@ impl PackageArg {
     }
 }
 
+/// What a package name is compared by: ASCII lowercase, as VIPM compares them.
+/// Letters outside ASCII are not folded, so every comparison of names agrees
+/// with [`same_name`]. Names are never rewritten, only compared by their key.
+pub fn name_key(name: &str) -> String {
+    name.to_ascii_lowercase()
+}
+
+/// Whether two package names are one package: their [`name_key`]s are equal.
+pub fn same_name(a: &str, b: &str) -> bool {
+    a.eq_ignore_ascii_case(b)
+}
+
 impl fmt::Display for Constraint {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -250,6 +262,21 @@ fn parse_dependencies(table: &str, entries: toml::Table) -> Result<Vec<(String, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn names_are_compared_by_their_ascii_lowercase_and_nothing_else() {
+        assert_eq!(name_key("JKI_Lib_Caraya"), "jki_lib_caraya");
+        // Not folded: a name that differs by a non-ASCII letter's case is another name.
+        assert_ne!(name_key("Ärger"), name_key("ärger"));
+        for (a, b) in [
+            ("Beta", "beta"),
+            ("Ärger", "ärger"),
+            ("a", "b"),
+            ("ß", "SS"),
+        ] {
+            assert_eq!(same_name(a, b), name_key(a) == name_key(b), "{a} {b}");
+        }
+    }
 
     #[test]
     fn a_package_arg_is_a_name_and_an_optional_constraint_and_neither_may_be_empty() {

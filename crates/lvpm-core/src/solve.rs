@@ -11,7 +11,7 @@
 
 use crate::cancel::CancelToken;
 use crate::index::{Entry, Floor, Index};
-use crate::project::Constraint;
+use crate::project::{Constraint, name_key as key};
 use crate::version::Version;
 use pubgrub::{
     Dependencies, DependencyConstraints, DependencyProvider, DerivationTree, External,
@@ -122,10 +122,6 @@ pub fn solve(
 // `Version`'s `Ord` is what PubGrub compares by, and it agrees with `Eq`:
 // `1.0` and `1.0.0` are the same version, and a prerelease tail sorts below
 // the release.
-
-fn key(name: &str) -> String {
-    name.to_lowercase()
-}
 
 /// The versions a manifest line admits.
 pub(crate) fn range_of(constraint: &Constraint) -> Ranges<Version> {

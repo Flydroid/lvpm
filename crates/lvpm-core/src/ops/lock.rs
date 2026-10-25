@@ -16,7 +16,7 @@ use crate::events::{Event, LockChange};
 use crate::index::{self, Entry, Index};
 use crate::lockfile::{self, Inputs, LockedPackage, LockedUnresolved, Lockfile};
 use crate::manifest_edit::{self, DependencyTable};
-use crate::project::{Constraint, PackageArg, Project};
+use crate::project::{Constraint, PackageArg, Project, name_key, same_name};
 use crate::solve::{self, Conflict, Fact, Resolution, SolveError};
 use crate::version::Version;
 use anyhow::Context;
@@ -179,9 +179,7 @@ impl Moving<'_> {
     fn moves(&self, name: &str) -> bool {
         match self {
             Moving::Nothing => false,
-            Moving::Only(targets) => targets
-                .iter()
-                .any(|target| target.name.eq_ignore_ascii_case(name)),
+            Moving::Only(targets) => targets.iter().any(|target| same_name(&target.name, name)),
             Moving::Everything => true,
         }
     }
@@ -212,7 +210,7 @@ fn check_locked(held: &Lockfile, targets: &[UpgradeTarget]) -> Result<(), LockEr
         !held
             .packages
             .iter()
-            .any(|package| package.name.eq_ignore_ascii_case(&target.name))
+            .any(|package| same_name(&package.name, &target.name))
     }) {
         Some(target) => Err(LockError::NotLocked {
             name: target.name.clone(),
@@ -330,7 +328,7 @@ fn constraint_updates(
     .flat_map(|(table, entries)| {
         entries
             .iter()
-            .filter(|(entry, _)| entry.eq_ignore_ascii_case(name))
+            .filter(|(entry, _)| same_name(entry, name))
             .filter_map(move |(entry, constraint)| {
                 let to = match constraint {
                     Constraint::Exact(pinned) if pinned != version => raw.to_string(),
@@ -393,7 +391,7 @@ pub(super) fn resolved_version(
     )?;
     Ok(resolution
         .packages
-        .get(&name.to_lowercase())
+        .get(&name_key(name))
         .map(|entry| entry.version.clone()))
 }
 
@@ -535,15 +533,13 @@ fn name_pins(mut conflict: Conflict, project: &Project, pins: &[(String, Constra
             continue;
         };
         let is_pin = |(name, constraint): &(String, Constraint)| {
-            name.eq_ignore_ascii_case(package) && wanted_by(constraint) == *wanted
+            same_name(name, package) && wanted_by(constraint) == *wanted
         };
         let says_so = project
             .dependencies
             .iter()
             .chain(&project.dev_dependencies)
-            .any(|(name, constraint)| {
-                name.eq_ignore_ascii_case(package) && wanted_by(constraint) == *wanted
-            });
+            .any(|(name, constraint)| same_name(name, package) && wanted_by(constraint) == *wanted);
         if let Some((name, Constraint::Exact(version))) = pins.iter().find(|pin| is_pin(pin))
             && !says_so
         {
@@ -601,8 +597,7 @@ fn hash_archives(
             .iter()
             .flat_map(|lock| &lock.packages)
             .find(|package| {
-                package.name.to_lowercase() == *key
-                    && Version::parse(&package.version) == entry.version
+                name_key(&package.name) == *key && Version::parse(&package.version) == entry.version
             });
         if let Some(locked) = kept {
             let mut search = Search::in_cache(&downloads, locked);
@@ -681,7 +676,7 @@ fn locked_requirements(entry: &Entry, resolution: &Resolution) -> Vec<String> {
     entry
         .requires
         .iter()
-        .filter_map(|requirement| resolution.packages.get(&requirement.name.to_lowercase()))
+        .filter_map(|requirement| resolution.packages.get(&name_key(&requirement.name)))
         .map(|required| required.name.clone())
         .collect()
 }
@@ -693,7 +688,7 @@ fn reachable_from_dependencies(project: &Project, resolution: &Resolution) -> Ha
     let mut pending: Vec<String> = project
         .dependencies
         .iter()
-        .map(|(name, _)| name.to_lowercase())
+        .map(|(name, _)| name_key(name))
         .collect();
     while let Some(key) = pending.pop() {
         let Some(entry) = resolution.packages.get(&key) else {
@@ -704,7 +699,7 @@ fn reachable_from_dependencies(project: &Project, resolution: &Resolution) -> Ha
                 entry
                     .requires
                     .iter()
-                    .map(|requirement| requirement.name.to_lowercase()),
+                    .map(|requirement| name_key(&requirement.name)),
             );
         }
     }
@@ -719,7 +714,7 @@ fn changes(old: Option<&Lockfile>, new: &Lockfile) -> Vec<LockChange> {
             .flat_map(|lock| &lock.packages)
             .map(|package| {
                 (
-                    package.name.to_lowercase(),
+                    name_key(&package.name),
                     (package.name.clone(), package.version.clone()),
                 )
             })
@@ -833,7 +828,7 @@ mod tests {
         Resolution {
             packages: entries
                 .into_iter()
-                .map(|entry| (entry.name.to_lowercase(), entry))
+                .map(|entry| (name_key(&entry.name), entry))
                 .collect(),
             unresolved,
         }

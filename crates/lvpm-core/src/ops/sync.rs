@@ -20,7 +20,7 @@ use crate::events::{Event, PackageRef, Phase, RemoveReason, SyncStep};
 use crate::index::{self, Entry, Index};
 use crate::install::{self, Manifest};
 use crate::lockfile::{self, LockedPackage, Lockfile};
-use crate::project::Project;
+use crate::project::{Project, name_key};
 use crate::version::Version;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -412,10 +412,6 @@ pub fn plan_sync(lock: &Lockfile, installed: &[Manifest], no_dev: bool) -> SyncP
         wanted.push(package.clone());
     }
     SyncPlan { steps, wanted }
-}
-
-fn name_key(name: &str) -> String {
-    name.to_lowercase()
 }
 
 /// The same version, from the same archive. A manifest written before the

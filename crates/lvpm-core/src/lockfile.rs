@@ -33,7 +33,7 @@
 //! required_by = "beta"
 //! ```
 
-use crate::project::{Constraint, Project};
+use crate::project::{Constraint, Project, name_key};
 use crate::solve::range_of;
 use crate::version::Version;
 use anyhow::{Context, Result};
@@ -140,10 +140,6 @@ pub fn constraint_text(constraint: &Constraint) -> String {
         Constraint::AtLeast(version) => format!(">={}", version.raw),
         Constraint::Any => "*".to_string(),
     }
-}
-
-fn name_key(name: &str) -> String {
-    name.to_lowercase()
 }
 
 /// Why a lock no longer represents the manifest. The first rule that fails
