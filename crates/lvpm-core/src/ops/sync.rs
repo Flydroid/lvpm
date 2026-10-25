@@ -1789,4 +1789,135 @@ mod tests {
             }]
         );
     }
+
+    // ---- a LabVIEW installation that is not there: --global and headless ----
+
+    use super::super::route::{InstallMode, InstallRequest, install_mode};
+    use super::super::testing::FakeInstallation;
+
+    /// What `fake` holds, as the install records say.
+    fn held_by(fake: &FakeInstallation) -> Vec<(String, String)> {
+        install::list_installed(&fake.roots())
+            .unwrap()
+            .into_iter()
+            .map(|manifest| (manifest.name, manifest.version))
+            .collect()
+    }
+
+    impl Scratch {
+        /// An environment that sees `fake` as the machine's one LabVIEW.
+        fn on<'a>(&self, sink: &'a dyn EventSink, fake: &FakeInstallation) -> OpEnv<'a> {
+            let mut env = self.env(sink, vec![self.folder()]);
+            fake.place(&mut env);
+            env
+        }
+    }
+
+    /// A sync of beta and gamma and then of beta alone, both through the
+    /// destination `set_up` settles: the second takes gamma out of the
+    /// installation, as a sync does anywhere, and nothing goes elsewhere.
+    fn assert_sync_is_exact_in_the_installation(tag: &str, set_up: impl Fn(&mut OpEnv)) {
+        let project = project(tag, &["beta", "gamma"]);
+        let fake = FakeInstallation::new(&project.root);
+        let opts = SyncOptions {
+            install: InstallOptions {
+                no_relink: true,
+                ..InstallOptions::default()
+            },
+            ..SyncOptions::default()
+        };
+        let run = || {
+            let sink = Recorder::default();
+            let mut env = project.on(&sink, &fake);
+            set_up(&mut env);
+            (sync(&env, &opts), sink.events())
+        };
+
+        run().0.unwrap();
+        assert_eq!(
+            held_by(&fake),
+            pairs(&[("alpha", "2.0"), ("beta", "1.0"), ("gamma", "1.0")])
+        );
+
+        project.write_manifest(&["beta"]);
+        let (outcome, events) = run();
+        outcome.unwrap();
+        assert_eq!(held_by(&fake), pairs(&[("alpha", "2.0"), ("beta", "1.0")]));
+        assert!(
+            events.iter().any(
+                |event| matches!(event, Event::PackageRemoved { name, .. } if name == "gamma")
+            ),
+            "{events:?}"
+        );
+        assert!(
+            !project.root.join("dest").exists(),
+            "nothing went to a scratch destination"
+        );
+    }
+
+    #[test]
+    fn a_sync_with_global_is_exact_on_the_installation() {
+        assert_sync_is_exact_in_the_installation("y8-global", |env| {
+            env.flags.global = true;
+            env.flags.labview_version = Some("2099".into());
+        });
+    }
+
+    #[test]
+    fn a_headless_sync_in_a_project_without_a_venv_is_exact_on_the_installation() {
+        assert_sync_is_exact_in_the_installation("y8-headless", |env| {
+            env.headless = true;
+            env.flags.labview_version = Some("2099".into());
+        });
+    }
+
+    #[test]
+    fn a_named_install_with_a_destination_flag_adds_there_and_leaves_lvpm_toml_and_lock_alone() {
+        type SetUp = fn(&mut OpEnv);
+        let flagged: [(&str, SetUp); 2] = [
+            ("global", |env| {
+                env.flags.global = true;
+                env.flags.labview_version = Some("2099".into());
+            }),
+            // Alone, `--labview-version` means the installation only where
+            // nothing guards the machine: a project with no venv is refused
+            // unless LabVIEW runs headless.
+            ("headless-labview-version", |env| {
+                env.headless = true;
+                env.flags.labview_version = Some("2099".into());
+            }),
+        ];
+        for (flag, set_up) in flagged {
+            let project = project(&format!("m7-{flag}"), &["alpha"]);
+            let fake = FakeInstallation::new(&project.root);
+            locking_lock(&project);
+            let manifest_path = project.root.join(crate::project::FILE_NAME);
+            let (toml, lock) = (
+                std::fs::read(&manifest_path).unwrap(),
+                project.lock_bytes().expect("the project has a lock"),
+            );
+
+            let sink = Recorder::default();
+            let mut env = project.on(&sink, &fake);
+            set_up(&mut env);
+            let request = InstallRequest {
+                package: Some("gamma"),
+                ..InstallRequest::default()
+            };
+            assert_eq!(
+                install_mode(&env, &request).unwrap(),
+                InstallMode::Additive,
+                "{flag}"
+            );
+            let opts = InstallOptions {
+                no_relink: true,
+                ..InstallOptions::default()
+            };
+            crate::ops::install::install(&env, Some("gamma"), &opts).unwrap();
+
+            assert_eq!(held_by(&fake), pairs(&[("gamma", "1.0")]), "{flag}");
+            assert_eq!(std::fs::read(&manifest_path).unwrap(), toml, "{flag}");
+            assert_eq!(project.lock_bytes(), Some(lock), "{flag}");
+        }
+    }
 }

@@ -161,7 +161,10 @@ Feature: lvpm sync makes the destination equal the lock
   # tests/support/sandbox.rs). The hook scenario needs a PostInstall hook to
   # fail, and a venv runs none, so it can only happen on the installation too.
   # What they describe is checked by the scenarios that sync into --prefix
-  # trees, and by "sync into a venv".
+  # trees, and by "sync into a venv". The --global and headless destinations
+  # run in core's unit tests against a fake installation (a_sync_with_global_is_
+  # exact_on_the_installation and a_headless_sync_..._is_exact_on_the_installation
+  # in ops/sync.rs).
   @labview @unsafe
   Scenario: a hook failing mid-sync tells how to finish
     Given a lock with "hooked" whose PostInstall fails, in a venv

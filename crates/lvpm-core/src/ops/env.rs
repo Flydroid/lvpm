@@ -56,6 +56,10 @@ pub struct OpEnv<'a> {
     pub sink: &'a dyn EventSink,
     /// Does nothing unless the front end keeps a clone and cancels it.
     pub cancel: CancelToken,
+    /// Put the machine's own places (ProgramData and the like) under this
+    /// directory for a LabVIEW installation. Only a test of an installation
+    /// that is not really there sets it; see [`Roots::labview_on`].
+    pub machine: Option<PathBuf>,
 }
 
 /// Where a command's packages live.
@@ -98,7 +102,12 @@ impl<'a> OpEnv<'a> {
             targets,
             sink,
             cancel: CancelToken::default(),
+            machine: None,
         }
+    }
+
+    fn labview_roots(&self, t: &LvTarget) -> Roots {
+        Roots::labview_on(t, self.machine.as_deref())
     }
 
     /// Resolve `--labview-version` / `--prefix` into a set of roots.
@@ -109,7 +118,7 @@ impl<'a> OpEnv<'a> {
                 if self.targets.is_empty() {
                     bail!("no LabVIEW installations detected");
                 }
-                Ok(Roots::labview(&target::select(&self.targets, want)?))
+                Ok(self.labview_roots(&target::select(&self.targets, want)?))
             }
             (None, Some(p)) => Ok(Roots::scratch(p)),
             (None, None) => bail!(
@@ -185,7 +194,7 @@ impl<'a> OpEnv<'a> {
             repo: repo.to_path_buf(),
             labview: t.label(),
         });
-        Ok(Roots::labview(&t))
+        Ok(self.labview_roots(&t))
     }
 
     /// The venv a command means, if any: `--project` names the repo outright,

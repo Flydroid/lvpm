@@ -6,8 +6,9 @@ use super::env::OpEnv;
 use crate::cancel::CancelToken;
 use crate::config::Config;
 use crate::events::{Event, EventSink, NullSink};
-use crate::target::LvTarget;
+use crate::target::{LvTarget, Roots};
 use crate::venv::{self, Venv};
+use crate::viserver;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -16,6 +17,54 @@ pub(crate) fn labview_2026() -> LvTarget {
         version: 26.3,
         bitness: 64,
         path: PathBuf::from("LabVIEW 2026"),
+    }
+}
+
+/// A LabVIEW installation that is not there, for a test that must run through a
+/// real-installation destination (`--global`, headless) without touching one.
+///
+/// It is a directory under the test's own scratch, laid out like an
+/// installation, of a year no LabVIEW has (2099), with every machine place
+/// (ProgramData and the rest) under the scratch too. Its `LabVIEW.ini` turns
+/// VI Server off, so a relink, a hook or a palette refresh run against it
+/// fails at once and cannot reach a LabVIEW that is running.
+pub(crate) struct FakeInstallation {
+    pub target: LvTarget,
+    machine: PathBuf,
+}
+
+impl FakeInstallation {
+    pub(crate) fn new(scratch: &Path) -> FakeInstallation {
+        let target = LvTarget {
+            version: 99.0,
+            bitness: 64,
+            path: scratch.join("LabVIEW 2099"),
+        };
+        std::fs::create_dir_all(target.path.join("vi.lib")).unwrap();
+        std::fs::write(
+            target.path.join("LabVIEW.ini"),
+            "server.tcp.enabled=False\r\n",
+        )
+        .unwrap();
+        assert!(
+            viserver::check_vi_server(&target).is_err(),
+            "the fake installation must have no VI Server to reach"
+        );
+        FakeInstallation {
+            target,
+            machine: scratch.join("machine"),
+        }
+    }
+
+    /// Make `env` know this installation, and nothing of the real machine.
+    pub(crate) fn place(&self, env: &mut OpEnv) {
+        env.targets = vec![self.target.clone()];
+        env.machine = Some(self.machine.clone());
+    }
+
+    /// Where the installation's packages are recorded.
+    pub(crate) fn roots(&self) -> Roots {
+        Roots::labview_on(&self.target, Some(&self.machine))
     }
 }
 

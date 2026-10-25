@@ -177,7 +177,10 @@ Feature: add and remove edit the manifest, then lock and sync
   # Never run: this installs into the LabVIEW installation itself, which no
   # scenario may touch (see `real_installation_risk`). Which destination
   # `--global` and `--labview-version` mean is covered by the routing table
-  # above, and the unit tests of `install_mode`.
+  # above, and the unit tests of `install_mode`. That such an install leaves
+  # lvpm.toml and lvpm.lock alone runs in core's unit tests against a fake
+  # installation (a_named_install_with_a_destination_flag_adds_there_... in
+  # ops/sync.rs).
   @labview @unsafe
   Scenario: install with a name and --global stays additive
     When I run "lvpm install gamma --global --labview-version 2026" inside the project

@@ -283,25 +283,42 @@ impl Roots {
     }
 
     pub fn labview(t: &LvTarget) -> Roots {
-        let userprofile = env_path("USERPROFILE", "C:\\Users\\Default");
+        Roots::labview_on(t, None)
+    }
+
+    /// [`Roots::labview`], with every place the machine keeps outside
+    /// LabVIEW's own tree put under `machine` when it is given: for a test of
+    /// an installation that is not there, which must not write where a real
+    /// one's manifests and machine files would go.
+    pub fn labview_on(t: &LvTarget, machine: Option<&Path>) -> Roots {
+        let place = |key: &str, fallback: &str| match machine {
+            Some(dir) => dir.join(key),
+            None => env_path(key, fallback),
+        };
+        let userprofile = place("USERPROFILE", "C:\\Users\\Default");
         let program_files = if t.bitness == 32 {
-            env_path("ProgramFiles(x86)", "C:\\Program Files (x86)")
+            place("ProgramFiles(x86)", "C:\\Program Files (x86)")
         } else {
-            env_path("ProgramFiles", "C:\\Program Files")
+            place("ProgramFiles", "C:\\Program Files")
         };
         Roots {
             application: t.path.clone(),
-            temp: std::env::temp_dir(),
-            program_data: env_path("ProgramData", "C:\\ProgramData"),
+            temp: machine.map_or_else(std::env::temp_dir, |dir| dir.join("temp")),
+            program_data: place("ProgramData", "C:\\ProgramData"),
             program_files,
-            public_documents: env_path("PUBLIC", "C:\\Users\\Public").join("Documents"),
+            public_documents: place("PUBLIC", "C:\\Users\\Public").join("Documents"),
             user_documents: userprofile.join("Documents"),
             user_desktop: userprofile.join("Desktop"),
-            user_appdata: env_path("APPDATA", "C:\\Users\\Default\\AppData\\Roaming"),
-            boot_volume: PathBuf::from(
-                std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into()) + "\\",
+            user_appdata: place("APPDATA", "C:\\Users\\Default\\AppData\\Roaming"),
+            boot_volume: machine.map_or_else(
+                || {
+                    PathBuf::from(
+                        std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into()) + "\\",
+                    )
+                },
+                |dir| dir.join("SystemDrive"),
             ),
-            system_core: env_path("SystemRoot", "C:\\Windows").join("System32"),
+            system_core: place("SystemRoot", "C:\\Windows").join("System32"),
             scratch: None,
             venv: None,
             target: Some(t.clone()),
@@ -393,7 +410,8 @@ impl Roots {
         match (&self.venv, &self.scratch, &self.target) {
             (Some(v), _, _) => v.join(".lvpm").join("installed"),
             (None, Some(p), _) => p.join(".lvpm").join("installed"),
-            (None, None, Some(t)) => env_path("ProgramData", "C:\\ProgramData")
+            (None, None, Some(t)) => self
+                .program_data
                 .join("lvpm")
                 .join(t.key())
                 .join("installed"),
@@ -506,6 +524,27 @@ mod tests {
             r.expand("<menus>/Categories").unwrap(),
             Path::new(r"C:\Program Files\National Instruments\LabVIEW 2026\menus\Categories")
         );
+    }
+
+    #[test]
+    fn an_installation_given_a_machine_directory_keeps_every_machine_place_in_it() {
+        let t = LvTarget {
+            version: 99.0,
+            bitness: 64,
+            path: PathBuf::from("/fake/LabVIEW 2099"),
+        };
+        let machine = Path::new("/machine");
+        let r = Roots::labview_on(&t, Some(machine));
+        for token in SHARED_TOKENS.iter().filter(|t| !t.starts_with("<vi.lib")) {
+            let p = r.expand(token).unwrap();
+            let inside_lv = p.starts_with(&t.path);
+            assert!(
+                inside_lv || p.starts_with(machine),
+                "{token}: {}",
+                p.display()
+            );
+        }
+        assert!(r.store_dir().starts_with(machine), "{:?}", r.store_dir());
     }
 
     #[test]
