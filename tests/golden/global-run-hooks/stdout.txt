@@ -1,0 +1,5 @@
+lvpm_test_fixture ... ok (<DUR>)
+
+refreshing palettes and menus
+  palettes  ok (<DUR>)
+  menus     ok (<DUR>)

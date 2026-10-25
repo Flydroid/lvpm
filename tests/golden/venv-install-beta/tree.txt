@@ -1,0 +1,19 @@
+.lv-venv/
+.lv-venv/.gitignore cdbcae15105d6b781e620813c79c7e868740d4e9cc53ce6f5fcbbc12387adf4b
+.lv-venv/.lvpm/
+.lv-venv/.lvpm/installed/
+.lv-venv/.lvpm/installed/alpha.json 60efd4b9415f9dcda991c7dd4de29410770e34fb72c4fc1d25617ab1dc860881
+.lv-venv/.lvpm/installed/beta.json d54c38b954627f0bf01051e27f358da70af0ced6efae28978b62a88218422447
+.lv-venv/.lvpm/venv.json 3eeec6e8fab3937ed4d4d74088c381d042d76c1ecb538d132fc1a9e8a58225a3
+.lv-venv/alpha/
+.lv-venv/alpha/1/
+.lv-venv/alpha/1/lvaddoninfo.json f99249d11846e36760c099a6f86c1af1c5281d1ee9e2487449282047ba5ea1f9
+.lv-venv/alpha/1/vi.lib/
+.lv-venv/alpha/1/vi.lib/lvpm_fixture/
+.lv-venv/alpha/1/vi.lib/lvpm_fixture/alpha.txt 221bc7e7fe51830795dbbc39813f8a05e9b0886290efb112a4904825354fbb3c
+.lv-venv/beta/
+.lv-venv/beta/1/
+.lv-venv/beta/1/lvaddoninfo.json b0ec6e5d08c3a5146633a512d92536317fe822a7f14dc160451c31c34fbc5e37
+.lv-venv/beta/1/vi.lib/
+.lv-venv/beta/1/vi.lib/lvpm_fixture/
+.lv-venv/beta/1/vi.lib/lvpm_fixture/beta.txt 9662e32fb349a25826e17092b6febe7240e1aa66667327337ef29e26caf2672b

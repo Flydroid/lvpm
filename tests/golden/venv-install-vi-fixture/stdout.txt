@@ -1,0 +1,18 @@
+adding lvpm_vi_fixture to lvpm.toml and syncing the project to lvpm.lock (to install it without changing the project, pass --prefix, --global or --labview-version)
+no lvpm.lock found: writing one from lvpm.toml (commit lvpm.lock with the project)
+lvpm.toml: added lvpm_vi_fixture = ">=1.0" to [dependencies]
++ lvpm_vi_fixture 1.0
+wrote <SANDBOX>\work\lvpm.lock (1 package); commit it with lvpm.toml
+sync: 1 to install
+  install lvpm_vi_fixture 1.0
++ lvpm_vi_fixture 1.0 ... 2 files
+
+done. 1 files written.
+
+relinking 1 folder(s) with <TEMP>\lvpm-relink-package-0.2.1.vi
+  lvpm_vi_fixture
+      <SANDBOX>\work\.lv-venv\lvpm_vi_fixture\1\vi.lib\lvpm_vi_fixture ... <DUR>
+        saved nothing
+
+next: `lvpm launch` starts LabVIEW on this venv — a LabVIEW already open on it
+      has to be restarted to see what was just installed

@@ -1,0 +1,4 @@
+
+refreshing palettes and menus
+  palettes  ok (<DUR>)
+  menus     ok (<DUR>)

@@ -1,0 +1,5 @@
+created <SANDBOX>\work\.lv-venv
+  bound to       LabVIEW 2026 (64-bit)  v<LV_VERSION>  (<LABVIEW>)
+  VI Server port <PORT>
+
+next: `lvpm install` puts lvpm.toml's [dependencies] into it, `lvpm launch` starts LabVIEW on it

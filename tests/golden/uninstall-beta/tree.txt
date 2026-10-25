@@ -1,0 +1,8 @@
+dest/
+dest/.lvpm/
+dest/.lvpm/installed/
+dest/.lvpm/installed/alpha.json 820051f2529df4e5185a9d53dc49520e8db70b65b96aedaf84c85da6e24515de
+dest/LabVIEW/
+dest/LabVIEW/vi.lib/
+dest/LabVIEW/vi.lib/lvpm_fixture/
+dest/LabVIEW/vi.lib/lvpm_fixture/alpha.txt 221bc7e7fe51830795dbbc39813f8a05e9b0886290efb112a4904825354fbb3c

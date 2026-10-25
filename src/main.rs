@@ -1,27 +1,24 @@
 //! lvpm — an open-source package manager for LabVIEW packages.
 
-mod cache;
-mod config;
-mod fetch;
-mod index;
-mod install;
-mod launch;
-mod project;
-mod refresh;
-mod relink;
-mod spec;
-mod target;
-mod venv;
-mod version;
-mod viserver;
+// The CLI is where terminal I/O belongs; the workspace-wide `clippy.toml` bars
+// it from `lvpm-core` only.
+#![allow(clippy::disallowed_methods)]
 
-use anyhow::{Context, Result, bail, ensure};
+use lvpm_core::events::Event;
+use lvpm_core::manifest_edit::DependencyTable;
+use lvpm_core::ops::install::InstallOptions;
+use lvpm_core::ops::lock::{Upgrade, UpgradeTarget};
+use lvpm_core::ops::relink::RelinkOptions;
+use lvpm_core::ops::route::{self, InstallMode, InstallRequest};
+use lvpm_core::ops::sync::{LockFlags, SyncOptions, strictness};
+use lvpm_core::ops::{self, Destination, DestinationFlags, OpEnv};
+use lvpm_core::{config, launch, target, venv, viserver};
+
+mod render;
+
+use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
-use std::collections::HashSet;
-use std::io::Write;
-use std::path::{Path, PathBuf};
-use target::Roots;
-use version::Version;
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(
@@ -70,6 +67,93 @@ struct RelinkArgs {
     keep_open: bool,
 }
 
+impl From<&RelinkArgs> for RelinkOptions {
+    fn from(args: &RelinkArgs) -> RelinkOptions {
+        RelinkOptions {
+            timeout: args.timeout,
+            progress: args.progress.clone(),
+            keep_open: args.keep_open,
+        }
+    }
+}
+
+/// What `install` and `sync` share about putting files on disk.
+#[derive(clap::Args, Clone)]
+struct ApplyArgs {
+    /// Show what would be written, then stop.
+    #[arg(long)]
+    dry_run: bool,
+    /// Copy the files but skip the relink pass.
+    #[arg(long)]
+    no_relink: bool,
+    /// Relink even where LabVIEW runs headless (LV_RTE_HEADLESS is set),
+    /// where the pass is otherwise off: nothing there opens the IDE, and
+    /// a compile or build resolves the links itself as it loads.
+    #[arg(long = "relink", conflicts_with = "no_relink")]
+    force_relink: bool,
+    /// Run the packages' install hooks even where LabVIEW runs headless
+    /// (LV_RTE_HEADLESS is set), where they are otherwise skipped: most
+    /// hooks add palettes, menus or markers for an IDE nobody opens there.
+    #[arg(long = "hooks")]
+    run_hooks: bool,
+    #[command(flatten)]
+    relink: RelinkArgs,
+}
+
+impl ApplyArgs {
+    fn options(&self, no_deps: bool, allow_downgrade: bool) -> InstallOptions {
+        InstallOptions {
+            dry_run: self.dry_run,
+            no_deps,
+            no_relink: self.no_relink,
+            force_relink: self.force_relink,
+            run_hooks: self.run_hooks,
+            allow_downgrade,
+            relink: (&self.relink).into(),
+        }
+    }
+}
+
+/// How `sync`, and `install` with no package in a project, treat lvpm.lock.
+#[derive(clap::Args, Clone)]
+struct SyncArgs {
+    /// Fail, and change nothing, if lvpm.lock is missing or out of date. Where
+    /// LabVIEW runs headless (LV_RTE_HEADLESS is set) this is the default.
+    #[arg(long, conflicts_with_all = ["frozen", "no_locked"])]
+    locked: bool,
+    /// Sync lvpm.lock as it is, even out of date, without making a new one.
+    /// Fails if there is no lock.
+    #[arg(long, conflicts_with = "no_locked")]
+    frozen: bool,
+    /// Make a new lvpm.lock first if it is missing or out of date, even where
+    /// LabVIEW runs headless (LV_RTE_HEADLESS is set) and --locked is the default.
+    #[arg(long)]
+    no_locked: bool,
+    /// Leave out the packages that only dev dependencies need, and uninstall
+    /// them if they are installed.
+    #[arg(long)]
+    no_dev: bool,
+}
+
+impl SyncArgs {
+    fn options(&self, apply: &ApplyArgs, headless: bool) -> SyncOptions {
+        let strictness = strictness(
+            headless,
+            LockFlags {
+                locked: self.locked,
+                frozen: self.frozen,
+                no_locked: self.no_locked,
+            },
+        );
+        SyncOptions {
+            lock: strictness.policy,
+            headless_implied: strictness.implied_by_headless,
+            no_dev: self.no_dev,
+            install: apply.options(false, false),
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum Cmd {
     /// List detected LabVIEW installations.
@@ -81,42 +165,65 @@ enum Cmd {
         #[arg(long, default_value_t = 120)]
         wait: u64,
     },
-    /// Install a package by name, or name@version — or every dependency a
-    /// project manifest lists, with `--manifest`.
+    /// Install a package by name, or name@version. In a project, a bare
+    /// install is `lvpm sync` and a named install is `lvpm add`, unless
+    /// --global, --prefix or --labview-version say where it goes.
     Install {
-        /// Package to install. Omit when using --manifest.
+        /// Package to install. Omit it in a project to sync the project.
+        #[arg(conflicts_with_all = ["locked", "frozen", "no_locked", "no_dev"])]
         package: Option<String>,
-        /// Install every package listed in an `lvpm.toml`'s `[dependencies]`.
-        ///
-        /// All of them resolve into one plan and relink as one pass, so no
-        /// package is relinked before a later one's files are on disk.
+        /// Not supported with a lock: lvpm.lock always holds the full set.
         #[arg(long, value_name = "FILE", conflicts_with = "package")]
         manifest: Option<PathBuf>,
-        /// Show what would be written, then stop.
-        #[arg(long)]
-        dry_run: bool,
         /// Do not install dependencies.
         #[arg(long)]
         no_deps: bool,
-        /// Copy the files but skip the relink pass.
-        #[arg(long)]
-        no_relink: bool,
-        /// Relink even where LabVIEW runs headless (LV_RTE_HEADLESS is set),
-        /// where the pass is otherwise off: nothing there opens the IDE, and
-        /// a compile or build resolves the links itself as it loads.
-        #[arg(long = "relink", conflicts_with = "no_relink")]
-        force_relink: bool,
-        /// Run the packages' install hooks even where LabVIEW runs headless
-        /// (LV_RTE_HEADLESS is set), where they are otherwise skipped: most
-        /// hooks add palettes, menus or markers for an IDE nobody opens there.
-        #[arg(long = "hooks")]
-        run_hooks: bool,
         /// Replace an installed package with an older version. Without this,
         /// resolving to something older than what is installed is refused.
         #[arg(long)]
         allow_downgrade: bool,
         #[command(flatten)]
-        relink: RelinkArgs,
+        apply: ApplyArgs,
+        #[command(flatten)]
+        sync: SyncArgs,
+    },
+    /// Make the destination hold exactly what lvpm.lock lists: install what is
+    /// missing, replace what is at another version, and uninstall what the
+    /// lock does not list, saying so first.
+    ///
+    /// With no lvpm.lock, or one that is out of date, a new one is made first.
+    Sync {
+        #[command(flatten)]
+        apply: ApplyArgs,
+        #[command(flatten)]
+        sync: SyncArgs,
+    },
+    /// Add a package to lvpm.toml, lock the project and sync the destination.
+    ///
+    /// With no constraint it writes `>=` the version it locked. Quote a
+    /// constraint, or the shell reads its `>` as a redirect: "gamma@>=0.5".
+    /// Nothing is written unless the lock and the sync both work.
+    Add {
+        /// The package, or package@constraint, e.g. "gamma@>=0.5".
+        package: String,
+        /// Add it to [dev-dependencies].
+        #[arg(long)]
+        dev: bool,
+        #[command(flatten)]
+        apply: ApplyArgs,
+    },
+    /// Remove a package from lvpm.toml, lock the project and sync the
+    /// destination. A package that another one still requires stays.
+    ///
+    /// Nothing is written unless the lock and the sync both work.
+    Remove {
+        /// The package to take out of lvpm.toml.
+        package: String,
+        /// It is in [dev-dependencies].
+        #[arg(long)]
+        dev: bool,
+        #[command(flatten)]
+        apply: ApplyArgs,
     },
     /// Relink an already-installed package, without reinstalling it.
     ///
@@ -233,16 +340,46 @@ enum Cmd {
         /// A `.lvproj` to open in the started LabVIEW.
         lvproj: Option<PathBuf>,
     },
+    /// Resolve lvpm.toml's dependencies and write lvpm.lock: every package, direct
+    /// or transitive, with its exact version, SHA-256 and source.
+    ///
+    /// Commit lvpm.lock with the project. Locking reads the manifest and the
+    /// sources only, never what is installed. A lock that still represents
+    /// the manifest is left as it is.
+    Lock {
+        /// Write nothing: exit 0 if lvpm.lock exists and is not out of date,
+        /// otherwise exit non-zero and say why on one line. Reads no source.
+        #[arg(long)]
+        check: bool,
+        /// Move every package to the newest version the constraints allow.
+        #[arg(long, conflicts_with_all = ["check", "upgrade_package"])]
+        upgrade: bool,
+        /// Move this package to the newest version the constraints allow, or
+        /// to VERSION, and leave the rest where lvpm.lock has them unless they
+        /// cannot stay. If a manifest constraint excludes VERSION it is
+        /// rewritten, keeping its kind; "*" is never rewritten. Repeat it for
+        /// more than one package.
+        #[arg(
+            long,
+            value_name = "PACKAGE[@VERSION]",
+            value_parser = UpgradeTarget::parse,
+            conflicts_with = "check"
+        )]
+        upgrade_package: Vec<UpgradeTarget>,
+    },
     /// Show what lvpm has installed into the selected target.
     List,
     /// Search the indexes.
-    Search { query: String },
+    Search {
+        /// Text to look for in package names and display names, ignoring case.
+        query: String,
+    },
 }
 
 #[derive(Subcommand)]
 enum VenvCmd {
     /// Create `.lv-venv/` for the project here by default and bind it to a LabVIEW:
-    /// `--labview-version`, else the manifest's `labview-version`.
+    /// `--labview-version`, else the manifest's `labview`.
     Create,
     /// Which venv commands run here would use, and what it is bound to.
     Status,
@@ -257,1279 +394,252 @@ enum VenvCmd {
 #[derive(Subcommand)]
 enum CacheCmd {
     /// Import a .vip/.ogp file or the packages directly inside a directory.
-    Add { path: PathBuf },
+    Add {
+        /// A `.vip` or `.ogp` file, or a directory holding them.
+        path: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
 enum ConfigCmd {
     /// Set a user-level setting. `sources.local` accepts directories; omit them to clear the list.
-    Set { key: String, values: Vec<String> },
+    Set {
+        /// The setting: `cache`, `sources.local` or `venv.dir`.
+        key: String,
+        /// Its value; `sources.local` takes any number of directories.
+        values: Vec<String>,
+    },
     /// Show the effective value of a setting.
-    Get { key: String },
+    Get {
+        /// The setting: `cache`, `sources.local` or `venv.dir`.
+        key: String,
+    },
+}
+
+/// The environment every command runs in, built once from the flags and the
+/// process: core reads neither.
+fn op_env<'a>(cli: &Cli, sink: &'a render::CliSink) -> Result<OpEnv<'a>> {
+    let mut env = OpEnv::new(
+        sink,
+        config::load()?,
+        target::detect()?,
+        std::env::current_dir()?,
+    );
+    env.flags = DestinationFlags {
+        labview_version: cli.labview_version.clone(),
+        prefix: cli.prefix.clone(),
+        global: cli.global,
+        project: cli.project.clone(),
+    };
+    env.refresh = cli.refresh;
+    env.headless = std::env::var_os("LV_RTE_HEADLESS").is_some();
+    Ok(env)
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    let sink = render::CliSink::stdio();
+    let env = op_env(&cli, &sink)?;
     match &cli.cmd {
-        Cmd::Targets => cmd_targets(),
-        Cmd::Start { wait } => cmd_start(&cli, *wait),
+        Cmd::Targets => {
+            print!("{}", render::query::targets(ops::query::targets(&env)));
+            Ok(())
+        }
+        Cmd::Start { wait } => {
+            print!(
+                "{}",
+                render::viserver::started(&ops::start::start(&env, *wait)?)
+            );
+            Ok(())
+        }
         Cmd::Install {
             package,
             manifest,
-            dry_run,
             no_deps,
-            no_relink,
-            force_relink,
-            run_hooks,
             allow_downgrade,
-            relink,
-        } => cmd_install(
-            &cli,
-            package.as_deref(),
-            manifest.as_deref(),
-            *dry_run,
-            *no_deps,
-            *no_relink,
-            *force_relink,
-            *run_hooks,
-            *allow_downgrade,
-            relink,
-        ),
-        Cmd::Relink { package, all, relink } => cmd_relink(&cli, package.as_deref(), *all, relink),
-        Cmd::RunHooks { package, all, timeout } => {
-            cmd_run_hooks(&cli, package.as_deref(), *all, *timeout)
-        }
-        Cmd::Refresh { timeout } => cmd_refresh(&cli, *timeout),
-        Cmd::Uninstall { package, all } => cmd_uninstall(&cli, package.as_deref(), *all),
-        Cmd::AppProbe { ids } => cmd_app_probe(&cli, ids),
-        Cmd::ViProbe { vi } => cmd_vi_probe(&cli, vi),
-        Cmd::ViSave { vi } => cmd_vi_save(&cli, vi),
-        Cmd::ViRun { vi, sets, gets, get_all, timeout, watch, poll_ms, done } => {
-            cmd_vi_run(&cli, vi, sets, gets, *get_all, *timeout, watch.as_deref(), *poll_ms, done)
-        }
-        Cmd::Venv(sub) => cmd_venv(&cli, sub),
-        Cmd::Cache(CacheCmd::Add { path }) => {
-            let config = config::load()?;
-            let imports = index::cache_add(&config.cache, path, cli.refresh)?;
-            for import in &imports {
-                println!("{} {} sha256:{}", if import.reused { "cached" } else { "imported" }, import.path.display(), import.sha256);
+            apply,
+            sync,
+        } => {
+            let request = InstallRequest {
+                package: package.as_deref(),
+                manifest: manifest.as_deref(),
+                no_deps: *no_deps,
+            };
+            let mode = route::install_mode(&env, &request)
+                .map_err(|why| anyhow!(render::sync::route_error(&why)))?;
+            match (mode, package.as_deref()) {
+                (InstallMode::Sync, _) => cmd_sync(&env, &sync.options(apply, env.headless)),
+                // A named install in a project is an add, and always names one.
+                (InstallMode::Add, Some(spec)) => {
+                    env.sink.emit(Event::InstallAddsToProject {
+                        package: spec.to_string(),
+                    });
+                    cmd_add(&env, spec, false, apply)
+                }
+                (InstallMode::Add | InstallMode::Additive, package) => {
+                    ops::install::install(&env, package, &apply.options(*no_deps, *allow_downgrade))
+                }
             }
-            println!("{} package(s) processed", imports.len());
+        }
+        Cmd::Add {
+            package,
+            dev,
+            apply,
+        } => cmd_add(&env, package, *dev, apply),
+        Cmd::Remove {
+            package,
+            dev,
+            apply,
+        } => cmd_remove(&env, package, *dev, apply),
+        Cmd::Sync { apply, sync } => cmd_sync(&env, &sync.options(apply, env.headless)),
+        Cmd::Relink {
+            package,
+            all,
+            relink,
+        } => ops::relink::relink(&env, package.as_deref(), *all, &relink.into()),
+        Cmd::RunHooks {
+            package,
+            all,
+            timeout,
+        } => ops::hooks::run_hooks(&env, package.as_deref(), *all, *timeout),
+        Cmd::Refresh { timeout } => ops::refresh::refresh(&env, *timeout),
+        Cmd::Uninstall { package, all } => {
+            ops::uninstall::uninstall(&env, package.as_deref(), *all)
+        }
+        Cmd::AppProbe { ids } => cmd_app_probe(&env, ids),
+        Cmd::ViProbe { vi } => cmd_vi_probe(&env, vi),
+        Cmd::ViSave { vi } => cmd_vi_save(&env, vi),
+        Cmd::ViRun {
+            vi,
+            sets,
+            gets,
+            get_all,
+            timeout,
+            watch,
+            poll_ms,
+            done,
+        } => cmd_vi_run(
+            &env,
+            vi,
+            sets,
+            gets,
+            *get_all,
+            *timeout,
+            watch.as_deref(),
+            *poll_ms,
+            done,
+        ),
+        Cmd::Venv(sub) => cmd_venv(&env, sub),
+        Cmd::Cache(CacheCmd::Add { path }) => {
+            print!(
+                "{}",
+                render::query::cache_add(&ops::query::cache_add(&env, path)?)
+            );
             Ok(())
         }
         Cmd::Config(ConfigCmd::Set { key, values }) => {
-            config::set(key, values)?;
+            ops::query::config_set(&env, key, values)?;
             println!("set {key}");
             Ok(())
         }
         Cmd::Config(ConfigCmd::Get { key }) => {
-            for value in config::get(key)? {
+            for value in ops::query::config_get(&env, key)? {
                 println!("{value}");
             }
             Ok(())
         }
-        Cmd::Launch { lvproj } => cmd_launch(&cli, lvproj.as_deref()),
-        Cmd::List => cmd_list(&cli),
-        Cmd::Search { query } => cmd_search(&cli, query),
-    }
-}
-
-/// Resolve `--labview` / `--prefix` into a set of roots.
-fn roots_for(cli: &Cli) -> Result<Roots> {
-    match (&cli.labview_version, &cli.prefix) {
-        (Some(_), Some(_)) => bail!("--labview-version and --prefix are mutually exclusive"),
-        (Some(want), None) => {
-            let targets = target::detect()?;
-            if targets.is_empty() {
-                bail!("no LabVIEW installations detected");
-            }
-            Ok(Roots::labview(&target::select(&targets, want)?))
+        Cmd::Launch { lvproj } => {
+            let launched = ops::launch_cmd::launch(&env, lvproj.as_deref())?;
+            print!("{}", render::launch::launched(&launched));
+            Ok(())
         }
-        (None, Some(p)) => Ok(Roots::scratch(p)),
-        (None, None) => bail!(
-            "pick a destination: --labview-version <YYYY> for a real install, --prefix <DIR> for a \
-             scratch tree, or run inside a project that has a venv (`lvpm venv create`)\n\
-             hint: `lvpm targets` lists detected LabVIEW installations"
-        ),
-    }
-}
-
-/// Where a command's packages live.
-enum Destination {
-    /// The LabVIEW installation itself.
-    Global(Roots),
-    /// A `--prefix` sandbox.
-    Scratch(Roots),
-    /// A project's venv.
-    Venv(venv::Venv),
-}
-
-impl Destination {
-    /// Roots for what reads the store or removes from it. Venv-wide for a
-    /// venv — each package has roots of its own for the files themselves.
-    fn store(&self) -> Roots {
-        match self {
-            Destination::Global(r) | Destination::Scratch(r) => r.clone(),
-            Destination::Venv(v) => v.store(),
-        }
-    }
-}
-
-/// Is LabVIEW headless on this machine? `LV_RTE_HEADLESS` is NI's own global
-/// override (LabVIEW 2026+): every LabVIEW start becomes non-interactive —
-/// no activation, no dialogs. Nobody sets it on a workstation, since the IDE
-/// would stop opening, so its presence says "automation machine, no developer
-/// present" more reliably than any flag of ours could. lvpm reads it for the
-/// three decisions that hinge on exactly that: whether a manifest without a
-/// venv means the machine, whether to relink, whether to rebuild palettes.
-fn headless() -> bool {
-    std::env::var_os("LV_RTE_HEADLESS").is_some()
-}
-
-/// Hook entries for printing. The manifest keeps them as `Name=path`, where
-/// the path is wherever the VI sat on the package's build machine
-/// (`<OS Boot Volume Root>\ci-builds\...`) — meaningless here, and long. Only
-/// the name says anything to a reader.
-fn hook_names<I, S>(hooks: I) -> String
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<str>,
-{
-    hooks
-        .into_iter()
-        .map(|h| h.as_ref().split_once('=').map_or_else(|| h.as_ref().to_string(), |(n, _)| n.to_string()))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-/// Settle where a command's packages live, the way cargo settles which crate
-/// you mean: `--prefix` and `--global` say so outright; otherwise a venv at or
-/// above the current directory wins, and only when there is none does
-/// `--labview-version` mean the installation itself.
-///
-/// A manifest with no venv is refused — except on a headless machine, where
-/// the refusal would protect a developer who is not there: a container's
-/// LabVIEW *is* the sandbox, so `lvpm install` in the project means it.
-fn destination(cli: &Cli) -> Result<Destination> {
-    let explicit = |r: Roots| match r.target.is_some() {
-        true => Destination::Global(r),
-        false => Destination::Scratch(r),
-    };
-    if cli.prefix.is_some() || cli.global {
-        return roots_for(cli).map(explicit);
-    }
-    let cwd = std::env::current_dir()?;
-    if headless()
-        && cli.project.is_none()
-        && let venv::Found::ManifestOnly(repo) = venv::probe(&cwd)?
-    {
-        return headless_roots(cli, &repo).map(Destination::Global);
-    }
-    if let Some(v) = venv::find(cli.project.as_deref(), &cwd)? {
-        eprintln!("{}", v.banner());
-        return Ok(Destination::Venv(v));
-    }
-    roots_for(cli).map(explicit)
-}
-
-/// The installation a headless `lvpm install` in a venv-less project means:
-/// `--labview-version` if given, else the manifest's `labview` — the same
-/// choice `lvpm venv create` makes, with the same rule that the manifest's
-/// version is a minimum a newer LabVIEW may satisfy and an older one may not.
-fn headless_roots(cli: &Cli, repo: &Path) -> Result<Roots> {
-    let manifest_path = repo.join(project::FILE_NAME);
-    let proj = project::read(&manifest_path)?;
-    let min_lv = proj.labview.as_deref();
-    let want = cli.labview_version.as_deref().or(min_lv).ok_or_else(|| {
-        anyhow::anyhow!(
-            "which LabVIEW? pass --labview-version <YYYY>, or set labview in {}\n\
-             hint: `lvpm targets` lists what is installed",
-            manifest_path.display()
-        )
-    })?;
-    let targets = target::detect()?;
-    ensure!(!targets.is_empty(), "no LabVIEW installations detected");
-    let t = target::select(&targets, want)?;
-    if let Some(min) = min_lv.and_then(|v| v.trim().parse::<u32>().ok())
-        && t.year() < min
-    {
-        bail!(
-            "{} is older than the project's labview = {min} — a newer LabVIEW may stand in for \
-             the project's minimum, not an older one",
-            t.label()
-        );
-    }
-    eprintln!(
-        "headless (LV_RTE_HEADLESS): {} has a manifest and no venv — using {} itself",
-        repo.display(),
-        t.label()
-    );
-    Ok(Roots::labview(&t))
-}
-
-fn cmd_start(cli: &Cli, wait: u64) -> Result<()> {
-    let roots = roots_for(cli)?;
-    let Some(t) = roots.target else {
-        bail!("start needs a real LabVIEW target, not --prefix");
-    };
-    let already = viserver::is_listening(&t);
-    let port = viserver::ensure_vi_server(&t, std::time::Duration::from_secs(wait))?;
-    println!(
-        "{} — VI Server answering on port {port}{}",
-        t.label(),
-        if already { " (was already running)" } else { "" }
-    );
-    Ok(())
-}
-
-fn cmd_targets() -> Result<()> {
-    let targets = target::detect()?;
-    if targets.is_empty() {
-        println!("no LabVIEW installations detected");
-        return Ok(());
-    }
-    for t in &targets {
-        println!("{:<34} {}", t.label(), t.path.display());
-    }
-    Ok(())
-}
-
-/// The manifest a command belongs to: `--manifest` names it; else the venv's
-/// repo when one is in effect; else `--project`'s; else the nearest
-/// `lvpm.toml` at or above the working directory. None is fine — a package
-/// can be installed without a project.
-fn manifest_for(
-    cli: &Cli,
-    explicit: Option<&Path>,
-    repo: Option<&Path>,
-) -> Result<Option<(PathBuf, project::Project)>> {
-    let path = match (explicit, repo, &cli.project) {
-        (Some(p), _, _) => Some(p.to_path_buf()),
-        (None, Some(r), _) => Some(r.join(project::FILE_NAME)),
-        (None, None, Some(dir)) => Some(dir.join(project::FILE_NAME)).filter(|p| p.is_file()),
-        (None, None, None) => project::find_manifest(&std::env::current_dir()?),
-    };
-    match path {
-        Some(p) => Ok(Some((std::path::absolute(&p)?, project::read(&p)?))),
-        None => Ok(None),
-    }
-}
-
-/// Every index the command should see: global local folders plus hosted
-/// manifest sources, on top of the public indexes unless disabled.
-fn load_index(cli: &Cli, manifest: Option<&(PathBuf, project::Project)>) -> Result<index::Index> {
-    let config = config::load()?;
-    let mut repos: Vec<String> = Vec::new();
-    let mut defaults = true;
-    if let Some((_, proj)) = manifest {
-        repos.extend(proj.resolved_sources()?);
-        defaults = proj.default_sources;
-    }
-    index::load(&config.cache, cli.refresh, &repos, &config.local_sources, defaults)
-}
-
-fn cmd_search(cli: &Cli, query: &str) -> Result<()> {
-    let manifest = manifest_for(cli, None, None)?;
-    let idx = load_index(cli, manifest.as_ref())?;
-    let hits = idx.search(query);
-    if hits.is_empty() {
-        println!("no packages matching {query:?}");
-        return Ok(());
-    }
-    for e in hits.iter().take(40) {
-        println!(
-            "{:<52} {:<14} {}",
-            e.name,
-            e.version.to_string(),
-            e.display_name.as_deref().unwrap_or("")
-        );
-    }
-    if hits.len() > 40 {
-        println!("... and {} more", hits.len() - 40);
-    }
-    Ok(())
-}
-
-fn cmd_list(cli: &Cli) -> Result<()> {
-    let roots = destination(cli)?.store();
-    let installed = install::list_installed(&roots)?;
-    if installed.is_empty() {
-        println!("lvpm has installed nothing into this target");
-        return Ok(());
-    }
-    for m in &installed {
-        println!(
-            "{:<52} {:<14} {:>5} files  {:<12}{}",
-            m.name,
-            m.version,
-            m.files.len(),
-            if m.relinked { "relinked" } else { "NOT relinked" },
-            if m.skipped_hooks.is_empty() {
-                String::new()
-            } else {
-                format!("  (hooks skipped: {})", hook_names(&m.skipped_hooks))
-            }
-        );
-    }
-    Ok(())
-}
-
-fn cmd_refresh(cli: &Cli, timeout: u64) -> Result<()> {
-    let roots = roots_for(cli)?;
-    let Some(t) = roots.target.clone() else {
-        bail!("refresh needs a real LabVIEW target, not --prefix");
-    };
-    refresh_palettes_and_menus(&t, timeout);
-    Ok(())
-}
-
-fn cmd_uninstall(cli: &Cli, package: Option<&str>, all: bool) -> Result<()> {
-    let roots = destination(cli)?.store();
-    let names: Vec<String> = match (package, all) {
-        (Some(p), _) => vec![p.to_string()],
-        (None, true) => install::list_installed(&roots)?.into_iter().map(|m| m.name).collect(),
-        (None, false) => bail!("give a package name, or --all"),
-    };
-    ensure!(!names.is_empty(), "no packages are installed in this target");
-
-    // One VI Server connection for the whole sweep, and one palette refresh at
-    // the end — the hooks are per package, the rebuild is not.
-    let mut conn: Option<viserver::Connection> = None;
-    let mut removed_any = false;
-    let mut failed: Vec<(String, anyhow::Error)> = Vec::new();
-    for name in &names {
-        match uninstall_one(&roots, name, &mut conn) {
-            Ok(removed) => removed_any |= removed > 0,
-            // One bad package must not strand the rest of an --all sweep. A
-            // single named package still fails the command with its own error.
-            Err(e) => {
-                if names.len() > 1 {
-                    println!("uninstall {name} FAILED: {e:#}");
-                }
-                failed.push((name.clone(), e));
+        Cmd::Lock {
+            check,
+            upgrade,
+            upgrade_package,
+        } => match (check, upgrade, upgrade_package.as_slice()) {
+            (true, ..) => ops::lock::check(&env),
+            (_, true, _) => ops::lock::upgrade(&env, &Upgrade::Everything).map(drop),
+            (_, _, []) => ops::lock::lock(&env).map(drop),
+            (_, _, packages) => {
+                ops::lock::upgrade(&env, &Upgrade::Packages(packages.to_vec())).map(drop)
             }
         }
-    }
-    if let Some(c) = conn {
-        c.close();
-    }
-
-    // The same reason as on install, in reverse: the packages' `.mnu` files
-    // are gone, but LabVIEW still shows the palette entries until told. Not
-    // for a venv — its LabVIEW is restarted on launch and rebuilds them then.
-    if removed_any
-        && roots.venv().is_none()
-        && let Some(t) = &roots.target
-    {
-        refresh_palettes_and_menus(t, HOOK_TIMEOUT_SECS);
-    }
-
-    if names.len() == 1 && let Some((_, e)) = failed.pop() {
-        return Err(e);
-    }
-    ensure!(
-        failed.is_empty(),
-        "{} of {} packages failed to uninstall: {}",
-        failed.len(),
-        names.len(),
-        failed.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", ")
-    );
-    Ok(())
-}
-
-/// Remove one package and run its uninstall hooks. Returns the file count, so
-/// the caller knows whether anything left disk and a palette rebuild is owed.
-fn uninstall_one(
-    roots: &Roots,
-    package: &str,
-    conn: &mut Option<viserver::Connection>,
-) -> Result<usize> {
-    let before = install::read_manifest(roots, package)?;
-    // Hooks act on the LabVIEW installation; a venv is not one, so none run there.
-    let hooks = roots.venv().is_none();
-
-    // PreUninstall runs while the package's files are still on disk. Both
-    // uninstall hooks are best-effort: a hook needs a running LabVIEW, and a
-    // hook failure must not leave the package half-present.
-    if hooks && let (Some(hook), Some(t)) = (&before.pre_uninstall_vi, &roots.target) {
-        let info = hook_action_info(&before.name, before.display_name.as_deref(), t, &before.files);
-        match run_hook_vi(conn, t, HOOK_TIMEOUT_SECS, Path::new(hook), &info) {
-            Ok(took) => println!("pre-uninstall ok ({:.1}s)", took.as_secs_f64()),
-            Err(e) => println!("pre-uninstall FAILED: {e:#} — uninstalling anyway"),
+        .map_err(|why| anyhow!(render::lock::error(&why))),
+        Cmd::List => {
+            print!("{}", render::query::list(&ops::query::list(&env)?));
+            Ok(())
         }
-    }
-
-    // PostUninstall runs after the files are gone — including the extracted
-    // hook VI itself, so it runs from a copy that outlives the uninstall.
-    let post = match &before.post_uninstall_vi {
-        Some(hook) if hooks => {
-            let tmp = std::env::temp_dir().join(format!("lvpm-{}-PostUninstall.vi", before.name));
-            std::fs::copy(hook, &tmp)
-                .map(|_| tmp)
-                .map_err(|e| println!("note: cannot stage PostUninstall.vi ({e}) — not running it"))
-                .ok()
-        }
-        _ => None,
-    };
-
-    let (removed, m) = install::uninstall(roots, package).with_context(|| match roots.venv() {
-        Some(_) => "removing the package's files — if a LabVIEW is running on this venv, close it first",
-        None => "removing the package's files",
-    })?;
-    println!("removed {} {} ({removed} files)", m.name, m.version);
-
-    if let (Some(tmp), Some(t)) = (&post, &roots.target) {
-        let info = hook_action_info(&m.name, m.display_name.as_deref(), t, &m.files);
-        match run_hook_vi(conn, t, HOOK_TIMEOUT_SECS, tmp, &info) {
-            Ok(took) => println!("post-uninstall ok ({:.1}s)", took.as_secs_f64()),
-            Err(e) => println!("post-uninstall FAILED: {e:#}"),
-        }
-        let _ = std::fs::remove_file(tmp);
-    }
-
-    // Hooks we still do not run, and hooks we could not run here: an install
-    // made before uninstall hooks were extracted has nothing on disk to run.
-    let unrun: Vec<&String> = m
-        .skipped_hooks
-        .iter()
-        .filter(|h| {
-            let ran_pre = hooks && m.pre_uninstall_vi.is_some() && h.starts_with("PreUninstall=");
-            let ran_post = post.is_some() && h.starts_with("PostUninstall=");
-            !(ran_pre || ran_post)
-                && (h.starts_with("PreUninstall=") || h.starts_with("PostUninstall="))
-        })
-        .collect();
-    if !unrun.is_empty() {
-        let why = match hooks {
-            true => "installed before uninstall hooks existed",
-            false => "hooks do not run in a venv",
-        };
-        println!("note: declared but not run ({why}): {}", hook_names(unrun));
-    }
-    Ok(removed)
-}
-
-/// Uninstall has no --relink-timeout to borrow, and a hook is one VI run.
-const HOOK_TIMEOUT_SECS: u64 = 300;
-
-/// What one resolution step asks of the index.
-enum Req {
-    /// This version and no other — a root written as an exact pin.
-    Exact(Version),
-    /// The newest version not below the floor; no floor means the newest.
-    Floor(Option<Version>),
-}
-
-impl From<&project::Constraint> for Req {
-    fn from(c: &project::Constraint) -> Req {
-        use project::Constraint::*;
-        match c {
-            Exact(v) => Req::Exact(v.clone()),
-            AtLeast(v) => Req::Floor(Some(v.clone())),
-            Any => Req::Floor(None),
-        }
-    }
-}
-
-impl std::fmt::Display for Req {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Req::Exact(v) => write!(f, "@{}", v.raw),
-            Req::Floor(Some(v)) => write!(f, " >={}", v.raw),
-            Req::Floor(None) => Ok(()),
-        }
-    }
-}
-
-fn cmd_install(
-    cli: &Cli,
-    package: Option<&str>,
-    manifest: Option<&Path>,
-    dry_run: bool,
-    no_deps: bool,
-    no_relink: bool,
-    force_relink: bool,
-    run_hooks: bool,
-    allow_downgrade: bool,
-    relink_args: &RelinkArgs,
-) -> Result<()> {
-    // Headless (containers, CI): nothing opens the IDE, and whatever the job
-    // does next — compile, build, test — resolves the links as it loads, so
-    // the pass is off unless asked for. Skipping it saved ten minutes of a
-    // twelve-minute DQMH install; the mass compile after it found nothing
-    // wrong.
-    let headless_skip = headless() && !force_relink && !no_relink;
-    let no_relink = no_relink || headless_skip;
-    // Hooks likewise: the ones measured (DQMH's six) write a marker file and
-    // add a palette entry — IDE furniture. Skipping them means a headless
-    // install never starts LabVIEW at all. A package whose hook does real
-    // setup gets `--hooks`; the caveat is documented with the flag.
-    let hooks_off_headless = headless() && !run_hooks;
-    let dest = destination(cli)?;
-    // The store is one per destination; in a venv each package gets roots of
-    // its own inside the loop, because every package there is its own addon.
-    let store = dest.store();
-    let venv = match &dest {
-        Destination::Venv(v) => Some(v.clone()),
-        _ => None,
-    };
-    let lv_gate = store.target.as_ref().map(|t| t.version);
-    // Hooks act on the LabVIEW installation; a venv is not one, and a headless
-    // machine has no one to see what they set up.
-    let hooks_on = venv.is_none() && !hooks_off_headless;
-
-    // The project this install belongs to, if any: its `[sources]` count even
-    // when a single package is named. Inside a project a bare `lvpm install`
-    // means the manifest's dependencies — the way `npm install` does.
-    let found = manifest_for(cli, manifest, venv.as_ref().map(|v| v.repo.as_path()))?;
-    let (wanted, from_manifest): (Vec<(String, project::Constraint)>, _) = match (package, &found) {
-        (Some(p), _) => {
-            let w = match p.split_once('@') {
-                Some((n, v)) => vec![(n.to_string(), project::Constraint::parse(v)?)],
-                None => vec![(p.to_string(), project::Constraint::Any)],
-            };
-            (w, None)
-        }
-        (None, Some((path, proj))) => (proj.dependencies.clone(), Some((path, proj))),
-        (None, None) => bail!("give a package name, or --manifest <FILE>"),
-    };
-    ensure!(!wanted.is_empty(), "the manifest lists no [dependencies]");
-
-    if let Some((path, proj)) = &from_manifest {
-        eprintln!(
-            "manifest: {}{} — {} dependenc{}",
-            path.display(),
-            proj.name.as_deref().map(|n| format!(" ({n})")).unwrap_or_default(),
-            wanted.len(),
-            if wanted.len() == 1 { "y" } else { "ies" }
-        );
-        if let Some(v) = &proj.labview {
-            eprintln!("      manifest says labview = {v:?} (minimum)");
-        }
-    }
-
-    match &store.target {
-        Some(t) => eprintln!("target: {}  ({})", t.label(), t.path.display()),
-        None => eprintln!("target: scratch tree at {}", store.application.display()),
-    }
-
-    eprintln!("loading indexes...");
-    let idx = load_index(cli, found.as_ref())?;
-    eprintln!("  {} package versions known", idx.entries.len());
-
-    // Depth-first over the dependency graph, from every root at once. No
-    // conflict resolution: the first resolution of a name wins, and a floor
-    // resolves to the newest version satisfying it. Roots are seeded in
-    // reverse so the plan comes out in the order they were written.
-    //
-    // A root asks for what its constraint says; a dependency carried by a
-    // package is always a floor.
-    let mut queue: Vec<(String, Req, bool)> =
-        wanted.iter().rev().map(|(n, c)| (n.clone(), Req::from(c), true)).collect();
-    let mut done: HashSet<String> = HashSet::new();
-    let mut plan: Vec<index::Entry> = Vec::new();
-    let mut unresolved: Vec<String> = Vec::new();
-
-    while let Some((n, req, is_root)) = queue.pop() {
-        if !done.insert(n.to_lowercase()) {
-            continue;
-        }
-        // A dependency the installed version already satisfies stays as it
-        // is: `install foo` upgrades foo, not everything foo happens to need.
-        // Roots go through — asking for a package means asking for the
-        // version the index resolves, and the install loop decides whether
-        // that is a no-op, an upgrade, or a refused downgrade.
-        if !is_root
-            && let Req::Floor(min) = &req
-            && let Ok(have) = install::read_manifest(&store, &n)
-            && min.as_ref().is_none_or(|m| &Version::parse(&have.version) >= m)
-        {
-            eprintln!("  = {} {} already installed, satisfies dependency", have.name, have.version);
-            continue;
-        }
-        let entry = match &req {
-            Req::Exact(v) => idx.versions_of(&n).into_iter().find(|e| &e.version == v).cloned(),
-            Req::Floor(min) => idx.best(&n, min.as_ref(), lv_gate).cloned(),
-        };
-
-        let Some(entry) = entry else {
-            if is_root {
-                // One missing root must not throw away fifty good ones:
-                // collect them all and fail once, with the whole list.
-                unresolved.push(format!("{n}{req}"));
-            } else {
-                eprintln!("  ! dependency {n} unresolved, skipping");
-            }
-            continue;
-        };
-        if !no_deps {
-            for r in &entry.requires {
-                queue.push((r.name.clone(), Req::Floor(r.min.clone()), false));
-            }
-        }
-        plan.push(entry);
-    }
-
-    if !unresolved.is_empty() {
-        bail!(
-            "not found in the configured indexes:\n  {}\n\
-             hint: `lvpm search <name>` to see what is available; a [sources] entry \
-             in {} adds a repository",
-            unresolved.join("\n  "),
-            project::FILE_NAME
-        );
-    }
-
-    plan.reverse(); // dependencies before dependents
-
-    println!("\nresolved {} package{}:", plan.len(), if plan.len() == 1 { "" } else { "s" });
-    for e in &plan {
-        println!("  {} {}", e.name, e.version);
-    }
-    println!();
-
-    if let Some((_, proj)) = &from_manifest
-        && !proj.nipm.is_empty()
-    {
-        println!(
-            "note: the manifest also lists {} [nipm.dependencies] — those are NI Package",
-            proj.nipm.len()
-        );
-        println!("      Manager packages and lvpm does not install them.
-");
-    }
-
-    let client = reqwest::blocking::Client::builder()
-        .user_agent(concat!("lvpm/", env!("CARGO_PKG_VERSION")))
-        .build()?;
-    let config = config::load()?;
-    let package_cache = cache::Cache::open(&config.cache)?;
-
-    let mut total_writes = 0usize;
-    // Any package declared a hook this install did not run — decides whether
-    // the headless note below is owed. Each package already said which.
-    let mut hooks_unrun = false;
-    // PostInstall hooks extracted during this run, executed only after the
-    // relink pass has made them runnable.
-    let mut hook_runs: Vec<(String, PathBuf, Vec<String>)> = Vec::new();
-    // PreInstall hooks run inline instead, before their package's files are
-    // copied — that is the contract their PostInstall counterparts rely on
-    // (DQMH's pair passes a marker file between them).
-    let mut hook_conn: Option<viserver::Connection> = None;
-    // Per package, in install order: the folders its files landed in. Relinking
-    // happens after every package is on disk, so no package can be relinked
-    // against a dependency that is not there yet.
-    let mut relink_work: Vec<(String, Vec<PathBuf>)> = Vec::new();
-
-    for e in &plan {
-        // In a venv every package is an addon of its own; the store is shared.
-        let roots = match &venv {
-            Some(v) => v.roots_for_pkg(&e.name)?,
-            None => store.clone(),
-        };
-        // An installed package is judged by version. The same one is left
-        // alone; an older one is upgraded, its recorded footprint removed
-        // first so files the new version no longer ships do not linger; a
-        // newer one is never silently downgraded.
-        let installed = match install::is_installed(&roots, &e.name) {
-            true => Some(install::read_manifest(&roots, &e.name)?),
-            false => None,
-        };
-        if let Some(old) = &installed {
-            use std::cmp::Ordering::*;
-            let order = Version::parse(&old.version).cmp(&e.version);
-            match order {
-                Equal => {
-                    println!("= {} {} already installed", e.name, old.version);
-                    continue;
-                }
-                Greater if !allow_downgrade => {
-                    println!(
-                        "= {} {} installed, newer than {} — not downgrading (pass --allow-downgrade)",
-                        e.name, old.version, e.version
-                    );
-                    continue;
-                }
-                Greater | Less => {}
-            }
-            let mark = if order == Less { "^" } else { "v" };
-            if dry_run {
-                println!(
-                    "{mark} {} {} -> {}: {} old files would be removed first",
-                    e.name,
-                    old.version,
-                    e.version,
-                    old.files.len()
-                );
-            } else {
-                println!("{mark} {} {} -> {}: removing the old version first", e.name, old.version, e.version);
-                uninstall_one(&store, &e.name, &mut hook_conn)?;
-            }
-        }
-        print!("{} {} {} ... ", if dry_run { "?" } else { "+" }, e.name, e.version);
-        std::io::stdout().flush().ok();
-
-        let bytes = fetch::package(&package_cache, &client, e)?;
-
-        let mut zip = install::open_archive(bytes)?;
-        let spec = spec::parse(&read_spec(&mut zip)?)?;
-        let p = install::plan(&roots, &spec, &mut zip)?;
-
-        total_writes += p.writes.len();
-
-        if dry_run {
-            println!("{} files would be written", p.writes.len());
-            for w in p.writes.iter().take(6) {
-                println!("      {}{}", w.dest.display(), if w.overwrites { "   (overwrites)" } else { "" });
-            }
-            if p.writes.len() > 6 {
-                println!("      ... and {} more", p.writes.len() - 6);
-            }
-            relink_work.push((e.name.clone(), relink::folders_for_spec(&roots, &spec)?));
-        } else {
-            let pre = match spec.script_vis.iter().any(|(h, v)| h == "PreInstall" && !v.is_empty())
-            {
-                true => install::extract_hook(&roots, &e.name, &mut zip, "PreInstall.vi")?,
-                false => None,
-            };
-            if hooks_on && let (Some(vi), Some(t)) = (&pre, &roots.target) {
-                let planned: Vec<String> =
-                    p.writes.iter().map(|w| w.dest.to_string_lossy().into_owned()).collect();
-                let info =
-                    hook_action_info(&e.name, e.display_name.as_deref(), t, &planned);
-                match run_hook_vi(&mut hook_conn, t, relink_args.timeout, vi, &info) {
-                    Ok(took) => print!("[pre-install ok, {:.1}s] ", took.as_secs_f64()),
-                    Err(err) => print!("[pre-install FAILED: {err:#}] "),
-                }
-                std::io::stdout().flush().ok();
-            }
-            let m = install::apply(&roots, &spec, &mut zip, &p, pre.as_deref())?;
-            println!("{} files", m.files.len());
-            relink_work.push((e.name.clone(), m.relink_folders.iter().map(PathBuf::from).collect()));
-            if hooks_on && let Some(hook) = &m.post_install_vi {
-                hook_runs.push((e.name.clone(), PathBuf::from(hook), m.files.clone()));
-            }
-            // The manifest assumes a global install runs its hooks; headless
-            // did not, and `lvpm list` should say so.
-            if hooks_off_headless && venv.is_none() {
-                for (h, v) in &spec.script_vis {
-                    install::mark_hook_skipped(&roots, &e.name, &format!("{h}={v}"))?;
-                }
-            }
-        }
-
-        if !p.kept.is_empty() {
-            println!("      {} existing file(s) left alone (Replace Mode = If Newer)", p.kept.len());
-        }
-        for (dir, n) in &p.skipped_groups {
-            println!("      {n} file(s) for {dir} skipped — a venv holds LabVIEW-tree content only");
-        }
-        for miss in &p.missing_from_archive {
-            println!("      ! listed in spec but absent from archive: {miss}");
-        }
-        // Warn only about hooks this install owes and will not run. Globally,
-        // PreInstall has run, PostInstall runs after the relink pass, and the
-        // uninstall hooks are extracted for `lvpm uninstall` to run — nothing
-        // to say. In a venv, or headless, no hook runs at all, so every
-        // declared one is reported.
-        let skipped: Vec<String> = spec
-            .script_vis
-            .iter()
-            .filter(|(h, _)| {
-                !hooks_on
-                    || (h == "PostInstall" && !hook_runs.iter().any(|(n, _, _)| n == &e.name))
-            })
-            .map(|(h, v)| format!("{h}={v}"))
-            .collect();
-        if !skipped.is_empty() {
-            println!("      hooks not run: {}", hook_names(&skipped));
-            hooks_unrun = true;
-        }
-    }
-    if hooks_off_headless && venv.is_none() && hooks_unrun {
-        println!("\nhooks: skipped — LabVIEW runs headless here (LV_RTE_HEADLESS). Install hooks mostly add");
-        println!("      palettes, menus or markers for the IDE; a package whose hook does real setup needs --hooks.");
-    }
-
-    if dry_run {
-        println!("\ndry run: {total_writes} files would be written, nothing changed");
-    } else {
-        println!("\ndone. {total_writes} files written.");
-    }
-
-    if let Some(c) = hook_conn.take() {
-        c.close();
-    }
-
-    // Relink is the second phase, and only a real LabVIEW installation has a
-    // LabVIEW to do it: a scratch tree has no VI Server to talk to.
-    let folders: usize = relink_work.iter().map(|(_, f)| f.len()).sum();
-    let target = store.target.clone();
-    if folders == 0 {
-        // Nothing with linker tables was installed — palettes and docs only.
-    } else if target.is_none() {
-        println!("\nrelink: skipped — a scratch tree has no LabVIEW to relink with");
-    } else if headless_skip {
-        println!("\nrelink: skipped — LabVIEW runs headless here (LV_RTE_HEADLESS); a compile or build");
-        println!("      resolves the links as it loads. --relink forces the pass, `lvpm relink --all` runs it later.");
-    } else if no_relink {
-        println!("\nrelink: skipped (--no-relink). These VIs still declare the paths their");
-        println!("      build machine wrote, so run `lvpm relink <package>` before using them.");
-    } else if dry_run {
-        println!("\nrelink: {folders} folder(s) across {} package(s):", relink_work.len());
-        for (pkg, dirs) in &relink_work {
-            for d in dirs {
-                println!("      {pkg}: {}", d.display());
-            }
-        }
-    } else {
-        match &venv {
-            // A LabVIEW of the venv's own, started after the files landed so
-            // that it sees them, and closed again unless asked to stay.
-            Some(v) => {
-                let inst = launch::ensure_instance(v, true, std::time::Duration::from_secs(180))?;
-                let outcome = run_relink(&store, inst.port, relink_args, &relink_work);
-                if relink_args.keep_open {
-                    println!("\nleaving the venv LabVIEW open (--keep-open), VI Server on port {}", inst.port);
-                } else {
-                    inst.shutdown_if_spawned();
-                }
-                outcome?;
-            }
-            None => {
-                let t = target.as_ref().expect("a real target, checked above");
-                let port = viserver::ensure_vi_server(t, std::time::Duration::from_secs(120))?;
-                run_relink(&store, port, relink_args, &relink_work)?;
-            }
-        }
-    }
-
-    // PostInstall hooks, after relinking so the hook VI and whatever it loads
-    // are runnable. Failures are reported, not fatal: the files are installed.
-    if !hook_runs.is_empty() {
-        if dry_run {
-            println!("
-post-install hooks that would run:");
-            for (pkg, vi, _) in &hook_runs {
-                println!("  {pkg}: {}", vi.display());
-            }
-        } else if let Some(t) = &target {
-            run_post_install_hooks(&store, t, relink_args, &hook_runs);
-        } else {
-            println!("
-post-install hooks: skipped — a scratch tree has no LabVIEW to run them");
-        }
-    }
-
-    // Palettes and menus last, after the hooks: a hook is free to write more
-    // palette files of its own. Not for a venv: its LabVIEW
-    // is started fresh on launch and builds them from the overlay then.
-    if total_writes > 0 && !dry_run && venv.is_none() {
-        match &target {
-            // A headless LabVIEW (containers, CI) shows no palette to anyone,
-            // and rebuilding one would start LabVIEW for nothing when the
-            // install had no hooks to run.
-            Some(_) if headless() => {
-                println!("\npalettes and menus: not refreshed — LabVIEW runs headless here (`lvpm refresh` if wanted)");
-            }
-            Some(t) => refresh_palettes_and_menus(t, HOOK_TIMEOUT_SECS),
-            // Nothing to refresh: a scratch tree's palettes belong to no IDE.
-            None => {}
-        }
-    }
-    if total_writes > 0 && !dry_run && venv.is_some() {
-        println!("\nnext: `lvpm launch` starts LabVIEW on this venv — a LabVIEW already open on it");
-        println!("      has to be restarted to see what was just installed");
-    }
-
-    Ok(())
-}
-
-/// Drive `Relink Package.vi` over every folder, one package at a time.
-///
-/// One LabVIEW session for the whole run: the relink VI is loaded once, and
-/// each folder is a fresh call into it. A folder that fails is reported and the
-/// rest still run — the alternative is that one bad package leaves the others
-/// copied but unlinked, which is the state this pass exists to get out of.
-/// Re-run PostInstall hooks for already-installed packages. The hook VI was
-/// extracted at install time; the package's files are not touched.
-fn cmd_run_hooks(cli: &Cli, package: Option<&str>, all: bool, timeout: u64) -> Result<()> {
-    let roots = roots_for(cli)?;
-    let Some(t) = roots.target.clone() else {
-        bail!("run-hooks needs a real LabVIEW target, not --prefix");
-    };
-
-    let manifests = if all {
-        install::list_installed(&roots)?
-    } else {
-        let Some(p) = package else { bail!("give a package name, or --all") };
-        vec![install::read_manifest(&roots, p)?]
-    };
-
-    let work: Vec<install::Manifest> =
-        manifests.into_iter().filter(|m| m.post_install_vi.is_some()).collect();
-    if work.is_empty() {
-        println!("nothing to do: no package with an extracted PostInstall hook");
-        return Ok(());
-    }
-
-    let args = RelinkArgs { timeout, progress: None, keep_open: false };
-    let mut conn: Option<viserver::Connection> = None;
-    let mut failed = 0usize;
-
-    for m in &work {
-        let vi = PathBuf::from(m.post_install_vi.as_ref().unwrap());
-        if !vi.is_file() {
-            println!("{}: extracted hook is gone ({}) — reinstall the package", m.name, vi.display());
-            failed += 1;
-            continue;
-        }
-
-        print!("{} ... ", m.name);
-        std::io::stdout().flush().ok();
-        let info = hook_action_info(&m.name, m.display_name.as_deref(), &t, &m.files);
-        match run_hook_vi(&mut conn, &t, args.timeout, &vi, &info) {
-            Ok(took) => println!("ok ({:.1}s)", took.as_secs_f64()),
-            Err(e) => {
-                println!("FAILED: {e:#}");
-                failed += 1;
-            }
-        }
-    }
-    if let Some(c) = conn {
-        c.close();
-    }
-    // A hook that writes palette files needs the same refresh an install
-    // gives it, otherwise re-running one by hand fixes nothing visible.
-    refresh_palettes_and_menus(&t, args.timeout);
-    if failed > 0 {
-        bail!("{failed} hook(s) failed");
-    }
-    Ok(())
-}
-
-/// Run each package's extracted `PostInstall.vi`, one at a time, and report.
-fn run_post_install_hooks(
-    roots: &Roots,
-    target: &target::LvTarget,
-    args: &RelinkArgs,
-    hooks: &[(String, PathBuf, Vec<String>)],
-) {
-    println!("
-running {} post-install hook(s)", hooks.len());
-    let mut conn: Option<viserver::Connection> = None;
-    for (pkg, vi, files) in hooks {
-        print!("  {pkg} ... ");
-        std::io::stdout().flush().ok();
-        let info = hook_action_info(pkg, None, target, files);
-        match run_hook_vi(&mut conn, target, args.timeout, vi, &info) {
-            Ok(took) => println!("ok ({:.1}s)", took.as_secs_f64()),
-            Err(e) => {
-                println!("FAILED: {e:#}");
-                // So `lvpm list` shows it; a failed hook is otherwise only in
-                // this scrollback.
-                let _ = install::mark_hook_skipped(roots, pkg, &format!("PostInstall={}", vi.display()));
-            }
-        }
-    }
-    if let Some(c) = conn {
-        c.close();
-    }
-}
-
-/// Rebuild the palettes and the File/Tools/Help menus from what is now on
-/// disk — the last step of an install, after the post-install hooks.
-///
-/// Without it a package's palette and Tools entries stay invisible until
-/// LabVIEW is restarted, however well the files were copied and relinked. See
-/// [`refresh`] for why it runs LabVIEW's own VIs rather than the two
-/// Application methods directly.
-///
-/// Best-effort, like the hooks: the files are installed either way, and a
-/// refresh that fails costs the user a restart, not the package.
-fn refresh_palettes_and_menus(target: &target::LvTarget, timeout_secs: u64) {
-    println!("\nrefreshing palettes and menus");
-    let outcomes = match refresh::run(target, std::time::Duration::from_secs(timeout_secs)) {
-        Ok(o) => o,
-        Err(e) => {
-            println!("  SKIPPED: {e:#}");
-            println!("  the files are installed; `lvpm refresh` retries just this step");
-            return;
-        }
-    };
-    for o in &outcomes {
-        match &o.result {
-            Ok(took) => println!("  {:<9} ok ({:.1}s)", o.what, took.as_secs_f64()),
-            // A restart does what the refresh would have: say so, since
-            // otherwise the package looks broken rather than merely unlisted.
-            Err(e) => println!("  {:<9} FAILED: {e:#}\n      restart LabVIEW to pick these up", o.what),
-        }
-    }
-}
-
-/// The attribute names are the ones hook VIs read back with Get Variant Attribute
-/// (observed in the DQMH hooks); `Quiet Mode` is the one that matters — FALSE
-/// is what turns a hook error into a modal dialog parked over the install.
-fn hook_action_info(
-    package: &str,
-    display_name: Option<&str>,
-    target: &target::LvTarget,
-    files: &[String],
-) -> viserver::LvValue {
-    use viserver::LvValue;
-    let paths: Vec<LvValue> =
-        files.iter().map(|f| LvValue::Path(f.replace('/', "\\"))).collect();
-    let files_installed = LvValue::array(paths)
-        .unwrap_or_else(|_| LvValue::empty_array(viserver::TD_PATH));
-    LvValue::Variant {
-        value: Box::new(LvValue::Str(String::new())),
-        attrs: vec![
-            ("Package Name".into(), LvValue::Str(package.into())),
-            (
-                "Package Display Name".into(),
-                LvValue::Str(display_name.unwrap_or(package).into()),
-            ),
-            ("LabVIEW Target Version".into(), LvValue::Str(format!("{}", target.version))),
-            ("VIPM Version".into(), LvValue::Str(format!("lvpm {}", env!("CARGO_PKG_VERSION")))),
-            ("Quiet Mode".into(), LvValue::Bool(true)),
-            ("Mass Compile On".into(), LvValue::Bool(false)),
-            ("Files Installed".into(), files_installed),
-            ("Folders Created".into(), LvValue::empty_array(viserver::TD_PATH)),
-        ],
-    }
-}
-
-/// Run one hook VI to completion over a lazily opened, shared connection.
-fn run_hook_vi(
-    conn: &mut Option<viserver::Connection>,
-    target: &target::LvTarget,
-    timeout_secs: u64,
-    vi: &Path,
-    action_info: &viserver::LvValue,
-) -> Result<std::time::Duration> {
-    let timeout = std::time::Duration::from_secs(timeout_secs);
-    if conn.is_none() {
-        let port = viserver::ensure_vi_server(target, std::time::Duration::from_secs(120))?;
-        *conn = Some(viserver::Connection::connect("127.0.0.1", port, timeout)?);
-    }
-    let c = conn.as_mut().unwrap();
-    // Timed from the open: loading the hook's hierarchy is most of what a hook
-    // costs (a DQMH pre-install reads as 0.0s otherwise), and it is work the
-    // hook caused, not the connection.
-    let t0 = std::time::Instant::now();
-    let r = c.open_vi_reference(vi)?;
-    // Best-effort: the standard hook template has this control, but a hook is
-    // free not to — running it matters more than parameterising it.
-    let _ = c.ctrl_val_set(r, "Variant", action_info.clone());
-    let run = c.run_vi(r);
-    let _ = c.release(r);
-    run.map(|()| t0.elapsed())
-}
-
-/// Drive `Relink Package.vi` over every folder through the LabVIEW answering
-/// VI Server on `port` — the target's own, or one started on a venv. Making it
-/// answer is the caller's job; this only talks to it.
-fn run_relink(
-    roots: &Roots,
-    port: u16,
-    args: &RelinkArgs,
-    work: &[(String, Vec<PathBuf>)],
-) -> Result<()> {
-    let vi = relink::locate_vi()?;
-    // One walk covers every folder nested under it, so overlapping packages
-    // share a run instead of relinking the same tree twice — 18 of the first
-    // pass's 109 folders were nested repeats costing 17 of its 61 minutes.
-    let asked: usize = work.iter().map(|(_, f)| f.len()).sum();
-    let plan = relink::collapse_work(work);
-
-    print!("\nrelinking {} folder(s) with {}", plan.len(), vi.display());
-    if plan.len() < asked {
-        print!("  ({} covered by a parent)", asked - plan.len());
-    }
-    println!();
-    let mut r = relink::Relinker::open(port, &vi, std::time::Duration::from_secs(args.timeout))
-        .with_context(|| {
-            format!(
-                "cannot reach LabVIEW to relink on VI Server port {port}\n\
-                 the files are installed; `lvpm relink <package>` retries just this pass"
-            )
-        })?;
-    r.watch(args.progress.as_deref());
-
-    let mut failed: Vec<String> = Vec::new();
-    for (d, pkgs) in &plan {
-        print!("  {}\n      {} ... ", pkgs.join(", "), d.display());
-        std::io::stdout().flush().ok();
-        match r.run(d) {
-            Ok(o) => {
-                println!("{:.1}s", o.took.as_secs_f64());
-                // The VI's own account of what it saved, as a count and
-                // folder-relative names — see `relink::summarize_log`.
-                for line in relink::summarize_log(&o.log, d) {
-                    println!("        {line}");
-                }
-            }
-            Err(e) => {
-                println!("FAILED");
-                println!("      {e:#}");
-                // The folder may have been walking for several packages.
-                failed.extend(pkgs.iter().cloned());
-            }
-        }
-    }
-    for (pkg, _) in work {
-        if !failed.iter().any(|f| f == pkg) {
-            install::mark_relinked(roots, pkg)?;
-        }
-    }
-    r.close();
-
-    if !failed.is_empty() {
-        failed.sort();
-        failed.dedup();
-        bail!(
-            "relink failed for: {}\nthe files are installed; fix the cause and run \
-             `lvpm relink <package>`",
-            failed.join(", ")
-        );
-    }
-    Ok(())
-}
-
-fn cmd_relink(cli: &Cli, package: Option<&str>, all: bool, args: &RelinkArgs) -> Result<()> {
-    let dest = destination(cli)?;
-    let roots = dest.store();
-    let Some(t) = roots.target.clone() else {
-        bail!("relink needs a real LabVIEW target, not --prefix");
-    };
-    let manifests = match (package, all) {
-        (Some(p), _) => vec![install::read_manifest(&roots, p)?],
-        // Same one pass `install` runs, over everything already installed:
-        // one VI reference, every folder, no package relinked before another
-        // package's files are on disk.
-        (None, true) => install::list_installed(&roots)?,
-        (None, false) => bail!("give a package name, or --all"),
-    };
-    ensure!(!manifests.is_empty(), "no packages are installed in this target");
-
-    let mut work: Vec<(String, Vec<PathBuf>)> = Vec::new();
-    for m in manifests {
-        // Manifests from before the folders were recorded fall back to the
-        // per-file approximation, which is all they can support.
-        let folders: Vec<PathBuf> = if m.relink_folders.is_empty() {
-            relink::folders_for(&m.files)
-        } else {
-            m.relink_folders.iter().map(PathBuf::from).collect()
-        };
-        if folders.is_empty() {
-            println!(
-                "{} {} installed no VIs, libraries or LLBs — nothing to relink",
-                m.name, m.version
-            );
-            continue;
-        }
-        work.push((m.name, folders));
-    }
-    if work.is_empty() {
-        return Ok(());
-    }
-    match &dest {
-        // Fresh, as on install: a LabVIEW that predates the files on disk
-        // cannot see them, and relinking against what it does see is wrong.
-        Destination::Venv(v) => {
-            let inst = launch::ensure_instance(v, true, std::time::Duration::from_secs(180))?;
-            let outcome = run_relink(&roots, inst.port, args, &work);
-            if args.keep_open {
-                println!("\nleaving the venv LabVIEW open (--keep-open), VI Server on port {}", inst.port);
-            } else {
-                inst.shutdown_if_spawned();
-            }
-            outcome
-        }
-        _ => {
-            let port = viserver::ensure_vi_server(&t, std::time::Duration::from_secs(120))?;
-            run_relink(&roots, port, args, &work)
-        }
-    }
-}
-
-fn cmd_venv(cli: &Cli, sub: &VenvCmd) -> Result<()> {
-    let cwd = std::env::current_dir()?;
-    match sub {
-        VenvCmd::Create => {
-            let start = cli.project.clone().unwrap_or(cwd);
-            let v = venv::create(&start, cli.labview_version.as_deref())?;
-            println!("created {}", v.dir.display());
-            println!("  bound to       {}  ({})", v.target.label(), v.target.path.display());
-            println!("  VI Server port {}", v.port);
-            println!(
-                "\nnext: `lvpm install` puts {}'s [dependencies] into it, `lvpm launch` starts LabVIEW on it",
-                project::FILE_NAME
+        Cmd::Search { query } => {
+            print!(
+                "{}",
+                render::query::search(query, &ops::query::search(&env, query)?)
             );
             Ok(())
         }
-        VenvCmd::Status => match venv::find(cli.project.as_deref(), &cwd)? {
-            Some(v) => {
-                let installed = install::list_installed(&v.store())?;
-                println!("{}", v.dir.display());
-                println!("  project        {}", v.repo.display());
-                println!("  bound to       {}  ({})", v.target.label(), v.target.path.display());
-                println!("  VI Server port {}", v.port);
-                println!(
-                    "  packages       {} installed, {} not yet relinked",
-                    installed.len(),
-                    installed.iter().filter(|m| !m.relinked).count()
-                );
-                println!(
-                    "  LabVIEW        {}",
-                    if launch::is_listening(v.port) { "running on this venv" } else { "not running on this venv" }
-                );
-                Ok(())
-            }
-            None => {
-                println!("no venv at or above {} — `lvpm venv create` makes one", cwd.display());
-                Ok(())
-            }
-        },
-        VenvCmd::Remove { yes } => {
-            let Some(v) = venv::find(cli.project.as_deref(), &cwd)? else {
-                bail!("no venv at or above {}", cwd.display());
-            };
-            venv::remove(&v, *yes)
-        }
     }
 }
 
-/// Start LabVIEW on the venv. No relinking here — that happened at install —
-/// and no waiting: the IDE is the user's from the moment it appears.
-fn cmd_launch(cli: &Cli, lvproj: Option<&Path>) -> Result<()> {
-    let Destination::Venv(v) = destination(cli)? else {
-        bail!("launch needs a venv: run it inside a project that has one, or pass --project <DIR>");
-    };
-    if launch::is_listening(v.port) {
-        bail!(
-            "a LabVIEW is already running on this venv (VI Server port {}) — open the project from \
-             that window, or close it and launch again",
-            v.port
-        );
+fn dependency_table(dev: bool) -> DependencyTable {
+    match dev {
+        true => DependencyTable::DevDependencies,
+        false => DependencyTable::Dependencies,
     }
-    let lvproj = match lvproj {
-        Some(p) => {
-            let p = std::path::absolute(p)?;
-            ensure!(p.is_file(), "no such project file: {}", p.display());
-            Some(p)
+}
+
+fn cmd_add(env: &OpEnv, package: &str, dev: bool, apply: &ApplyArgs) -> Result<()> {
+    ops::add_remove::add(
+        env,
+        package,
+        dependency_table(dev),
+        &apply.options(false, false),
+    )
+    .map_err(|why| anyhow!(render::edit::error(&why, "`lvpm add`")))
+}
+
+fn cmd_remove(env: &OpEnv, package: &str, dev: bool, apply: &ApplyArgs) -> Result<()> {
+    ops::add_remove::remove(
+        env,
+        package,
+        dependency_table(dev),
+        &apply.options(false, false),
+    )
+    .map_err(|why| anyhow!(render::edit::error(&why, "`lvpm remove`")))
+}
+
+fn cmd_sync(env: &OpEnv, options: &SyncOptions) -> Result<()> {
+    ops::sync::sync(env, options).map_err(|why| {
+        anyhow!(match options.headless_implied {
+            true => render::sync::headless_error(&why),
+            false => render::sync::error(&why),
+        })
+    })
+}
+
+fn cmd_venv(env: &OpEnv, sub: &VenvCmd) -> Result<()> {
+    match sub {
+        VenvCmd::Create => print!("{}", render::venv::created(&ops::venv_cmd::create(env)?)),
+        VenvCmd::Status => print!(
+            "{}",
+            render::venv::status(ops::venv_cmd::status(env)?.as_ref(), &env.cwd)
+        ),
+        VenvCmd::Remove { yes } => {
+            let venv = ops::venv_cmd::existing(env)?;
+            ops::venv_cmd::remove(env, &venv, *yes || confirm_removal(&venv)?)?;
         }
-        None => None,
-    };
-    let ini = launch::write_ini(&v)?;
-    launch::spawn(&v, &ini, lvproj.as_deref())?;
-    println!("started {} on {}", v.target.label(), v.dir.display());
-    println!("  ini            {}", ini.display());
-    println!("  VI Server port {}", v.port);
-    if let Some(p) = &lvproj {
-        println!("  opening        {}", p.display());
     }
     Ok(())
+}
+
+/// Ask whether to delete the venv: core takes no input of its own (AC-K6).
+fn confirm_removal(v: &venv::Venv) -> Result<bool> {
+    eprint!(
+        "delete {} and everything installed in it? [y/N] ",
+        v.dir.display()
+    );
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    Ok(line.trim().eq_ignore_ascii_case("y"))
 }
 
 /// Invoke Application methods by id and print each answer.
@@ -1539,8 +649,8 @@ fn cmd_launch(cli: &Cli, lvproj: Option<&Path>) -> Result<()> {
 /// exists from one that does not. A parameterless call is all it sends, so a
 /// method that wants arguments answers with a complaint about those instead,
 /// and that too proves the id resolved.
-fn cmd_app_probe(cli: &Cli, ids: &[String]) -> Result<()> {
-    let roots = roots_for(cli)?;
+fn cmd_app_probe(env: &OpEnv, ids: &[String]) -> Result<()> {
+    let roots = env.roots()?;
     let Some(t) = roots.target.clone() else {
         bail!("app-probe needs a real LabVIEW target, not --prefix");
     };
@@ -1585,10 +695,16 @@ fn cmd_app_probe(cli: &Cli, ids: &[String]) -> Result<()> {
 /// Which LabVIEW the `vi-*` primitives talk to: a venv's own instance when a
 /// venv is in effect (started if none is running — and left running, it is the
 /// user's to close), else the target's. Returns a label and the port.
-fn vi_server_for(cli: &Cli, what: &str) -> Result<(String, u16)> {
-    match destination(cli)? {
+fn vi_server_for(env: &OpEnv, what: &str) -> Result<(String, u16)> {
+    match env.destination()? {
         Destination::Venv(v) => {
-            let inst = launch::ensure_instance(&v, false, std::time::Duration::from_secs(180))?;
+            let inst = launch::ensure_instance(
+                &v,
+                false,
+                std::time::Duration::from_secs(180),
+                env.headless,
+                env.sink,
+            )?;
             Ok((format!("{} on the venv", v.target.label()), inst.port))
         }
         Destination::Global(r) | Destination::Scratch(r) => {
@@ -1601,14 +717,17 @@ fn vi_server_for(cli: &Cli, what: &str) -> Result<(String, u16)> {
     }
 }
 
-fn cmd_vi_probe(cli: &Cli, vi: &std::path::Path) -> Result<()> {
-    let (label, port) = vi_server_for(cli, "vi-probe")?;
+fn cmd_vi_probe(env: &OpEnv, vi: &std::path::Path) -> Result<()> {
+    let (label, port) = vi_server_for(env, "vi-probe")?;
     println!("connecting to {label} on port {port}");
 
     let started = std::time::Instant::now();
     let mut conn =
         viserver::Connection::connect("127.0.0.1", port, std::time::Duration::from_secs(30))?;
-    println!("  handshake ok            {:>7.0} ms", started.elapsed().as_secs_f64() * 1000.0);
+    println!(
+        "  handshake ok            {:>7.0} ms",
+        started.elapsed().as_secs_f64() * 1000.0
+    );
 
     let t0 = std::time::Instant::now();
     let vi_ref = conn.open_vi_reference(vi)?;
@@ -1620,12 +739,15 @@ fn cmd_vi_probe(cli: &Cli, vi: &std::path::Path) -> Result<()> {
 
     conn.release(vi_ref)?;
     conn.close();
-    println!("  released + closed       {:>7.0} ms total", started.elapsed().as_secs_f64() * 1000.0);
+    println!(
+        "  released + closed       {:>7.0} ms total",
+        started.elapsed().as_secs_f64() * 1000.0
+    );
     Ok(())
 }
 
-fn cmd_vi_save(cli: &Cli, vi: &std::path::Path) -> Result<()> {
-    let (_, port) = vi_server_for(cli, "vi-save")?;
+fn cmd_vi_save(env: &OpEnv, vi: &std::path::Path) -> Result<()> {
+    let (_, port) = vi_server_for(env, "vi-save")?;
     if !vi.is_file() {
         bail!("no such VI: {}", vi.display());
     }
@@ -1672,16 +794,18 @@ fn parse_set(arg: &str) -> Result<(String, viserver::LvValue)> {
     let (name, rest) = arg
         .split_once('=')
         .with_context(|| format!("--set {arg:?}: expected name=type:value"))?;
-    let (ty, raw) = rest
-        .split_once(':')
-        .with_context(|| format!("--set {arg:?}: expected type:value with type bool|i32|dbl|str"))?;
+    let (ty, raw) = rest.split_once(':').with_context(|| {
+        format!("--set {arg:?}: expected type:value with type bool|i32|dbl|str")
+    })?;
     let value = match ty.strip_suffix("[]") {
         // An empty array still has to name its element type, so it comes from
         // the type word rather than from a value we could inspect.
         Some(elem) if raw.is_empty() => LvValue::empty_array(element_code(elem, arg)?),
-        Some(elem) => {
-            LvValue::array(raw.split(',').map(|v| scalar(elem, v, arg)).collect::<Result<_>>()?)?
-        }
+        Some(elem) => LvValue::array(
+            raw.split(',')
+                .map(|v| scalar(elem, v, arg))
+                .collect::<Result<_>>()?,
+        )?,
         None => scalar(ty, raw, arg)?,
     };
     Ok((name.to_string(), value))
@@ -1691,9 +815,18 @@ fn parse_set(arg: &str) -> Result<(String, viserver::LvValue)> {
 fn scalar(ty: &str, raw: &str, arg: &str) -> Result<viserver::LvValue> {
     use viserver::LvValue;
     Ok(match ty {
-        "bool" => LvValue::Bool(raw.parse().with_context(|| format!("--set {arg:?}: {raw:?} is not a bool"))?),
-        "i32" => LvValue::I32(raw.parse().with_context(|| format!("--set {arg:?}: {raw:?} is not an i32"))?),
-        "dbl" => LvValue::Dbl(raw.parse().with_context(|| format!("--set {arg:?}: {raw:?} is not a number"))?),
+        "bool" => LvValue::Bool(
+            raw.parse()
+                .with_context(|| format!("--set {arg:?}: {raw:?} is not a bool"))?,
+        ),
+        "i32" => LvValue::I32(
+            raw.parse()
+                .with_context(|| format!("--set {arg:?}: {raw:?} is not an i32"))?,
+        ),
+        "dbl" => LvValue::Dbl(
+            raw.parse()
+                .with_context(|| format!("--set {arg:?}: {raw:?} is not a number"))?,
+        ),
         "str" => LvValue::Str(raw.to_string()),
         other => bail!("--set {arg:?}: unknown type {other:?} (use bool|i32|dbl|str, or type[])"),
     })
@@ -1737,7 +870,10 @@ fn poll_progress(
 
         let shown = value.to_string();
         if shown != last {
-            println!("  {:>7.0} ms  {watch} = {shown}", started.elapsed().as_secs_f64() * 1000.0);
+            println!(
+                "  {:>7.0} ms  {watch} = {shown}",
+                started.elapsed().as_secs_f64() * 1000.0
+            );
             last = shown;
         }
 
@@ -1746,7 +882,10 @@ fn poll_progress(
         if done_readable {
             match conn.ctrl_val_get(vi_ref, done) {
                 Ok(viserver::LvValue::Bool(true)) => {
-                    println!("  {:>7.0} ms  {done} = true", started.elapsed().as_secs_f64() * 1000.0);
+                    println!(
+                        "  {:>7.0} ms  {done} = true",
+                        started.elapsed().as_secs_f64() * 1000.0
+                    );
                     break;
                 }
                 Ok(viserver::LvValue::Bool(false)) => {}
@@ -1784,8 +923,11 @@ fn poll_progress(
     Ok(())
 }
 
+// A diagnostics command: plans/lvpm-lockfile.md keeps `vi-run` in the CLI
+// (Slice 14), so its flat argument list, one per `vi-run` option, stays.
+#[allow(clippy::too_many_arguments)]
 fn cmd_vi_run(
-    cli: &Cli,
+    env: &OpEnv,
     vi: &std::path::Path,
     sets: &[String],
     gets: &[String],
@@ -1795,7 +937,7 @@ fn cmd_vi_run(
     poll_ms: u64,
     done: &str,
 ) -> Result<()> {
-    let (_, port) = vi_server_for(cli, "vi-run")?;
+    let (_, port) = vi_server_for(env, "vi-run")?;
     let sets: Vec<_> = sets.iter().map(|s| parse_set(s)).collect::<Result<_>>()?;
 
     let mut conn =
@@ -1810,17 +952,27 @@ fn cmd_vi_run(
             println!("  set  {name} = {value}");
         }
         let t0 = std::time::Instant::now();
-        let name = vi.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let name = vi
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
         match watch {
             // Start it and read the front panel while it works.
             Some(w) => {
                 conn.run_vi_async(vi_ref)?;
-                println!("  started {name} in {:.0} ms (not waiting)", t0.elapsed().as_secs_f64() * 1000.0);
+                println!(
+                    "  started {name} in {:.0} ms (not waiting)",
+                    t0.elapsed().as_secs_f64() * 1000.0
+                );
                 poll_progress(&mut conn, vi_ref, w, done, poll_ms, timeout)?;
             }
             None => {
                 conn.run_vi(vi_ref)?;
-                println!("  ran  {name} in {:.0} ms", t0.elapsed().as_secs_f64() * 1000.0);
+                println!(
+                    "  ran  {name} in {:.0} ms",
+                    t0.elapsed().as_secs_f64() * 1000.0
+                );
             }
         }
         if get_all {
@@ -1840,17 +992,40 @@ fn cmd_vi_run(
     result
 }
 
-fn read_spec(zip: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>) -> Result<String> {
-    // Almost always literally "spec" at the archive root.
-    let idx = (0..zip.len()).find(|i| {
-        zip.by_index(*i).map(|f| f.name().eq_ignore_ascii_case("spec")).unwrap_or(false)
-    });
-    let Some(idx) = idx else {
-        bail!("no `spec` member in .vip archive");
-    };
-    let mut f = zip.by_index(idx)?;
-    let mut buf = Vec::new();
-    std::io::Read::read_to_end(&mut f, &mut buf)?;
-    // spec files are latin-1-ish; lossy is fine for the fields we read.
-    Ok(String::from_utf8_lossy(&buf).into_owned())
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lock_args(args: &[&str]) -> Result<Cli, clap::Error> {
+        Cli::try_parse_from(["lvpm", "lock"].into_iter().chain(args.iter().copied()))
+    }
+
+    #[test]
+    fn a_check_writes_nothing_so_it_cannot_upgrade_and_an_upgrade_is_all_or_some() {
+        for args in [
+            &["--check", "--upgrade"][..],
+            &["--check", "--upgrade-package", "beta"],
+            &["--upgrade", "--upgrade-package", "beta"],
+        ] {
+            assert!(lock_args(args).is_err(), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn upgrade_package_repeats() {
+        let cli = lock_args(&[
+            "--upgrade-package",
+            "beta@1.5",
+            "--upgrade-package",
+            "alpha",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Lock { upgrade_package, .. } if upgrade_package == [
+                UpgradeTarget::parse("beta@1.5").unwrap(),
+                UpgradeTarget::parse("alpha").unwrap(),
+            ]
+        ));
+    }
 }

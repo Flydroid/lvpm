@@ -1,0 +1,7 @@
+venv: <SANDBOX>\work\.lv-venv  [LabVIEW 2026 (64-bit)  v<LV_VERSION>]
+manifest: <SANDBOX>\work\lvpm.toml (fixture) — 0 dependencies
+      manifest says labview = "2026" (minimum)
+target: LabVIEW 2026 (64-bit)  v<LV_VERSION>  (<LABVIEW>)
+  downloading feed http://<FEED>/feed/index.vipr (first run) ... 0.0 MB in <DUR>
+hashing lvpm_vi_fixture 1.0 (1/1)
+starting LabVIEW 2026 (64-bit)  v<LV_VERSION> on the venv and waiting for VI Server on port <PORT>...

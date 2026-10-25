@@ -20,8 +20,10 @@ never sees it; npcap's loopback adapter is required.
 
 ```
 dumpcap -i \Device\NPF_Loopback -f "tcp port 3364" -w cap.pcapng
-python tools/decode_viserver_pcap.py cap.pcapng --port 3364
 ```
+
+No decoder script is kept in this repository: read the capture against the
+framing below.
 
 The port is per LabVIEW version — read `server.tcp.port` from that install's
 `LabVIEW.ini` (2025 defaults to 3363, 2026 to 3364).
@@ -191,7 +193,7 @@ it is **rank-ordered, not dense** — positions 143→154 span 11 tokens while i
 ### Arguments
 
 Every length below derives from one rule set — nothing has to stay a captured
-blob. `src/viserver.rs` generates all of it and pins each encoding
+blob. `crates/lvpm-core/src/viserver.rs` generates all of it and pins each encoding
 byte-for-byte against a capture of LabVIEW's own client.
 
 ```
@@ -301,7 +303,7 @@ header beyond what the element type already carries: strings keep their `u32`
 length, numerics are bare big-endian, Booleans one byte each. String and I32
 elements are captured; Dbl and Boolean array elements are derived from them
 and from the scalar descriptors in the same captures, and
-`numeric_arrays_reuse_the_string_array_framing` in `src/viserver.rs` pins that
+`numeric_arrays_reuse_the_string_array_framing` in `crates/lvpm-core/src/viserver.rs` pins that
 derivation.
 
 #### More than one dimension
@@ -432,8 +434,10 @@ documented API, which NI does keep stable. Re-check on a new version with:
 
 ```
 lvpm vi-probe --labview-version <year> <some.vi>     # transport
-python tools/decode_viserver_pcap.py new.pcapng      # opcode + id tables
 ```
+
+and, for the opcode and id tables, a fresh capture read against the framing
+above.
 
 ### Conformance against LabVIEW's own client
 

@@ -1,0 +1,15 @@
+# The core library has no terminal I/O and reads no ambient process state
+# (AC-K2). `lvpm-core` turns the lint on (see its `lib.rs`); the CLI and the
+# test crates allow it, since `clippy.toml` applies to the whole workspace.
+# Inside core, only `config` and `target` -- the loaders that read the
+# environment -- allow it.
+disallowed-methods = [
+    { path = "std::io::stdin", reason = "lvpm-core takes no input of its own: the front end reads it" },
+    { path = "std::io::stdout", reason = "lvpm-core does not print: it emits events" },
+    { path = "std::io::stderr", reason = "lvpm-core does not print: it emits events" },
+    { path = "std::env::var", reason = "operations are handed what they need; only the config and target loaders read the environment" },
+    { path = "std::env::var_os", reason = "operations are handed what they need; only the config and target loaders read the environment" },
+    { path = "std::env::current_dir", reason = "operations are handed their working directory; only the config and target loaders read process state" },
+    { path = "std::path::absolute", reason = "a relative path is resolved against the working directory of the process: operations resolve it against the working directory they are handed" },
+    { path = "std::process::Stdio::inherit", reason = "lvpm-core does not share the front end's terminal with child processes" },
+]

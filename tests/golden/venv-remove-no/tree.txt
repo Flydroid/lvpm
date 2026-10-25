@@ -1,0 +1,4 @@
+.lv-venv/
+.lv-venv/.gitignore cdbcae15105d6b781e620813c79c7e868740d4e9cc53ce6f5fcbbc12387adf4b
+.lv-venv/.lvpm/
+.lv-venv/.lvpm/venv.json 3eeec6e8fab3937ed4d4d74088c381d042d76c1ecb538d132fc1a9e8a58225a3

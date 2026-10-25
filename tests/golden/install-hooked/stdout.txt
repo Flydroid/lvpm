@@ -1,0 +1,9 @@
+
+resolved 1 package:
+  hooked 1.0
+
++ hooked 1.0 ... 1 files
+
+done. 1 files written.
+
+post-install hooks: skipped — a scratch tree has no LabVIEW to run them
