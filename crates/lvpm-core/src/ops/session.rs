@@ -11,6 +11,7 @@
 use super::env::{Destination, OpEnv};
 use super::hooks::{HookCall, PostInstallHook, run_reported_hook};
 use crate::cache::{Cache, Stored};
+use crate::cancel::CancelToken;
 use crate::fetch;
 use crate::index::Entry;
 use crate::target::{LvTarget, Roots};
@@ -26,6 +27,7 @@ use std::path::PathBuf;
 pub(super) struct Downloads {
     client: Client,
     cache: Cache,
+    cancel: CancelToken,
 }
 
 impl Downloads {
@@ -35,12 +37,14 @@ impl Downloads {
                 .user_agent(concat!("lvpm/", env!("CARGO_PKG_VERSION")))
                 .build()?,
             cache: Cache::open(&env.config.cache)?,
+            cancel: env.cancel.clone(),
         })
     }
 
     /// The archive's bytes, from the cache, a local file or the entry's feed.
+    /// [`Cancelled`](crate::errors::Cancelled) when the environment's token is.
     pub(super) fn fetch(&self, entry: &Entry) -> Result<Vec<u8>> {
-        fetch::package(&self.cache, &self.client, entry)
+        fetch::package(&self.cache, &self.client, entry, &self.cancel)
     }
 
     /// What the cache holds under this SHA-256, without removing anything.

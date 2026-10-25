@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -76,6 +76,62 @@ const FAULTY_ARCHIVES: &[FaultyArchive] = &[
 type Routes = HashMap<String, Vec<u8>>;
 type Hits = Arc<Mutex<BTreeMap<String, usize>>>;
 
+/// How long a held archive request waits for its release, and how long a test
+/// waits for a request to be held: a safety net, never what a test relies on.
+const HOLD_LIMIT: Duration = Duration::from_secs(10);
+
+/// Holds the answer to an archive request, once armed, until released. The
+/// feed answers one connection at a time, so one held request holds the feed.
+#[derive(Debug, Default)]
+struct Pause {
+    state: Mutex<PauseState>,
+    changed: Condvar,
+}
+
+#[derive(Debug, Default)]
+struct PauseState {
+    /// Archive requests are held.
+    armed: bool,
+    /// An archive request is being held now.
+    held: bool,
+}
+
+impl Pause {
+    fn arm(&self) {
+        self.state.lock().expect("the pause").armed = true;
+    }
+
+    fn release(&self) {
+        self.state.lock().expect("the pause").armed = false;
+        self.changed.notify_all();
+    }
+
+    /// Called by the server with an archive request in hand: returns once the
+    /// request may be answered.
+    fn hold(&self) {
+        let mut state = self.state.lock().expect("the pause");
+        if !state.armed {
+            return;
+        }
+        state.held = true;
+        self.changed.notify_all();
+        let (mut state, _) = self
+            .changed
+            .wait_timeout_while(state, HOLD_LIMIT, |state| state.armed)
+            .expect("the pause");
+        state.held = false;
+    }
+
+    fn wait_until_held(&self) {
+        let state = self.state.lock().expect("the pause");
+        let (state, _) = self
+            .changed
+            .wait_timeout_while(state, HOLD_LIMIT, |state| !state.held)
+            .expect("the pause");
+        assert!(state.held, "no archive request was held");
+    }
+}
+
 #[derive(Debug)]
 pub struct Feed {
     addr: SocketAddr,
@@ -85,6 +141,7 @@ pub struct Feed {
     archives_refused: Arc<AtomicBool>,
     /// Once set, nothing is answered: each connection is closed unread.
     down: Arc<AtomicBool>,
+    pause: Arc<Pause>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -98,10 +155,14 @@ impl Feed {
         let stop = Arc::new(AtomicBool::new(false));
         let archives_refused = Arc::new(AtomicBool::new(false));
         let down = Arc::new(AtomicBool::new(false));
+        let pause = Arc::new(Pause::default());
         let thread = {
             let (hits, stop) = (hits.clone(), stop.clone());
             let (refused, down) = (archives_refused.clone(), down.clone());
-            std::thread::spawn(move || serve(listener, &routes, &hits, &stop, &refused, &down))
+            let pause = pause.clone();
+            std::thread::spawn(move || {
+                serve(listener, &routes, &hits, &stop, &refused, &down, &pause)
+            })
         };
         Feed {
             addr,
@@ -109,6 +170,7 @@ impl Feed {
             stop,
             archives_refused,
             down,
+            pause,
             thread: Some(thread),
         }
     }
@@ -146,6 +208,22 @@ impl Feed {
         self.down.store(true, Ordering::SeqCst);
     }
 
+    /// From now on the feed takes an archive request and holds its answer, as
+    /// a slow download does, until [`Feed::release`]. Listings are not held.
+    pub fn pause_archives(&self) {
+        self.pause.arm();
+    }
+
+    /// Block until an archive request is being held.
+    pub fn wait_for_held_archive(&self) {
+        self.pause.wait_until_held();
+    }
+
+    /// Answer what is held, and every archive request after it.
+    pub fn release(&self) {
+        self.pause.release();
+    }
+
     /// How many requests this path has received, including `304`s.
     pub fn hits(&self, path: &str) -> usize {
         self.hits
@@ -159,6 +237,8 @@ impl Feed {
 
 impl Drop for Feed {
     fn drop(&mut self) {
+        // A request still held would keep the thread from seeing `stop`.
+        self.pause.release();
         self.stop.store(true, Ordering::SeqCst);
         // `accept` is blocking; a connection wakes it so it can see the flag.
         TcpStream::connect(self.addr).ok();
@@ -286,6 +366,7 @@ fn serve(
     stop: &AtomicBool,
     archives_refused: &AtomicBool,
     down: &AtomicBool,
+    pause: &Pause,
 ) {
     for stream in listener.incoming() {
         if stop.load(Ordering::SeqCst) {
@@ -296,7 +377,7 @@ fn serve(
         }
         if let Ok(stream) = stream {
             // One bad connection must not take the server down for the rest.
-            handle(stream, routes, hits, archives_refused).ok();
+            handle(stream, routes, hits, archives_refused, pause).ok();
         }
     }
 }
@@ -312,6 +393,7 @@ fn handle(
     routes: &Routes,
     hits: &Hits,
     archives_refused: &AtomicBool,
+    pause: &Pause,
 ) -> std::io::Result<()> {
     stream.set_read_timeout(Some(SOCKET_TIMEOUT))?;
     stream.set_write_timeout(Some(SOCKET_TIMEOUT))?;
@@ -321,6 +403,9 @@ fn handle(
         .expect("hit counter")
         .entry(request.path.clone())
         .or_default() += 1;
+    if request.path.ends_with(".vip") {
+        pause.hold();
+    }
     let refused = archives_refused.load(Ordering::SeqCst) && request.path.ends_with(".vip");
     let response = match refused {
         true => response("503 Service Unavailable", &[], b""),
@@ -606,6 +691,41 @@ mod tests {
             "HTTP/1.1 200 OK"
         );
         assert_eq!(feed.hits("/feed/packages/beta-1.0.vip"), 2, "still counted");
+    }
+
+    #[test]
+    fn a_paused_archive_is_answered_only_once_released_and_a_listing_is_not_held() {
+        let feed = Feed::start(PACKAGES);
+        feed.pause_archives();
+        assert_eq!(
+            get(&feed, "/feed/index.vipr", "").status_line,
+            "HTTP/1.1 200 OK"
+        );
+        let mut stream = TcpStream::connect(feed.addr).unwrap();
+        write!(
+            stream,
+            "GET /feed/packages/beta-1.0.vip HTTP/1.1\r\nHost: test\r\n\r\n"
+        )
+        .unwrap();
+        feed.wait_for_held_archive();
+        stream
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        let mut early = [0u8; 1];
+        let held = stream.read(&mut early).unwrap_err().kind();
+        assert!(
+            matches!(
+                held,
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ),
+            "{held:?}"
+        );
+        feed.release();
+        stream.set_read_timeout(Some(SOCKET_TIMEOUT)).unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).unwrap();
+        assert!(raw.starts_with(b"HTTP/1.1 200 OK"));
+        assert!(raw.ends_with(&beta().build_vip()));
     }
 
     #[test]

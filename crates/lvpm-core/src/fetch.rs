@@ -6,9 +6,12 @@
 //! Feed fetching and resolution stay in `index`; storage stays in `cache`.
 
 use crate::cache::{Cache, LocalEntry};
+use crate::cancel::CancelToken;
+use crate::errors::Cancelled;
 use crate::index::{self, Entry};
 use anyhow::{Context, Result, ensure};
 use reqwest::blocking::Client;
+use std::io::Read;
 
 /// Return archive bytes, checking SHA-256 on cache reads and MD5 when advertised.
 ///
@@ -17,7 +20,17 @@ use reqwest::blocking::Client;
 /// automatically reused on later requests. Local paths are not imported here.
 /// Cache population also occurs during dry runs; target writes are the caller's
 /// responsibility. Missing explicit cache entries fail instead of downloading.
-pub fn package(cache: &Cache, client: &Client, entry: &Entry) -> Result<Vec<u8>> {
+///
+/// A cancelled `cancel` ends the fetch with [`Cancelled`] before it starts and
+/// between the chunks of a download, so nothing of a cancelled download is
+/// cached.
+pub fn package(
+    cache: &Cache,
+    client: &Client,
+    entry: &Entry,
+    cancel: &CancelToken,
+) -> Result<Vec<u8>> {
+    ensure_running(cancel)?;
     if let Some(sha256) = entry.url.strip_prefix("cache:") {
         let bytes = cache.load(sha256)?.with_context(|| format!(
             "cached archive for {} is missing or corrupt; run cache add again with the original package", entry.name,
@@ -38,17 +51,34 @@ pub fn package(cache: &Cache, client: &Client, entry: &Entry) -> Result<Vec<u8>>
     {
         return Ok(bytes);
     }
-    let bytes = client
+    let mut response = client
         .get(&entry.url)
         .send()
         .with_context(|| format!("downloading {}", entry.url))?
-        .error_for_status()?
-        .bytes()?
-        .to_vec();
+        .error_for_status()?;
+    let mut bytes = Vec::new();
+    let mut chunk = [0u8; CHUNK_BYTES];
+    loop {
+        ensure_running(cancel)?;
+        match response.read(&mut chunk)? {
+            0 => break,
+            read => bytes.extend_from_slice(&chunk[..read]),
+        }
+    }
     let md5 = verify_md5(entry, &bytes)?;
     let sha256 = cache.store(&bytes)?;
     cache.record_download(&LocalEntry::from(entry), &entry.url, &sha256, &md5)?;
     Ok(bytes)
+}
+
+/// How much of a download is read between two looks at the cancel token.
+const CHUNK_BYTES: usize = 64 * 1024;
+
+fn ensure_running(cancel: &CancelToken) -> Result<()> {
+    match cancel.is_cancelled() {
+        true => Err(Cancelled.into()),
+        false => Ok(()),
+    }
 }
 
 /// Compute lowercase MD5, rejecting bytes that differ from the advertised hash.
@@ -71,6 +101,11 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::path::PathBuf;
+
+    /// The fetch of a token nobody cancels, which is what most tests are about.
+    fn package(cache: &Cache, client: &Client, entry: &Entry) -> Result<Vec<u8>> {
+        super::package(cache, client, entry, &CancelToken::new())
+    }
 
     fn test_cache(name: &str) -> (PathBuf, Cache) {
         let root = std::env::temp_dir().join(format!("lvpm-fetch-{name}-{}", std::process::id()));
@@ -126,6 +161,92 @@ mod tests {
         thread.join().unwrap();
         assert_eq!(package(&cache, &client, &entry).unwrap(), b"package bytes");
         assert!(cache.imported_packages().unwrap().is_empty());
+        drop(cache);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// Serves `first`, says so on the first channel, and serves `rest` only
+    /// once the second channel is signalled.
+    fn halting_server(
+        first: &'static [u8],
+        rest: &'static [u8],
+    ) -> (
+        String,
+        std::sync::mpsc::Receiver<()>,
+        std::sync::mpsc::Sender<()>,
+        std::thread::JoinHandle<()>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/package.vip", listener.local_addr().unwrap());
+        let (sent, first_sent) = std::sync::mpsc::channel();
+        let (go, wait_for_go) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                stream.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+            }
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                first.len() + rest.len()
+            )
+            .unwrap();
+            stream.write_all(first).unwrap();
+            stream.flush().unwrap();
+            sent.send(()).unwrap();
+            wait_for_go
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            // The client may have given up and closed the connection.
+            stream.write_all(rest).ok();
+        });
+        (url, first_sent, go, thread)
+    }
+
+    #[test]
+    fn a_cancelled_token_fetches_nothing() {
+        let (root, cache) = test_cache("cancelled-before");
+        let token = CancelToken::new();
+        token.cancel();
+        let wanted = entry("http://127.0.0.1:1/unavailable".into(), None);
+        let why = super::package(&cache, &Client::new(), &wanted, &token).unwrap_err();
+        assert!(why.is::<Cancelled>(), "{why:#}");
+        drop(cache);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn a_download_cancelled_between_chunks_is_not_cached() {
+        let (root, cache) = test_cache("cancelled-between");
+        let (url, first_sent, go, thread) = halting_server(b"package ", b"bytes");
+        let wanted = entry(url, Some(index::md5_hex(b"package bytes")));
+        let token = CancelToken::new();
+        // The cache is not shared between threads: the fetch takes it along.
+        let (why, cache) = std::thread::scope(|scope| {
+            let fetching = scope.spawn(|| {
+                let fetched = super::package(&cache, &Client::new(), &wanted, &token);
+                (fetched, cache)
+            });
+            first_sent
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            assert!(token.cancel());
+            go.send(()).unwrap();
+            let (fetched, cache) = fetching.join().unwrap();
+            (fetched.unwrap_err(), cache)
+        });
+        thread.join().unwrap();
+        assert!(why.is::<Cancelled>(), "{why:#}");
+        assert!(
+            cache
+                .package_sha256(&wanted.name, "1.0.0", wanted.md5.as_ref().unwrap())
+                .unwrap()
+                .is_none()
+        );
+        assert!(!root.join("content").exists());
         drop(cache);
         std::fs::remove_dir_all(root).ok();
     }

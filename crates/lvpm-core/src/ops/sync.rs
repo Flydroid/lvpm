@@ -15,7 +15,7 @@ use super::lock as locking;
 use super::session::{Downloads, InstallSession};
 use super::uninstall::uninstall_one;
 use crate::cache::{Stored, sha256_hex};
-use crate::errors::{ArchiveFault, LockError, LockedArchiveProblem, SyncError};
+use crate::errors::{ArchiveFault, Cancelled, LockError, LockedArchiveProblem, SyncError};
 use crate::events::{Event, PackageRef, Phase, RemoveReason, SyncStep};
 use crate::index::{self, Entry, Index};
 use crate::install::{self, Manifest};
@@ -253,6 +253,9 @@ pub fn apply_sync(
     planned: Vec<PlannedPackage>,
     opts: &SyncOptions,
 ) -> Result<Applied, SyncError> {
+    // The first change is a removal or an install, and every archive is in
+    // hand: this is where cancelling stops being possible.
+    env.cancel.begin_unpack()?;
     env.sink.emit(Event::SyncPlanned {
         steps: plan.steps.clone(),
         dry_run: false,
@@ -511,15 +514,17 @@ impl<'a> Search<'a> {
     /// Try every entry of the index that has the locked name and version. One
     /// that cannot be read holds nothing; one with other bytes is noted and
     /// never used.
-    fn look_in(&mut self, downloads: &Downloads, index: &Index) -> anyhow::Result<()> {
+    fn look_in(&mut self, downloads: &Downloads, index: &Index) -> Result<(), SyncError> {
         let version = Version::parse(&self.locked.version);
         for entry in index
             .versions_of(&self.locked.name)
             .into_iter()
             .filter(|entry| entry.version == version)
         {
-            let Ok(bytes) = downloads.fetch(entry) else {
-                continue;
+            let bytes = match downloads.fetch(entry) {
+                Ok(bytes) => bytes,
+                Err(why) if why.is::<Cancelled>() => return Err(Cancelled.into()),
+                Err(_) => continue,
             };
             let found = sha256_hex(&bytes);
             if found == self.sha256() {
@@ -1323,6 +1328,28 @@ mod tests {
                 Event::SyncPlanned { .. } | Event::PackageStart { .. }
             )),
             "nothing was announced or started: {events:?}"
+        );
+    }
+
+    #[test]
+    fn a_cancelled_sync_removes_nothing_even_when_it_has_nothing_to_fetch() {
+        let project = project("cancelled-removal", &["beta", "gamma"]);
+        project.sync(&SyncOptions::default()).0.unwrap();
+        project.write_manifest(&["beta"]);
+        locking_lock(&project);
+
+        let sink = Recorder::default();
+        let env = project.sync_env(&sink);
+        assert!(env.cancel.cancel());
+        let outcome = sync(&env, &with(LockPolicy::Locked));
+
+        assert!(
+            matches!(outcome, Err(SyncError::Lock(LockError::Cancelled))),
+            "{outcome:?}"
+        );
+        assert_eq!(
+            project.installed(),
+            pairs(&[("alpha", "2.0"), ("beta", "1.0"), ("gamma", "1.0")])
         );
     }
 

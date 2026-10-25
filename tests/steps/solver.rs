@@ -2,6 +2,7 @@
 //! out in the scenario, in this process. There is no sandbox directory and no
 //! feed: the solver takes an index and constraints, nothing else.
 
+use super::cancel::Ended;
 use crate::CliWorld;
 use cucumber::{given, then, when};
 use lvpm_core::cancel::CancelToken;
@@ -236,6 +237,15 @@ async fn a_requirement_is_unresolved(world: &mut CliWorld, name: String, require
 
 #[then(regex = r#"^the result is "cancelled"$"#)]
 async fn the_result_is_cancelled(world: &mut CliWorld) {
+    // The solver's scenario runs the solver; the cancellation scenarios run an
+    // operation, and say how it ended.
+    if let Some(ended) = world.cancel.ended() {
+        assert!(
+            matches!(ended, Ended::Cancelled),
+            "expected cancelled, but the operation {ended}"
+        );
+        return;
+    }
     assert!(
         matches!(world.solver.outcome, Some(Err(SolveError::Cancelled))),
         "expected cancelled, got {:?}",

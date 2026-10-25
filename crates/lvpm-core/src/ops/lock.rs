@@ -10,7 +10,7 @@ use super::env::OpEnv;
 use super::session::Downloads;
 use super::snapshot::restoring_on_failure;
 use crate::cache::sha256_hex;
-use crate::errors::{ArchiveFailure, LockError};
+use crate::errors::{ArchiveFailure, Cancelled, LockError};
 use crate::events::{Event, LockChange};
 use crate::index::{self, Entry, Index};
 use crate::lockfile::{self, Inputs, LockedPackage, LockedUnresolved, Lockfile};
@@ -486,7 +486,7 @@ fn resolve(
     solve::solve(&constraints, index, preferences, Some(gate), &env.cancel).map_err(|why| match why
     {
         SolveError::Conflict(conflict) => LockError::Conflict(name_pins(conflict, project, pins)),
-        SolveError::Cancelled => LockError::Cancelled,
+        SolveError::Cancelled => Cancelled.into(),
     })
 }
 
@@ -546,7 +546,7 @@ fn hash_archives(
     let mut failures = Vec::new();
     for (position, (key, entry)) in resolution.packages.iter().enumerate() {
         if env.cancel.is_cancelled() {
-            return Err(LockError::Cancelled);
+            return Err(Cancelled.into());
         }
         env.sink.emit(Event::LockHashing {
             name: entry.name.clone(),
@@ -558,6 +558,7 @@ fn hash_archives(
             Ok(bytes) => {
                 hashes.insert(key.clone(), sha256_hex(&bytes));
             }
+            Err(why) if why.is::<Cancelled>() => return Err(Cancelled.into()),
             Err(why) => failures.push(ArchiveFailure {
                 name: entry.name.clone(),
                 version: entry.version.to_string(),

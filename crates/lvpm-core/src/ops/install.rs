@@ -499,6 +499,8 @@ fn settle_installed(
         dry_run: opts.dry_run,
     });
     if !opts.dry_run {
+        // Taking out the old version is the first file write of a replacement.
+        env.cancel.begin_unpack()?;
         uninstall_one(env, session, &entry.name)?;
     }
     Ok(true)
@@ -540,9 +542,10 @@ fn unpack(
 ) -> Result<()> {
     let name = &pkg.entry.name;
     // The point of no return: nothing is written before this, and what
-    // follows cannot be taken back. Cancellation's `begin_unpack()` goes here
-    // (plans/lvpm-lockfile.md, Slice 15), ahead of the first file written,
-    // which is the PreInstall hook's extraction below.
+    // follows cannot be taken back. It comes ahead of the first file written,
+    // which is the PreInstall hook's extraction below, and ahead of the
+    // event, so whoever hears of the phase finds cancelling refused.
+    env.cancel.begin_unpack()?;
     env.sink.emit(Event::PhaseStarted {
         phase: Phase::Unpack,
     });
@@ -833,6 +836,7 @@ fn refresh_palettes(env: &OpEnv, session: &InstallSession, applied: &Applied) {
 mod tests {
     use super::*;
     use crate::config::Config;
+    use crate::errors::Cancelled;
     use crate::events::NullSink;
     use std::io::Write;
 
@@ -916,6 +920,27 @@ mod tests {
         assert!(why.contains(&scratch.sha256), "{why}");
         let roots = Roots::scratch(&scratch.root.join("dest"));
         assert!(!install::is_installed(&roots, "alpha"));
+    }
+
+    #[test]
+    fn a_cancelled_token_leaves_an_installed_version_in_place_instead_of_replacing_it() {
+        let scratch = Scratch::new("cancelled-replace");
+        apply_plan(&scratch, &scratch.plan(None)).unwrap();
+        // The archive says 2.0; the plan asks for 3.0, which replaces it.
+        let mut newer = scratch.plan(None);
+        newer.entries[0].entry.version = Version::parse("3.0");
+
+        let env = scratch.env(&NullSink);
+        assert!(env.cancel.cancel());
+        let mut session = InstallSession::new(env.destination().unwrap());
+        let why = apply(&env, &mut session, &newer, &InstallOptions::default()).unwrap_err();
+
+        assert!(why.is::<Cancelled>(), "{why:#}");
+        let roots = Roots::scratch(&scratch.root.join("dest"));
+        assert_eq!(
+            install::read_manifest(&roots, "alpha").unwrap().version,
+            "2.0"
+        );
     }
 
     #[test]

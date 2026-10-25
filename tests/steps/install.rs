@@ -10,7 +10,7 @@ use crate::support::fixtures::FixturePackage;
 use crate::support::sandbox::DEST_DIR;
 use cucumber::{given, then, when};
 use lvpm_core::config::Config;
-use lvpm_core::events::{Event, Phase, SkipReason};
+use lvpm_core::events::{Event, EventSink, Phase, SkipReason};
 use lvpm_core::index::Entry;
 use lvpm_core::install;
 use lvpm_core::ops::install::{InstallOptions, InstallPlan, PlannedPackage, apply, finish};
@@ -35,20 +35,36 @@ pub struct InstallState {
     archive: Vec<u8>,
 }
 
-fn dest_dir(world: &CliWorld) -> PathBuf {
+pub(super) fn dest_dir(world: &CliWorld) -> PathBuf {
     world.sandbox.work_dir().join(DEST_DIR)
 }
 
 /// An environment that installs into the scenario's scratch destination from
 /// the project in its working directory.
 fn scratch_env<'s>(world: &CliWorld, sink: &'s RecordingSink) -> OpEnv<'s> {
+    scratch_env_at(
+        sink,
+        world.sandbox.cache_dir(),
+        world.sandbox.work_dir(),
+        dest_dir(world),
+    )
+}
+
+/// The same, from the paths alone: a scenario that runs core on a thread of
+/// its own cannot take the world along.
+pub(super) fn scratch_env_at<'s>(
+    sink: &'s dyn EventSink,
+    cache: PathBuf,
+    work_dir: PathBuf,
+    dest: PathBuf,
+) -> OpEnv<'s> {
     let config = Config {
-        cache: world.sandbox.cache_dir(),
+        cache,
         local_sources: Vec::new(),
         venv_dir: PathBuf::from(VENV_DIR),
     };
-    let mut env = OpEnv::new(sink, config, Vec::new(), world.sandbox.work_dir());
-    env.flags.prefix = Some(dest_dir(world));
+    let mut env = OpEnv::new(sink, config, Vec::new(), work_dir);
+    env.flags.prefix = Some(dest);
     env
 }
 
@@ -60,7 +76,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 /// A phase as events spell it, e.g. `resolve`.
-fn phase_name(phase: Phase) -> String {
+pub(super) fn phase_name(phase: Phase) -> String {
     serde_json::to_value(phase)
         .expect("a phase serialises")
         .as_str()

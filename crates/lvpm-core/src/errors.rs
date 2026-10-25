@@ -10,6 +10,25 @@ use crate::manifest_edit::DependencyTable;
 use crate::solve::Conflict;
 use std::path::PathBuf;
 
+/// The operation's [`CancelToken`](crate::cancel::CancelToken) was cancelled
+/// before the operation wrote a package file. Operations that fail with an
+/// [`anyhow::Error`] carry it as the cause, for the caller to downcast.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("cancelled")]
+pub struct Cancelled;
+
+impl From<Cancelled> for LockError {
+    fn from(_: Cancelled) -> LockError {
+        LockError::Cancelled
+    }
+}
+
+impl From<Cancelled> for SyncError {
+    fn from(cancelled: Cancelled) -> SyncError {
+        SyncError::Lock(cancelled.into())
+    }
+}
+
 /// Why `lock` wrote no lock, or `check` did not find one that fits.
 #[derive(Debug, thiserror::Error)]
 pub enum LockError {
