@@ -409,13 +409,14 @@ fn name_key(name: &str) -> String {
 }
 
 /// The same version, from the same archive. A manifest written before the
-/// archive's SHA-256 was recorded has none, and matches on name and version.
+/// archive's SHA-256 was recorded has none, so nothing shows it is the locked
+/// archive: it is replaced from the verified one.
 fn is_the_locked_one(installed: &Manifest, locked: &LockedPackage) -> bool {
     Version::parse(&installed.version) == Version::parse(&locked.version)
         && installed
             .archive_sha256
             .as_deref()
-            .is_none_or(|sha256| sha256.eq_ignore_ascii_case(&locked.sha256))
+            .is_some_and(|sha256| sha256.eq_ignore_ascii_case(&locked.sha256))
 }
 
 /// `packages` with each one after the packages it requires. Otherwise the
@@ -785,18 +786,21 @@ mod tests {
     }
 
     #[test]
-    fn an_install_from_before_archives_were_hashed_matches_on_name_and_version() {
+    fn an_install_from_before_archives_were_hashed_is_replaced_from_the_verified_archive() {
         let mut legacy = installed("alpha", "2.0");
         legacy.archive_sha256 = None;
         let here = [legacy, installed("beta", "1.0")];
-        assert!(plan_sync(&alpha_and_beta(), &here, false).is_empty());
+        let plan = plan_sync(&alpha_and_beta(), &here, false);
+        // Nothing says which archive it came from, so it is not the locked one.
+        assert_eq!(plan.steps, [replace("alpha", "2.0", "2.0")]);
+        assert_eq!(plan.wanted[0].name, "alpha");
     }
 
     #[test]
     fn names_match_whatever_their_case() {
         let lock = lock_of(vec![locked("Alpha", "2.0", &[], false)]);
         let mut here = installed("alpha", "2.0");
-        here.archive_sha256 = None;
+        here.archive_sha256 = Some("sha-of-Alpha-2.0".to_string());
         assert!(plan_sync(&lock, &[here], false).is_empty());
     }
 
