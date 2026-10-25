@@ -14,19 +14,22 @@ $ lvpm targets
 LabVIEW 2026 (64-bit)  v26.3       C:\Program Files\National Instruments\LabVIEW 2026
 LabVIEW 2025 (64-bit)  v25.3       C:\Program Files\National Instruments\LabVIEW 2025
 
-$ lvpm install --labview-version 2026
-resolved 48 packages:
-  delacor_lib_qmh 7.1.2.1547
+$ lvpm install oglib_error --labview-version 2026
+resolved ... packages:
   ...
-+ delacor_lib_qmh 7.1.2.1547 ... [pre-install ok, 0.8s] 65 files
++ oglib_error ... files
 ...
-done. 8766 files written.
+done. ... files written.
 
-relinking 82 folder(s)  (27 covered by a parent)
+relinking ... folder(s) ...
 ...
-running 15 post-install hook(s)
-  delacor_lib_qmh ... ok (0.4s)
+running ... post-install hook(s)
+  ...
 ```
+
+That is a plain install into one LabVIEW. In a project, `lvpm install` syncs
+to `lvpm.lock` and `lvpm install <name>` is `lvpm add`; see
+[Quick start](#quick-start).
 
 Not affiliated with JKI or NI. Working, in active development; see
 [docs/roadmap.md](docs/roadmap.md) and [Known limitations](#known-limitations).
@@ -624,12 +627,23 @@ runs.
 
 ## Layout
 
-Modules are in `crates/lvpm-core/src/`, except `main.rs` (in `src/`) and the
-rows that give a path.
+lvpm is two crates. `lvpm-core` (`crates/lvpm-core/`) holds the package
+management and does no terminal I/O; `lvpm` (`src/`) is the CLI over it.
+Modules are in `crates/lvpm-core/src/`, except `main.rs` and `render/` (in
+`src/`) and the rows that give a path.
 
 | Module                         | Responsibility                                                                                                          |
 | ------------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
-| `main.rs`                      | The CLI: commands, target and venv selection, the install plan                                                          |
+| `main.rs`                      | The CLI: flags, building the `OpEnv` core runs in, calling `ops`, the VI Server diagnostic commands                    |
+| `render/`                      | The CLI's output: one file per core module words that module's events and what its queries return                      |
+| `ops/`                         | The operations a front end calls, each taking an `OpEnv` and reporting through events: `install`, `uninstall`, `lock`, `sync`, `add_remove`, `route` (what an `install` means), `venv_cmd`, `query`, `relink`, `hooks`, `refresh`, `start`, `launch_cmd`; `env` settles the destination |
+| `events.rs`                    | What core reports while it works, as typed data, and the `EventSink` that receives it                                   |
+| `errors.rs`                    | Errors that carry what went wrong as data, worded without naming a command or flag                                      |
+| `cancel.rs`                    | The `CancelToken`: a cancel is honoured until an operation writes its first file                                        |
+| `config.rs`                    | lvpm's settings: `LVPM_CONFIG_<KEY>` over built-in defaults                                                             |
+| `lockfile.rs`                  | `lvpm.lock`: the resolved set, its text and its staleness                                                               |
+| `solve.rs`                     | The PubGrub solver that picks one set of versions for a manifest                                                        |
+| `manifest_edit.rs`             | Edit one entry of `lvpm.toml` and leave every other byte as it was                                                      |
 | `index.rs`                     | Fetch and parse package directories (`.ogpd` / `index.vipr`), resolve names to versions                                |
 | `fetch.rs`                     | Acquire package bytes: cache lookup, downloads, integrity verification, and cache population                            |
 | `cache.rs`                     | The cache: the SQLite index of known sources and the content-addressed store of what they served                        |

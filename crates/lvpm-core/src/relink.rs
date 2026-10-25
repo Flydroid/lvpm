@@ -4,11 +4,10 @@
 //! linker tables their build machine wrote, so the paths they declare for their
 //! subVIs and typedefs often do not resolve here — that is what makes LabVIEW
 //! open its "searching for missing subVI" dialog. Loading a VI makes LabVIEW
-//! resolve the links; only saving it persists that. See `tools/README.md` for
-//! the measurements behind this.
+//! resolve the links; only saving it persists that.
 //!
 //! The load-resolve-save cycle itself lives in LabVIEW, in
-//! `tools/Relink Package.vi`, whose whole interface is one string in and one
+//! `lv-src/relink-package.vi`, whose whole interface is one string in and one
 //! boolean out:
 //!
 //! ```text

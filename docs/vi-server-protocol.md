@@ -20,8 +20,10 @@ never sees it; npcap's loopback adapter is required.
 
 ```
 dumpcap -i \Device\NPF_Loopback -f "tcp port 3364" -w cap.pcapng
-python tools/decode_viserver_pcap.py cap.pcapng --port 3364
 ```
+
+No decoder script is kept in this repository: read the capture against the
+framing below.
 
 The port is per LabVIEW version — read `server.tcp.port` from that install's
 `LabVIEW.ini` (2025 defaults to 3363, 2026 to 3364).
@@ -432,8 +434,10 @@ documented API, which NI does keep stable. Re-check on a new version with:
 
 ```
 lvpm vi-probe --labview-version <year> <some.vi>     # transport
-python tools/decode_viserver_pcap.py new.pcapng      # opcode + id tables
 ```
+
+and, for the opcode and id tables, a fresh capture read against the framing
+above.
 
 ### Conformance against LabVIEW's own client
 

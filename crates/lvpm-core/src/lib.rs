@@ -22,7 +22,8 @@ pub mod venv;
 pub mod version;
 pub mod viserver;
 
-// Declared empty so the slices that fill them in never edit this file.
+// The lock workflow, and the operations a front end calls with the events and
+// cancellation they report and honour.
 pub mod cancel;
 pub mod events;
 pub mod lockfile;

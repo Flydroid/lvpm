@@ -430,8 +430,8 @@ $ lvpm cache remove C:\my\packages\
 
 ## MD5 vs SHA-256: the transition
 
-Implemented acquisition is owned by `fetch.rs`, called by `main.rs` with an
-already-resolved `Entry`. `cache.rs` only handles storage and SQL; it does not
+Implemented acquisition is owned by `fetch.rs`, called by the install session
+(`ops/session.rs`) with an already-resolved `Entry`. `cache.rs` only handles storage and SQL; it does not
 call the index or network. Downloads record `source_kind='remote'` and use
 the requested package URL as `source_ref` (not the feed URL). This provides
 request provenance without changing the index entry shape. Download rows
