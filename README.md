@@ -14,7 +14,7 @@ $ lvpm targets
 LabVIEW 2026 (64-bit)  v26.3       C:\Program Files\National Instruments\LabVIEW 2026
 LabVIEW 2025 (64-bit)  v25.3       C:\Program Files\National Instruments\LabVIEW 2025
 
-$ lvpm install --manifest lvpm.toml --labview-version 2026
+$ lvpm install --labview-version 2026
 resolved 48 packages:
   delacor_lib_qmh 7.1.2.1547
   ...
@@ -125,9 +125,12 @@ For a project, write an `lvpm.toml` (next section), then:
 ```console
 $ cd C:\Git\MyProject
 $ lvpm venv create --labview-version 2026   # .lv-venv/ beside lvpm.toml by default
-$ lvpm install                              # everything lvpm.toml lists, into .lv-venv
+$ lvpm install                              # locks lvpm.toml into lvpm.lock, installs exactly that into .lv-venv
+$ lvpm add oglib_error                      # one more dependency: lvpm.toml, lvpm.lock and .lv-venv together
 $ lvpm launch MyProject.lvproj              # a LabVIEW that sees the venv
 ```
+
+Commit `lvpm.toml` and `lvpm.lock` ([The lock file](#the-lock-file)).
 
 ## Why
 
@@ -150,8 +153,12 @@ is the reference and the term-by-term map from OGPT to lvpm.
 
 | Command                                              | What it does                                                                                                                                 |
 | ---------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| `lvpm install <name>[@<version>]`                    | Resolve the package and its dependencies, download, verify MD5, unpack, relink, run hooks                                                    |
-| `lvpm install`                                       | Inside a project: install everything `lvpm.toml` lists, as one plan with one relink pass (`--manifest <FILE>` names the manifest explicitly) |
+| `lvpm install <name>[@<version>]`                    | Outside a project, or with `--global`, `--prefix` or `--labview-version`: resolve the package and its dependencies, download, verify MD5, unpack, relink, run hooks. In a project it is `lvpm add` |
+| `lvpm install`                                       | Inside a project: the same as `lvpm sync`                                                                                                    |
+| `lvpm sync`                                          | Make the destination hold exactly what `lvpm.lock` lists, one plan with one relink pass ([The lock file](#the-lock-file))                    |
+| `lvpm add <name>[@<constraint>]` / `--dev`           | Add a dependency to `lvpm.toml`, lock and sync                                                                                               |
+| `lvpm remove <name>` / `--dev`                       | Remove a dependency from `lvpm.toml`, lock and sync                                                                                          |
+| `lvpm lock` / `--check` / `--upgrade`                | Write `lvpm.lock`, check it, or move packages to newer versions                                                                              |
 | `lvpm uninstall <name>` / `--all`                    | Remove exactly the files that were installed and prune empty folders                                                                         |
 | `lvpm list`                                          | What lvpm has installed into the selected target, and which hooks it did not run                                                             |
 | `lvpm search <query>`                                | Search the package indexes                                                                                                                   |
@@ -175,13 +182,16 @@ Flags that apply to every command:
 | `--refresh`                | Ask each index whether it changed (a conditional request) instead of trusting the cache in `%LOCALAPPDATA%\lvpm\cache` |
 
 `install` flags: `--dry-run` shows every file, relink folder and hook and
-changes nothing; `--no-deps` skips dependencies; `--allow-downgrade` permits
-replacing an installed package with an older version; `--no-relink` skips the
+changes nothing; `--no-deps` skips dependencies and `--allow-downgrade`
+permits replacing an installed package with an older version (both only for
+an install that is not a sync or an `add`: a lock always holds the full set);
+`--no-relink` skips the
 relink pass and `--relink` forces it where it is off by default; `--hooks`
 runs install hooks where they are off by default (both: a headless LabVIEW,
 see [CI in a container](#ci-in-a-container-docker)). `--relink-timeout <SECS>`
 (default 900) bounds one folder's relink; `--keep-open` leaves the LabVIEW
-started for a venv relink running.
+started for a venv relink running. `sync`, `add` and `remove` take `--dry-run`
+and the relink and hook flags as well.
 
 ## The project manifest
 
@@ -203,7 +213,10 @@ defaults = true                   # false: only the sources listed here
 [dependencies]
 delacor_lib_qmh = "7.1.2.1547"    # exactly this version
 oglib_error = ">=6.0.1"           # the newest version satisfying the floor
-jki_lib_caraya = "*"              # the newest version
+jki_lib_state_machine = "*"       # the newest version
+
+[dev-dependencies]                # test and CI tooling; same syntax; skipped with --no-dev
+jki_lib_caraya = "*"
 
 [nipm.dependencies]               # NI Package Manager packages: reported, not installed
 ni-daqmx-labview-support = "26.0"
@@ -212,6 +225,101 @@ ni-daqmx-labview-support = "26.0"
 `labview` is a minimum, not a pin: a venv binds to that version or a newer
 one. Dependencies a package carries are always floors, so what a project pins
 exactly stays exact and the rest resolves to the newest version that fits.
+
+## The lock file
+
+`lvpm.toml` is what you ask for, with loose constraints. `lvpm.lock`, beside
+it, is what you got: every package, direct or transitive, with its exact
+version, SHA-256 and source. lvpm writes it; do not edit it. Commit both.
+
+```console
+$ lvpm lock                 # resolve lvpm.toml, write lvpm.lock
+$ lvpm sync                 # make the project's venv hold exactly what lvpm.lock lists
+```
+
+A teammate or a CI job that syncs the same lock gets the same packages,
+byte for byte. A new release of a package never changes the lock; only an
+upgrade does.
+
+**Locking.** `lvpm lock` picks, for every package, the newest version that
+satisfies all the constraints and runs on the manifest's `labview` (locking
+refuses a manifest without one). If the constraints cannot all hold, it names
+the ones in conflict and writes nothing. It reads `lvpm.toml` and the package
+sources, never what is installed, and leaves a lock that still represents the
+manifest as it is. A requirement that no source lists is recorded as
+unresolved and reported as a warning; a direct dependency that cannot be found
+fails. Constraints are exact (`7.1.2.1547`), `>=` or `*`.
+
+**Out of date.** A lock is out of date when a dependency was added or removed,
+a constraint no longer admits the locked version, `labview` changed, or the
+hosted `[sources]` changed. New releases upstream do not make it so, and
+neither does the per-user `sources.local`. `lvpm lock --check` writes nothing:
+it exits 0 if `lvpm.lock` exists and is current, and otherwise exits non-zero
+with the reason on one line. It reads no source, so it is cheap.
+
+**Syncing.** `lvpm sync` installs what is missing, replaces what is at another
+version, and uninstalls the lvpm-installed packages the lock does not list. It
+prints each change and why before it acts, and does not ask. `--dry-run`
+prints that plan and changes nothing, not even the lock. Each archive is taken
+from the cache by SHA-256, else from any source with the same name and version
+whose SHA-256 matches; one that does not match is never installed. If none
+does, sync fails naming the package, version and SHA-256, and tells you to
+`lvpm cache add <file>` the archive or point `sources.local` at a folder that
+has it. The destination is the project's venv, or the LabVIEW installation
+with `--global`. Packages from `[dev-dependencies]` are synced too; `--no-dev`
+leaves them out and uninstalls them if they are there.
+
+With no lock, or an out-of-date one, `lvpm sync` makes a new one first. To
+refuse that instead:
+
+| Flag          | When the lock is missing or out of date                                       |
+| ------------- | ----------------------------------------------------------------------------- |
+| (none)        | Lock again, then sync                                                         |
+| `--locked`    | Fail and change nothing                                                       |
+| `--frozen`    | Sync the lock as it is, even out of date; fail only if there is no lock       |
+| `--no-locked` | Lock again, even where `--locked` is the default (see [CI](#ci-in-a-container-docker)) |
+
+### Adding and removing dependencies
+
+```console
+$ lvpm add oglib_error              # writes oglib_error = ">=<the version it locked>"
+$ lvpm add "gamma@>=0.5"            # with a constraint
+$ lvpm add --dev jki_lib_caraya     # into [dev-dependencies]
+$ lvpm remove gamma                 # --dev if it is in [dev-dependencies]
+```
+
+`add` and `remove` edit `lvpm.toml` (comments and layout stay), then lock and
+sync. If the lock or the sync fails, `lvpm.toml` and `lvpm.lock` are put back
+as they were. A package that another one still requires stays in the lock
+after `remove`, and the output says so.
+
+**Quote a constraint.** PowerShell and cmd read `>` as a redirect, so
+`lvpm add gamma@>=0.5` sends lvpm's output into a file named `=0.5` and hands
+lvpm only `gamma@`. Put the argument in double quotes, as in
+`lvpm add "gamma@>=0.5"`; that works in both.
+
+In a project, `lvpm install <name>` with no destination flag is `lvpm add
+<name>`, and says so in one line; a bare `lvpm install` is `lvpm sync`. With
+`--global`, `--prefix` or `--labview-version`, or outside a project,
+`lvpm install <name>` is the plain install described above and changes no
+manifest or lock.
+
+### Upgrading
+
+Locked versions stay put until you ask:
+
+```console
+$ lvpm lock --upgrade                         # everything to the newest version the constraints allow
+$ lvpm lock --upgrade-package gamma           # only gamma, to its newest
+$ lvpm lock --upgrade-package gamma@1.2.0     # only gamma, to 1.2.0; repeat the flag for more packages
+$ lvpm sync
+```
+
+With `--upgrade-package`, the other packages stay where the lock has them
+unless they cannot. If the manifest's constraint excludes the version asked
+for, lvpm rewrites it and keeps its kind: an exact pin becomes the new
+version, `>=1.0` becomes `>=` the new version. A `*` is never rewritten.
+There is no separate `update` command.
 
 ## Per-project dependencies (venvs)
 
@@ -226,8 +334,8 @@ created C:\Git\MyProject\.lv-venv
   bound to       LabVIEW 2026 (64-bit)  v26.3
   VI Server port 3735
 
-$ lvpm install                    # everything lvpm.toml lists, into .lv-venv
-$ lvpm install oglib_error        # one more package, into .lv-venv
+$ lvpm install                    # sync: exactly what lvpm.lock lists, into .lv-venv
+$ lvpm add oglib_error            # one more dependency: lvpm.toml, lvpm.lock and .lv-venv
 $ lvpm launch MyProject.lvproj    # a LabVIEW that sees the venv
 ```
 
@@ -329,7 +437,7 @@ For diagnosis the primitives are exposed directly:
 
 Verified end to end: a 46-dependency project manifest resolved to 48
 packages / 8766 files, installed, relinked in one deduplicated pass and its
-15 post-install hooks run, from a single `lvpm install --manifest`.
+15 post-install hooks run, from a single `lvpm install`.
 
 ## CI in a container (Docker)
 
@@ -337,8 +445,19 @@ lvpm runs unchanged in NI's Windows container image
 (`nationalinstruments/labview:latest-windows`, LabVIEW 2026 and later). The
 image carries a real LabVIEW install, the registry keys `lvpm targets`
 reads, and a `LabVIEW.ini` with VI Server already enabled. The command is
-the same one a developer runs in the project, `lvpm install`, followed by
-whatever LabVIEWCLI operation the job is for:
+the same one a developer runs in the project, `lvpm install` (a sync of
+`lvpm.lock`), followed by whatever LabVIEWCLI operation the job is for.
+
+**Quick start.** Lock on a workstation and commit `lvpm.lock`. The job then
+needs nothing but `lvpm sync` (or the bare `lvpm install`): on a headless
+machine a missing or out-of-date lock fails the job, so nothing is resolved
+quietly against whatever was released since. `lvpm lock --check` makes the
+same test without installing anything, for a cheap first step.
+
+```console
+> lvpm lock --check     # exit non-zero: lvpm.lock is missing or out of date
+> lvpm sync             # install exactly what lvpm.lock lists; --no-dev leaves out the test tooling
+```
 
 ```dockerfile
 FROM nationalinstruments/labview:latest-windows
@@ -362,7 +481,7 @@ start headless: no activation, no dialogs, errors to
 in a container blocks forever on an activation prompt nobody can see. Nobody
 sets it on a workstation, so its presence is a reliable sign of an
 automation machine with no developer at it, and lvpm reads it as exactly
-that. On a headless machine three decisions go the other way, each announced
+that. On a headless machine these decisions go the other way, each announced
 on one line and each overridable:
 
 |                                    | developer's machine                                                                 | headless (`LV_RTE_HEADLESS`)                                                                                                         | override                         |
@@ -371,6 +490,7 @@ on one line and each overridable:
 | relink pass                        | on: unrelinked package VIs load, but show as modified and want saving               | off: nothing opens the IDE, and the compile or build resolves the links as it loads                                                  | `--relink`                       |
 | install hooks                      | run, before and after the files                                                     | skipped, and `lvpm list` says so: the hooks measured write a marker file and add a palette entry, IDE furniture                      | `--hooks`                        |
 | palettes and menus                 | rebuilt after the install                                                           | not rebuilt: no one sees a palette                                                                                                   | `lvpm refresh`                   |
+| `lvpm sync` or bare `lvpm install` | a missing or out-of-date `lvpm.lock` is locked again first                          | acts as `--locked`: a missing or out-of-date `lvpm.lock` fails, after a note saying so. `--frozen` still applies. `lock`, `add` and `remove` are not affected | `--no-locked`                    |
 
 Together those mean a headless `lvpm install` never starts LabVIEW: it is
 downloads, MD5 checks and file copies, and takes seconds. Measured on a DQMH
@@ -485,8 +605,9 @@ runs.
 
 - `Replace Mode = If Newer` only writes when the file is absent; doing it
   properly means comparing archive timestamps against disk.
-- No dependency conflict resolution: the first resolution of a name wins,
-  and a floor resolves to the newest version satisfying it.
+- Dependency conflicts are solved only when a project is locked. A named
+  install outside a project still lets the first resolution of a name win, and
+  a floor resolves to the newest version satisfying it.
 - No mass compile; LabVIEW recompiles installed VIs on first load.
 - A hook VI's own `error out` is not read back. A hook that fails internally
   but runs to completion reports as ok.
@@ -496,13 +617,15 @@ runs.
 - In a venv, install hooks are extracted but never run (they act on the
   LabVIEW installation, not on an overlay), and file groups aimed at machine
   locations (`<OS ...>`, `<temp>`) are skipped. Both are recorded in the
-  manifest and shown by `lvpm list`. `lvpm install <name>` in a venv does not
-  add the pin to `lvpm.toml`. No warning yet when a global copy of a venv
-  package shadows it.
+  manifest and shown by `lvpm list`. No warning yet when a global copy of a
+  venv package shadows it.
 
 [docs/roadmap.md](docs/roadmap.md) has what is planned.
 
 ## Layout
+
+Modules are in `crates/lvpm-core/src/`, except `main.rs` (in `src/`) and the
+rows that give a path.
 
 | Module                         | Responsibility                                                                                                          |
 | ------------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
@@ -520,7 +643,7 @@ runs.
 | `refresh.rs`                   | Rebuild palettes and menus through LabVIEW's own shipping VIs                                                           |
 | `viserver.rs`                  | The VI Server TCP protocol: connection, methods, flattened data                                                         |
 | `version.rs`                   | Package version ordering: OGPT `version-release`, VIPM's four-part form; not semver                                     |
-| `src/lv-src/relink-package.vi` | The relink VI embedded into the executable at build time (LabVIEW 2020)                                                 |
+| `crates/lvpm-core/src/lv-src/relink-package.vi` | The relink VI embedded into the executable at build time (LabVIEW 2020)                                                 |
 | `scripts/install.ps1`          | Download, verify and install the latest release                                                                         |
 
 ## License

@@ -65,24 +65,30 @@ wins over the overlay; `LVAddons.AdditionalLocations` needs LabVIEW 2024 Q1.
   (`examples`, `project`, `help`, `templates`, `Targets`): a GUI check.
 - Ask NI: is there a way to make a running LabVIEW re-read an addon location?
 
-## The manifest and the lockfile - WIP
+## The manifest and the lockfile
 
 `lvpm.toml` (done: exact pins, `>=` floors, `*`, hosted `[sources]` and
 `defaults = false`, `labview` minimum, `[nipm.dependencies]`). Local package
 directories are user-level `sources.local` settings, not manifest sources.
 
-- **`lvpm.lock`** — the resolved closure (name, version, source URL, MD5) so
-  `lvpm install` restores the identical venv on another machine and only
-  `lvpm update` re-resolves. The thing a venv without a lock only pretends to
-  be.
-- **`lvpm add <pkg>[@constraint]` / `lvpm remove <pkg>`** — edit the manifest
-  and install/uninstall in one step (the `toml` crate can write; the lockfile
-  wants this too).
-- **`[dev-dependencies]`** — test and CI tooling (Caraya, VI Analyzer tests,
-  DQMH validation) installed by default, skipped with `--no-dev`.
+Done:
+
+- **`lvpm.lock`** — the resolved closure (name, exact version, SHA-256, source),
+  written by `lvpm lock`; `lvpm sync` makes a venv hold exactly that, and
+  `lvpm lock --upgrade[-package]` is the only thing that moves it. A real
+  solver replaces the greedy resolver when a project is locked.
+- **`lvpm add <pkg>[@constraint]` / `lvpm remove <pkg>`** — edit the manifest,
+  lock and sync in one step.
+- **`[dev-dependencies]`** — test and CI tooling, synced by default and
+  skipped with `--no-dev`.
+- Headless machines act as `--locked`: a missing or stale lock fails the job.
+
+Still to do:
+
 - Per-dependency tables: `{ version = "...", hooks = "run", source = "local" }`.
 - `[venv]` overrides: `dir`, `vi-server-port`, `bitness`.
 - Constraints beyond `>=`: `~` / `^` if they turn out to be wanted.
+- SBOM export from the lock.
 
 ## Configuration
 

@@ -165,8 +165,9 @@ enum Cmd {
         #[arg(long, default_value_t = 120)]
         wait: u64,
     },
-    /// Install a package by name, or name@version. In a project, with no
-    /// package, it syncs the project to lvpm.lock, as `lvpm sync` does.
+    /// Install a package by name, or name@version. In a project, a bare
+    /// install is `lvpm sync` and a named install is `lvpm add`, unless
+    /// --global, --prefix or --labview-version say where it goes.
     Install {
         /// Package to install. Omit it in a project to sync the project.
         #[arg(conflicts_with_all = ["locked", "frozen", "no_locked", "no_dev"])]
@@ -369,7 +370,10 @@ enum Cmd {
     /// Show what lvpm has installed into the selected target.
     List,
     /// Search the indexes.
-    Search { query: String },
+    Search {
+        /// Text to look for in package names and display names, ignoring case.
+        query: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -390,15 +394,26 @@ enum VenvCmd {
 #[derive(Subcommand)]
 enum CacheCmd {
     /// Import a .vip/.ogp file or the packages directly inside a directory.
-    Add { path: PathBuf },
+    Add {
+        /// A `.vip` or `.ogp` file, or a directory holding them.
+        path: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
 enum ConfigCmd {
     /// Set a user-level setting. `sources.local` accepts directories; omit them to clear the list.
-    Set { key: String, values: Vec<String> },
+    Set {
+        /// The setting: `cache`, `sources.local` or `venv.dir`.
+        key: String,
+        /// Its value; `sources.local` takes any number of directories.
+        values: Vec<String>,
+    },
     /// Show the effective value of a setting.
-    Get { key: String },
+    Get {
+        /// The setting: `cache`, `sources.local` or `venv.dir`.
+        key: String,
+    },
 }
 
 /// The environment every command runs in, built once from the flags and the

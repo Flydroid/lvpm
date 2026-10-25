@@ -128,7 +128,7 @@ other global lvpm state under `lvpm/` later.
 
 ### Overriding the location
 
-Implemented in `src/config.rs`, npm-style (`npm_config_<key>`): every lvpm
+Implemented in `crates/lvpm-core/src/config.rs`, npm-style (`npm_config_<key>`): every lvpm
 setting resolves from `LVPM_CONFIG_<KEY>` in the environment, else the
 built-in default. `cache` is the first such key. This matters most in CI: a
 pipeline can point every job at a cache on a persistent runner volume or a

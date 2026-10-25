@@ -344,12 +344,12 @@ Decisions already made with the stakeholder:
 | TUI | Full-screen, keyboard-driven terminal application (`ratatui`), not a desktop window | `verified` | Stakeholder |
 | Core | `lvpm-core`, the library holding all domain logic, with no terminal I/O | `verified` | Stakeholder (core/CLI/TUI split) |
 | Front end | A binary on top of core: the `lvpm` CLI or `lvpm-tui` | `verified` | Stakeholder |
-| Destination | What an action applies to: one LabVIEW installation (global target) or one project venv | `unverified` | `Destination` enum in `src/main.rs` |
-| Venv | Project-scoped LVAddons overlay at `.lv-venv/`, bound to one LabVIEW version | `unverified` | README, `src/venv.rs` |
+| Destination | What an action applies to: one LabVIEW installation (global target) or one project venv | `unverified` | `Destination` enum in `crates/lvpm-core/src/ops/env.rs` |
+| Venv | Project-scoped LVAddons overlay at `.lv-venv/`, bound to one LabVIEW version | `unverified` | README, `crates/lvpm-core/src/venv.rs` |
 | Manifest | The project's `lvpm.toml` | `unverified` | README |
 | Manifest dependency | A package listed in the manifest's `[dependencies]` | `unverified` | README |
 | Transitive dependency | A package installed in a venv because another package requires it, not listed in the manifest | `verified` | Stakeholder |
-| Catalog | Union of all package entries (every version) from every configured source | `unverified` | `src/index.rs` |
+| Catalog | Union of all package entries (every version) from every configured source | `unverified` | `crates/lvpm-core/src/index.rs` |
 | Update available | A version newer than the installed one exists in the catalog | `unverified` | Inferred |
 | Incompatible | Package's minimum LabVIEW is newer than the destination's LabVIEW version | `verified` | Stakeholder |
 | Plan preview | Confirmation screen built from a dry run | `verified` | Stakeholder |

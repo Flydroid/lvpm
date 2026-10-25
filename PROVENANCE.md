@@ -33,7 +33,7 @@ An OGPT package is a plain zip archive containing a `spec` file — an
 INI-format manifest — an icon, and `File Group N/` payload directories
 (design docs "Archive Format" and "Package Spec File"). A `.vip` is the same
 archive with a renamed `[Package]` section and a four-part version. The parser
-in [src/spec.rs](src/spec.rs) was written from the spec-file design document
+in [crates/lvpm-core/src/spec.rs](crates/lvpm-core/src/spec.rs) was written from the spec-file design document
 and checked against `spec` files from publicly downloadable packages. No tool
 other than a zip reader and a text editor was needed.
 
@@ -44,7 +44,7 @@ OGPM's Package Directory is a plain-text INI file, one
 `Spec.URL` and `Icon.URL` keys (design doc "Package Directories and
 Repositories"; `openg.ogpd`, 2004, in the CVS snapshot). The public feeds
 still use it; `.vipr` adds `Package.MD5` and a few `Package.*` metadata keys.
-The parser in [src/index.rs](src/index.rs) was written from the format and
+The parser in [crates/lvpm-core/src/index.rs](crates/lvpm-core/src/index.rs) was written from the format and
 by reading those files. Note that the index endpoints themselves are operated
 by NI and JKI respectively; fetching them is subject to those operators'
 terms.
@@ -64,7 +64,7 @@ reference VIPM install produces: identical files, identical places.
 
 ## LabVIEW VI Server wire protocol
 
-The TCP protocol spoken by [src/viserver.rs](src/viserver.rs) belongs to NI's
+The TCP protocol spoken by [crates/lvpm-core/src/viserver.rs](crates/lvpm-core/src/viserver.rs) belongs to NI's
 LabVIEW. NI publishes the VI Server *API* but not its wire format.
 The format documented in [docs/vi-server-protocol.md](docs/vi-server-protocol.md)
 was reconstructed for interoperability from two independent sources, both on

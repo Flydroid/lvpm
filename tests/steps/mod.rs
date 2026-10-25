@@ -6,6 +6,7 @@ pub mod add_remove;
 pub mod cancel;
 pub mod core_io;
 pub mod destination;
+pub mod docs;
 pub mod headless;
 pub mod in_process;
 pub mod install;
