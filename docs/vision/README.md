@@ -70,5 +70,7 @@ Each one is usable on its own. Ticks mean done.
 
 - [distribution-design.md](distribution-design.md) — package kinds and
   formats, build, sources, scopes, security, legacy bridge.
+- [build-slices.md](build-slices.md) — the vision cut into slices that the
+  dev-team pipeline ships one PR at a time.
 - [vipm-cli-comparison.md](vipm-cli-comparison.md) — VIPM's CLI command by
   command against lvpm (checked 2026-10-24).

@@ -172,7 +172,7 @@ min-release-age    = "3d"         # cf. uv --exclude-newer
 - `lvpm.lock` records name, version, feed, SHA-256, signer and provenance subject.
   This supersedes the roadmap's MD5-based lock; MD5 is kept only to check
   legacy packages against their index.
-  `lvpm sync --locked` and `lvpm lock --check` make CI refuse drift.
+  `lvpm install --locked` and `lvpm lock --check` make CI refuse drift.
 - Credentials come from the platform's own credential chain
   (`gh auth token`, `az acr login`, `CI_JOB_TOKEN`, Docker credential helpers).
   They never go in `lvpm.toml`.
