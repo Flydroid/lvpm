@@ -315,10 +315,10 @@ fn commit(
         ..SyncOptions::default()
     };
     let manifest = (edit.text != before).then_some((manifest_path.as_path(), edit.text.as_str()));
+    // From here a cancel is refused: the first file is written, with or
+    // without a sync plan to apply after it.
+    env.cancel.begin_unpack()?;
     restoring_on_failure(&[&manifest_path, &lock_path], || {
-        // From here a cancel is refused: the first file is written, with or
-        // without a sync plan to apply after it.
-        env.cancel.begin_unpack().map_err(SyncError::from)?;
         write_manifest_and_lock(manifest, &lock_path, &lock_text)?;
         announce_edit(env, &edit, &lock, false);
         announce_written(env, lock_path.clone(), &lock, changes);
