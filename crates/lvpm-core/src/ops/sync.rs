@@ -496,6 +496,10 @@ pub fn fetch_locked(
             search.look_in(&downloads, &index)?;
         }
     }
+    // The last source's load may have been cut short by a cancel, too.
+    if env.cancel.is_cancelled() {
+        return Err(Cancelled.into());
+    }
 
     let problems: Vec<LockedArchiveProblem> = searches.iter().filter_map(Search::problem).collect();
     match problems.is_empty() {
@@ -511,6 +515,8 @@ pub(super) struct Search<'a> {
     pub(super) found: bool,
     /// The SHA-256 of an archive that was found and is not the locked one.
     differs: Option<String>,
+    /// Why the last entry that could not be fetched was not.
+    pub(super) unfetched: Option<String>,
 }
 
 impl<'a> Search<'a> {
@@ -519,6 +525,7 @@ impl<'a> Search<'a> {
             locked,
             found: false,
             differs: None,
+            unfetched: None,
         };
         match downloads.stored(&search.sha256()) {
             Stored::Intact(_) => search.found = true,
@@ -549,7 +556,10 @@ impl<'a> Search<'a> {
             let bytes = match downloads.fetch(entry) {
                 Ok(bytes) => bytes,
                 Err(why) if why.is::<Cancelled>() => return Err(Cancelled.into()),
-                Err(_) => continue,
+                Err(why) => {
+                    self.unfetched = Some(format!("{why:#}"));
+                    continue;
+                }
             };
             let found = sha256_hex(&bytes);
             if found == self.sha256() {

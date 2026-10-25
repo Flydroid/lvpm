@@ -11,7 +11,7 @@ use super::session::Downloads;
 use super::snapshot::restoring_on_failure;
 use super::sync::Search;
 use crate::cache::sha256_hex;
-use crate::errors::{ArchiveFailure, Cancelled, LockError};
+use crate::errors::{ArchiveFailure, ArchiveFault, Cancelled, LockError};
 use crate::events::{Event, LockChange};
 use crate::index::{self, Entry, Index};
 use crate::lockfile::{self, Inputs, LockedPackage, LockedUnresolved, Lockfile};
@@ -599,11 +599,19 @@ fn hash_archives(
             if !search.found {
                 search.look_in(&downloads, index)?;
             }
-            match search.problem() {
-                None => {
+            match (search.problem(), search.unfetched) {
+                (None, _) => {
                     hashes.insert(key.clone(), locked.sha256.clone());
                 }
-                Some(problem) => not_as_locked.push(problem),
+                // Not found because it could not be fetched: that is what to say.
+                (Some(problem), Some(reason)) if problem.fault == ArchiveFault::NotFound => {
+                    failures.push(ArchiveFailure {
+                        name: entry.name.clone(),
+                        version: entry.version.to_string(),
+                        reason,
+                    })
+                }
+                (Some(problem), _) => not_as_locked.push(problem),
             }
             continue;
         }
