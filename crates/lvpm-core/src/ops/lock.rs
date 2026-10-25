@@ -22,6 +22,8 @@ use crate::version::Version;
 use anyhow::Context;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Resolve the project's manifest and write `lvpm.lock` beside it. The lock
 /// comes back as it was written. A lock that still represents the manifest is
@@ -728,13 +730,36 @@ pub(super) fn write_manifest_and_lock(
 
 /// The new text goes beside the old file first and replaces it in one step:
 /// whoever reads the lock sees the old one or the new one, never half of it.
+/// Each write stages to a file of its own, so two processes in one project
+/// never rename each other's half-written file into place; whatever fails,
+/// the staged file does not stay.
 fn write_atomically(path: &Path, text: &str) -> anyhow::Result<()> {
-    let staged = path.with_extension("lock.tmp");
-    std::fs::write(&staged, text).with_context(|| format!("writing {}", staged.display()))?;
-    std::fs::rename(&staged, path).map_err(|why| {
+    let staged = staging_path(path);
+    let replaced = std::fs::write(&staged, text)
+        .with_context(|| format!("writing {}", staged.display()))
+        .and_then(|()| {
+            std::fs::rename(&staged, path).with_context(|| format!("replacing {}", path.display()))
+        });
+    if replaced.is_err() {
         std::fs::remove_file(&staged).ok();
-        anyhow::Error::new(why).context(format!("replacing {}", path.display()))
-    })
+    }
+    replaced
+}
+
+/// A name beside `path` that no other write has: the process, the clock and a
+/// count, as the cache names its staging files.
+fn staging_path(path: &Path) -> PathBuf {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_nanos());
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(
+        ".{}-{nanos}-{}.tmp",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    path.with_file_name(name)
 }
 
 #[cfg(test)]
@@ -1047,7 +1072,7 @@ mod tests {
         assert_eq!(lock.labview, "2023");
         let written = std::fs::read_to_string(project.lock_path()).unwrap();
         assert_eq!(written, lock.to_toml().unwrap());
-        assert!(!project.root.join("lvpm.lock.tmp").exists());
+        assert_eq!(staged_files(&project.root), Vec::<String>::new());
         let events = sink.events();
         assert!(
             matches!(
@@ -1255,6 +1280,43 @@ mod tests {
         );
     }
 
+    // ---- writing the lock ----
+
+    /// The staging files left in `dir`.
+    fn staged_files(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".tmp"))
+            .collect()
+    }
+
+    #[test]
+    fn every_write_stages_to_a_file_of_its_own_beside_the_lock() {
+        let lock = Path::new("project").join(lockfile::FILE_NAME);
+        let (first, second) = (staging_path(&lock), staging_path(&lock));
+        assert_ne!(first, second);
+        for staged in [first, second] {
+            assert_eq!(staged.parent(), lock.parent());
+            let name = staged.file_name().unwrap().to_string_lossy();
+            assert!(
+                name.starts_with("lvpm.lock.") && name.ends_with(".tmp"),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_lock_that_cannot_be_put_in_place_leaves_no_staged_file() {
+        let project = ProjectDir::new("write-fails", MANIFEST, &[]);
+        // A folder where the lock goes: the staged file is written, and cannot
+        // replace it.
+        std::fs::create_dir(project.lock_path()).unwrap();
+        let why = write_atomically(&project.lock_path(), "lock").unwrap_err();
+        assert!(format!("{why:#}").contains("replacing"), "{why:#}");
+        assert_eq!(staged_files(&project.root), Vec::<String>::new());
+    }
+
     // ---- upgrade ----
 
     #[test]
@@ -1451,42 +1513,39 @@ mod tests {
                                 [dependencies]\ngamma = \"1.0\"\n";
 
     #[test]
-    fn a_failed_write_after_the_manifest_was_rewritten_puts_the_manifest_and_the_lock_back() {
+    fn a_failed_lock_write_after_the_manifest_was_written_puts_the_manifest_back() {
+        let project = ProjectDir::new("write-restore", PINNED_GAMMA, &[]);
+        let manifest_path = project.root.join(crate::project::FILE_NAME);
+        let manifest_before = std::fs::read(&manifest_path).unwrap();
+        // The lock goes in a folder that is not there, so its write fails after
+        // the manifest has been written.
+        let lock_path = project.root.join("gone").join(lockfile::FILE_NAME);
+
+        let failure = restoring_on_failure(&[&manifest_path, &lock_path], || {
+            write_manifest_and_lock(Some((&manifest_path, "[project]\n")), &lock_path, "lock")
+        })
+        .unwrap_err();
+        assert!(format!("{failure:#}").contains("writing"), "{failure:#}");
+        assert_eq!(std::fs::read(&manifest_path).unwrap(), manifest_before);
+        assert!(!lock_path.exists());
+    }
+
+    #[test]
+    fn an_upgrade_rewrites_the_manifest_to_admit_the_version_it_moves_to() {
         let project = ProjectDir::new(
-            "upgrade-restore",
+            "upgrade-rewrite",
             PINNED_GAMMA,
             &[("gamma", "1.0", "23.0", ""), ("gamma", "1.5", "23.0", "")],
         );
         lock(&project.env(&Recorder::default())).unwrap();
         let manifest_path = project.root.join(crate::project::FILE_NAME);
-        let (manifest_before, lock_before) = (
-            std::fs::read(&manifest_path).unwrap(),
-            std::fs::read(project.lock_path()).unwrap(),
-        );
-        let upgrade_gamma = Upgrade::Packages(vec![target("gamma@1.5")]);
-
-        // The new lock is staged beside the old one: a folder in that place
-        // fails the write, after the manifest has been written.
-        let staged = project.root.join("lvpm.lock.tmp");
-        std::fs::create_dir(&staged).unwrap();
+        let manifest_before = std::fs::read(&manifest_path).unwrap();
         let sink = Recorder::default();
-        let why = upgrade(&project.env(&sink), &upgrade_gamma).unwrap_err();
-        assert!(matches!(why, LockError::Other(_)), "{why:?}");
-        assert_eq!(std::fs::read(&manifest_path).unwrap(), manifest_before);
-        assert_eq!(std::fs::read(project.lock_path()).unwrap(), lock_before);
-        assert!(
-            sink.events()
-                .iter()
-                .all(|event| matches!(event, Event::LockHashing { .. })),
-            "nothing is reported as done: {:?}",
-            sink.events()
-        );
-
-        // The same upgrade, with the write able to succeed, does what the
-        // failed one would have.
-        std::fs::remove_dir(&staged).unwrap();
-        let sink = Recorder::default();
-        upgrade(&project.env(&sink), &upgrade_gamma).unwrap();
+        upgrade(
+            &project.env(&sink),
+            &Upgrade::Packages(vec![target("gamma@1.5")]),
+        )
+        .unwrap();
         assert_eq!(
             std::fs::read_to_string(&manifest_path).unwrap(),
             std::str::from_utf8(&manifest_before)
