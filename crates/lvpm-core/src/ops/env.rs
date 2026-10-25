@@ -243,6 +243,7 @@ impl<'a> OpEnv<'a> {
             &self.config.local_sources,
             defaults,
             self.sink,
+            &self.cancel,
         )
     }
 }

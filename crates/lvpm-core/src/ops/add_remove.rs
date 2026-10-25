@@ -44,7 +44,7 @@ pub fn add(
     let dest = env.destination()?;
     announce_project(env, &prepared, &dest);
 
-    let index = env.load_index(Some(&prepared.found))?;
+    let index = locking::load_index(env, Some(&prepared.found))?;
     let constraint = match request.constraint {
         Some(written) => written,
         None => floor(env, &prepared, &index, table, &request.name)?,
@@ -71,7 +71,7 @@ pub fn remove(
     let dest = env.destination()?;
     announce_project(env, &prepared, &dest);
 
-    let index = env.load_index(Some(&prepared.found))?;
+    let index = locking::load_index(env, Some(&prepared.found))?;
     commit(env, prepared, edit, &index, dest, options)
 }
 
@@ -327,6 +327,9 @@ fn commit(
     };
     let manifest = (edit.text != before).then_some((manifest_path.as_path(), edit.text.as_str()));
     restoring_on_failure(&[&manifest_path, &lock_path], || {
+        // From here a cancel is refused: the first file is written, with or
+        // without a sync plan to apply after it.
+        env.cancel.begin_unpack().map_err(SyncError::from)?;
         write_manifest_and_lock(manifest, &lock_path, &lock_text)?;
         announce_edit(env, &edit, &lock, false);
         announce_written(env, lock_path.clone(), &lock, changes);
@@ -391,8 +394,10 @@ fn announce_edit(env: &OpEnv, edit: &Edit, lock: &Lockfile, dry_run: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cancel::CancelToken;
     use crate::config::Config;
     use crate::events::EventSink;
+    use crate::ops::testing::CancelOn;
     use crate::target::Roots;
     use std::io::Write;
     use std::path::Path;
@@ -627,7 +632,7 @@ mod tests {
             World { root }
         }
 
-        fn env<'a>(&self, sink: &'a Recorder) -> OpEnv<'a> {
+        fn env<'a>(&self, sink: &'a dyn EventSink) -> OpEnv<'a> {
             let config = Config {
                 cache: self.root.join("cache"),
                 local_sources: vec![self.root.join("packages")],
@@ -979,6 +984,41 @@ mod tests {
             name: "alpha".into(),
             required_by: vec!["beta".into()]
         }));
+    }
+
+    #[test]
+    fn a_cancel_accepted_once_the_lock_is_made_stops_a_removal_that_has_nothing_to_sync() {
+        let world = World::new("cancel-late", PROJECT);
+        write_vip(
+            &world.root.join("packages").join("delta-1.0.vip"),
+            ("delta", "1.0", "ni_lib_missing>=1.0"),
+        );
+        run_add(&world, "delta", &InstallOptions::default()).unwrap();
+        run_add(&world, "alpha@>=1.0", &InstallOptions::default()).unwrap();
+        let (manifest, lock) = (world.manifest(), world.lock().unwrap());
+
+        // beta still needs alpha: the lock holds what it did, and the
+        // destination already has it all.
+        let token = CancelToken::new();
+        let sink = CancelOn::new(&token, |event| {
+            matches!(event, Event::RequirementUnresolved { .. })
+        });
+        let mut env = world.env(&sink);
+        env.cancel = token;
+        let why = remove(
+            &env,
+            "alpha",
+            DependencyTable::Dependencies,
+            &InstallOptions::default(),
+        )
+        .unwrap_err();
+        assert_eq!(sink.answered(), Some(true), "the cancel was not accepted");
+        assert!(
+            matches!(&why, EditError::Sync(SyncError::Lock(LockError::Cancelled))),
+            "{why:?}"
+        );
+        assert_eq!(world.manifest(), manifest);
+        assert_eq!(world.lock().unwrap(), lock);
     }
 
     #[test]

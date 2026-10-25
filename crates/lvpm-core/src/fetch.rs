@@ -51,20 +51,12 @@ pub fn package(
     {
         return Ok(bytes);
     }
-    let mut response = client
+    let response = client
         .get(&entry.url)
         .send()
         .with_context(|| format!("downloading {}", entry.url))?
         .error_for_status()?;
-    let mut bytes = Vec::new();
-    let mut chunk = [0u8; CHUNK_BYTES];
-    loop {
-        ensure_running(cancel)?;
-        match response.read(&mut chunk)? {
-            0 => break,
-            read => bytes.extend_from_slice(&chunk[..read]),
-        }
-    }
+    let bytes = read_body(response, cancel)?;
     let md5 = verify_md5(entry, &bytes)?;
     let sha256 = cache.store(&bytes)?;
     cache.record_download(&LocalEntry::from(entry), &entry.url, &sha256, &md5)?;
@@ -73,6 +65,23 @@ pub fn package(
 
 /// How much of a download is read between two looks at the cancel token.
 const CHUNK_BYTES: usize = 64 * 1024;
+
+/// All of `body`, a chunk at a time, looking at `cancel` between the chunks. A
+/// read that fails once `cancel` was cancelled is the cancel: a stalled
+/// download ends in a timeout, and the user asked for it to stop.
+fn read_body(mut body: impl Read, cancel: &CancelToken) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    let mut chunk = [0u8; CHUNK_BYTES];
+    loop {
+        ensure_running(cancel)?;
+        match body.read(&mut chunk) {
+            Ok(0) => return Ok(bytes),
+            Ok(read) => bytes.extend_from_slice(&chunk[..read]),
+            Err(_) if cancel.is_cancelled() => return Err(Cancelled.into()),
+            Err(why) => return Err(why.into()),
+        }
+    }
+}
 
 fn ensure_running(cancel: &CancelToken) -> Result<()> {
     match cancel.is_cancelled() {
@@ -216,6 +225,29 @@ mod tests {
         assert!(why.is::<Cancelled>(), "{why:#}");
         drop(cache);
         std::fs::remove_dir_all(root).ok();
+    }
+
+    /// A body that gives out the way a stalled download does, once it was
+    /// cancelled, or without anyone having cancelled it.
+    struct GivesOut<'a>(Option<&'a CancelToken>);
+
+    impl Read for GivesOut<'_> {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            if let Some(token) = self.0 {
+                assert!(token.cancel());
+            }
+            Err(std::io::ErrorKind::TimedOut.into())
+        }
+    }
+
+    #[test]
+    fn a_read_that_fails_after_a_cancel_is_the_cancel_and_any_other_is_the_failure() {
+        let token = CancelToken::new();
+        let why = read_body(GivesOut(Some(&token)), &token).unwrap_err();
+        assert!(why.is::<Cancelled>(), "{why:#}");
+
+        let why = read_body(GivesOut(None), &CancelToken::new()).unwrap_err();
+        assert!(!why.is::<Cancelled>(), "{why:#}");
     }
 
     #[test]

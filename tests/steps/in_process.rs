@@ -7,6 +7,7 @@ use crate::CliWorld;
 use crate::support::events::{RecordingSink, fields_that_are_not_data};
 use crate::support::feed::{PROJECT_FEED_DIR, index_path};
 use cucumber::{then, when};
+use lvpm_core::cancel::CancelToken;
 use lvpm_core::events::{Event, FeedOutcome};
 use lvpm_core::{index, project};
 
@@ -24,6 +25,7 @@ async fn core_loads_the_index(world: &mut CliWorld) {
         &[],
         project.default_sources,
         &sink,
+        &CancelToken::new(),
     )
     .expect("core loads the index");
     world.core_events = sink.events();

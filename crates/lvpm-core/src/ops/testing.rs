@@ -3,6 +3,7 @@
 //! not really there.
 
 use super::env::OpEnv;
+use crate::cancel::CancelToken;
 use crate::config::Config;
 use crate::events::{Event, EventSink, NullSink};
 use crate::target::LvTarget;
@@ -55,6 +56,38 @@ impl Recorded {
 impl EventSink for Recorded {
     fn emit(&self, event: Event) {
         self.0.lock().unwrap().push(event);
+    }
+}
+
+/// Cancels its token at the first event that `matches`, keeping what `cancel`
+/// answered: a cancel at a place that does not depend on timing. The
+/// environment must hold a clone of the token.
+pub(crate) struct CancelOn<F> {
+    token: CancelToken,
+    matches: F,
+    answered: Mutex<Option<bool>>,
+}
+
+impl<F: Fn(&Event) -> bool> CancelOn<F> {
+    pub(crate) fn new(token: &CancelToken, matches: F) -> Self {
+        CancelOn {
+            token: token.clone(),
+            matches,
+            answered: Mutex::new(None),
+        }
+    }
+
+    pub(crate) fn answered(&self) -> Option<bool> {
+        *self.answered.lock().unwrap()
+    }
+}
+
+impl<F: Fn(&Event) -> bool + Send + Sync> EventSink for CancelOn<F> {
+    fn emit(&self, event: Event) {
+        let mut answered = self.answered.lock().unwrap();
+        if answered.is_none() && (self.matches)(&event) {
+            *answered = Some(self.token.cancel());
+        }
     }
 }
 

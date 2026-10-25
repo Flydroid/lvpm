@@ -488,6 +488,11 @@ pub fn fetch_locked(
         if searches.iter().all(|search| search.found) {
             break;
         }
+        // A source that was not read for a cancel holds nothing, but that is
+        // not what the sync reports.
+        if env.cancel.is_cancelled() {
+            return Err(Cancelled.into());
+        }
         let Some(index) = source.index(env) else {
             continue;
         };
@@ -633,6 +638,7 @@ impl Source {
             &folders,
             defaults,
             env.sink,
+            &env.cancel,
         )
         .ok()
     }
@@ -1167,6 +1173,21 @@ mod tests {
         let env = scratch.env(&NullSink, vec![scratch.folder()]);
         fetch_locked(&env, &manifest(""), &[lock]).unwrap();
         assert_eq!(scratch.cache().load(&sha256).unwrap(), Some(bytes));
+    }
+
+    #[test]
+    fn a_cancel_ends_the_search_for_archives_and_is_not_an_archive_that_is_missing() {
+        let scratch = Scratch::new("cancelled-search");
+        let env = scratch.env(&NullSink, vec![]);
+        env.cancel.cancel();
+        let project = manifest("dead = \"http://127.0.0.1:1/feed\"\n");
+        let lock = locked_as("alpha", "2.0", b"nobody has these bytes");
+
+        let why = fetch_locked(&env, &project, &[lock]).unwrap_err();
+        assert!(
+            matches!(why, SyncError::Lock(LockError::Cancelled)),
+            "{why:?}"
+        );
     }
 
     #[test]

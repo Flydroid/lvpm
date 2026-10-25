@@ -17,7 +17,7 @@ pub mod snapshot;
 pub mod start;
 pub mod sync;
 #[cfg(test)]
-mod testing;
+pub(crate) mod testing;
 pub mod uninstall;
 pub mod venv_cmd;
 

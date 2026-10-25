@@ -8,6 +8,8 @@
 //! and indexes itself from each package's own spec.
 
 use crate::cache::{Cache, LocalEntry, SourceState};
+use crate::cancel::CancelToken;
+use crate::errors::Cancelled;
 use crate::events::{Event, EventSink, FeedOutcome};
 use crate::version::{Version, split_id};
 use anyhow::{Context, Result};
@@ -387,6 +389,9 @@ pub(crate) fn source_of(url: &str, feeds: &[(String, String)]) -> String {
 }
 
 /// Load public indexes, global local package folders, and hosted manifest sources.
+///
+/// A cancelled `cancel` ends the load with [`Cancelled`] before the next feed is
+/// asked for; a request already sent runs to its end.
 pub fn load(
     cache_dir: &Path,
     refresh: bool,
@@ -394,6 +399,7 @@ pub fn load(
     local_sources: &[PathBuf],
     defaults: bool,
     sink: &dyn EventSink,
+    cancel: &CancelToken,
 ) -> Result<Index> {
     let mut entries = Vec::new();
     let cache = Cache::open(cache_dir)?;
@@ -420,6 +426,9 @@ pub fn load(
         .user_agent(concat!("lvpm/", env!("CARGO_PKG_VERSION")))
         .build()?;
     for (url, base) in &sources {
+        if cancel.is_cancelled() {
+            return Err(Cancelled.into());
+        }
         let body = feed_body(&cache, &client, url, base, refresh, sink)?;
         parse_into(&body, base, &mut entries);
     }
@@ -617,6 +626,7 @@ fn parse_lv_gate(s: &str) -> Option<f64> {
 mod tests {
     use super::*;
     use crate::events::NullSink;
+    use crate::ops::testing::CancelOn;
     use std::io::{Read, Write};
     use std::sync::{Arc, Mutex};
 
@@ -650,6 +660,26 @@ mod tests {
             }
         });
         Stub { url, requests }
+    }
+
+    /// [`super::load`] for a token nobody cancels, which most tests are about.
+    fn load(
+        cache_dir: &Path,
+        refresh: bool,
+        extra: &[String],
+        local_sources: &[PathBuf],
+        defaults: bool,
+        sink: &dyn EventSink,
+    ) -> Result<Index> {
+        super::load(
+            cache_dir,
+            refresh,
+            extra,
+            local_sources,
+            defaults,
+            sink,
+            &CancelToken::new(),
+        )
     }
 
     fn test_cache(name: &str) -> (std::path::PathBuf, Cache) {
@@ -965,6 +995,35 @@ mod tests {
             2,
             "the 304 was retried unconditionally"
         );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_cancel_ends_the_load_before_the_next_feed_is_asked() {
+        let (first, second) = (stub(&[OK]), stub(&[OK]));
+        let feeds = [first.url.clone(), second.url.clone()];
+        let (root, _cache) = test_cache("cancel-between-feeds");
+        let load_with = |token: &CancelToken, sink: &dyn EventSink| {
+            super::load(&root, false, &feeds, &[], false, sink, token)
+        };
+
+        // Cancelled before the first request: no feed is asked.
+        let before = CancelToken::new();
+        before.cancel();
+        let why = load_with(&before, &NullSink)
+            .err()
+            .expect("it was cancelled");
+        assert!(why.is::<Cancelled>(), "{why:#}");
+        assert!(first.requests.lock().unwrap().is_empty());
+
+        // Cancelled as the first feed has answered: the second is not asked.
+        let token = CancelToken::new();
+        let sink = CancelOn::new(&token, |event| matches!(event, Event::FeedChecked { .. }));
+        let why = load_with(&token, &sink).err().expect("it was cancelled");
+        assert!(why.is::<Cancelled>(), "{why:#}");
+        assert_eq!(sink.answered(), Some(true));
+        assert_eq!(first.requests.lock().unwrap().len(), 1);
+        assert!(second.requests.lock().unwrap().is_empty());
         std::fs::remove_dir_all(&root).ok();
     }
 

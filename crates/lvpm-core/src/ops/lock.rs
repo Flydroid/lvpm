@@ -45,7 +45,10 @@ pub fn lock(env: &OpEnv) -> Result<Lockfile, LockError> {
     }
 
     let (lock, changes) = relock(env, &found, previous.as_ref())?;
-    write_atomically(&lock_path, &lock.to_toml()?)?;
+    let text = lock.to_toml()?;
+    // From here a cancel is refused: the first file is written.
+    env.cancel.begin_unpack()?;
+    write_atomically(&lock_path, &text)?;
     announce_written(env, lock_path, &lock, changes);
     Ok(lock)
 }
@@ -110,7 +113,7 @@ pub fn upgrade(env: &OpEnv, which: &Upgrade) -> Result<Lockfile, LockError> {
             (Some(held), Moving::Only(targets))
         }
     };
-    let index = env.load_index(Some(&found))?;
+    let index = load_index(env, Some(&found))?;
     let pins = Pins::of(&found, moving.targets(), &index, gate)?;
     let project = pins
         .rewrite
@@ -137,6 +140,8 @@ pub fn upgrade(env: &OpEnv, which: &Upgrade) -> Result<Lockfile, LockError> {
         .rewrite
         .as_ref()
         .map(|rewrite| (manifest_path.as_path(), rewrite.text.as_str()));
+    // From here a cancel is refused: the first file is written.
+    env.cancel.begin_unpack()?;
     restoring_on_failure(&[manifest_path, &lock_path], || {
         write_manifest_and_lock(manifest, &lock_path, &text)
     })?;
@@ -358,7 +363,7 @@ pub(super) fn relock(
     found: &(PathBuf, Project),
     previous: Option<&Lockfile>,
 ) -> Result<(Lockfile, Vec<LockChange>), LockError> {
-    let index = env.load_index(Some(found))?;
+    let index = load_index(env, Some(found))?;
     relock_with(env, &found.1, &index, previous)
 }
 
@@ -438,6 +443,19 @@ pub fn check(env: &OpEnv) -> Result<(), LockError> {
         Some(reason) => Err(LockError::Stale(reason)),
         None => Ok(()),
     }
+}
+
+/// [`OpEnv::load_index`], with a load that was cancelled told apart from one
+/// that failed.
+pub(super) fn load_index(
+    env: &OpEnv,
+    manifest: Option<&(PathBuf, Project)>,
+) -> Result<Index, LockError> {
+    env.load_index(manifest)
+        .map_err(|why| match why.is::<Cancelled>() {
+            true => Cancelled.into(),
+            false => why.into(),
+        })
 }
 
 /// The manifest of the project the command runs in.
@@ -791,6 +809,7 @@ mod tests {
     use crate::events::EventSink;
     use crate::index::Requirement;
     use crate::lockfile::{LOCAL_SOURCE, StaleReason};
+    use crate::ops::testing::CancelOn;
     use crate::solve::Unresolved;
     use std::io::Write;
     use std::path::PathBuf;
@@ -1057,7 +1076,7 @@ mod tests {
             ProjectDir { root }
         }
 
-        fn env<'a>(&self, sink: &'a Recorder) -> OpEnv<'a> {
+        fn env<'a>(&self, sink: &'a dyn EventSink) -> OpEnv<'a> {
             let config = Config {
                 cache: self.root.join("cache"),
                 local_sources: vec![self.root.join("packages")],
@@ -1719,6 +1738,71 @@ mod tests {
         env.cancel.cancel();
         assert!(matches!(lock(&env), Err(LockError::Cancelled)));
         assert!(!project.lock_path().exists());
+    }
+
+    #[test]
+    fn a_cancel_before_a_feed_is_asked_is_a_cancelled_lock_and_asks_no_feed() {
+        let manifest = "[project]\nlabview = \"2023\"\n\n[sources]\ndefaults = false\n\
+                        dead = \"http://127.0.0.1:1/feed\"\n\n[dependencies]\ngamma = \"*\"\n";
+        let project = ProjectDir::new("cancel-feed", manifest, &[]);
+        let sink = Recorder::default();
+        let env = project.env(&sink);
+        env.cancel.cancel();
+        assert!(matches!(lock(&env), Err(LockError::Cancelled)));
+        assert!(sink.events().is_empty(), "{:?}", sink.events());
+        assert!(!project.lock_path().exists());
+    }
+
+    /// What the solver and the archives are done with: the last event before
+    /// the files are written, when an operation reports a requirement no
+    /// source lists.
+    const NEEDS_A_MISSING_LIBRARY: &str = "ni_lib_missing>=1.0";
+
+    fn cancelled_when_the_lock_is_made(
+        project: &ProjectDir,
+        run: impl FnOnce(&OpEnv) -> Result<Lockfile, LockError>,
+    ) -> Result<Lockfile, LockError> {
+        let token = crate::cancel::CancelToken::new();
+        let sink = CancelOn::new(&token, |event| {
+            matches!(event, Event::RequirementUnresolved { .. })
+        });
+        let mut env = project.env(&sink);
+        env.cancel = token;
+        let result = run(&env);
+        assert_eq!(sink.answered(), Some(true), "the cancel was not accepted");
+        result
+    }
+
+    #[test]
+    fn a_cancel_accepted_once_the_lock_is_made_stops_locking_before_it_is_written() {
+        let project = ProjectDir::new(
+            "cancel-late",
+            MANIFEST,
+            &[("gamma", "1.0", "23.0", NEEDS_A_MISSING_LIBRARY)],
+        );
+        let result = cancelled_when_the_lock_is_made(&project, lock);
+        assert!(matches!(result, Err(LockError::Cancelled)), "{result:?}");
+        assert!(!project.lock_path().exists());
+    }
+
+    #[test]
+    fn a_cancel_accepted_once_the_lock_is_made_stops_an_upgrade_before_anything_is_written() {
+        let project = ProjectDir::new(
+            "upgrade-cancel-late",
+            MANIFEST,
+            &[("gamma", "1.0", "23.0", NEEDS_A_MISSING_LIBRARY)],
+        );
+        lock(&project.env(&Recorder::default())).unwrap();
+        write_vip(
+            &project.root.join("packages/gamma-1.5.vip"),
+            ("gamma", "1.5", "23.0", NEEDS_A_MISSING_LIBRARY),
+        );
+        let before = std::fs::read(project.lock_path()).unwrap();
+
+        let result =
+            cancelled_when_the_lock_is_made(&project, |env| upgrade(env, &Upgrade::Everything));
+        assert!(matches!(result, Err(LockError::Cancelled)), "{result:?}");
+        assert_eq!(std::fs::read(project.lock_path()).unwrap(), before);
     }
 
     #[test]
