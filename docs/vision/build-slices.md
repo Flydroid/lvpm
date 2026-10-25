@@ -39,8 +39,8 @@ These are hard to undo, so settle them as ADRs (`/adr-tools`) before S1 starts:
 1. **The `[package]` keys in `lvpm.toml`.** Users commit them. Check them
    against `vipm.toml` so nobody confuses the two files.
 2. **`.vip` first, `.lvpkg` later.** Every consumer already reads `.vip`;
-   `.lvpkg` is needed for in-file signatures and OCI referrers (S7). Until
-   then a `.vip` gets a detached attestation (S6).
+   `.lvpkg` is needed for OCI referrers and its `RECORD`/SBOM layout (S7).
+   Until then a `.vip` gets a detached attestation (S6).
 3. **The upstream relationship.** Contribute back or keep a long-lived fork.
    It decides naming and how code is split into modules.
 
