@@ -76,9 +76,12 @@ Reference and `vipm.toml` comparison: [manifest.md](manifest.md).
   `lvpm install` restores the identical venv on another machine and only
   `lvpm update` re-resolves. The thing a venv without a lock only pretends to
   be.
-- **`lvpm sync`** — make the venv match the manifest exactly: install what is
-  missing, uninstall what is installed but neither listed nor required by a
-  listed package. `install` stays additive. `--dry-run` shows both lists.
+- **`lvpm sync`** — after `lvpm.lock`: make the venv match the lock
+  exactly, installing what is missing and uninstalling what the lock does not
+  list. `install` stays additive. `--dry-run` shows both lists. Waits for the
+  lock because today's resolver does not follow already-installed
+  dependencies, so it cannot say what is still needed; notes in
+  [manifest.md](manifest.md#to-do).
 - **`lvpm add <pkg>[@constraint]` / `lvpm remove <pkg>`** — edit the manifest
   and install/uninstall in one step (the `toml` crate can write; the lockfile
   wants this too).

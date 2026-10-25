@@ -345,14 +345,24 @@ unaffected.
 
 Tracked in [roadmap.md](roadmap.md#the-manifest-and-the-lockfile---wip):
 
-- **`lvpm sync`**: make the venv match the manifest exactly. Install what is
-  missing or out of date, as `install` does, and uninstall every package that
-  is neither listed nor required by a listed one (running its uninstall
-  hooks). `--dry-run` shows both lists. Not the same as VIPM's `vipm sync`,
-  which updates `vipm.toml` from a `.lvproj`.
 - **`lvpm.lock`**, next to `lvpm.toml`: the resolved closure (name, version,
   source, checksum) so `lvpm install` reproduces a venv exactly and only
   `lvpm update` re-resolves. The format of `vipm.lock` is a reference point.
+- **`lvpm sync`**, after `lvpm.lock`: make the venv match the lock exactly.
+  Install what is missing or out of date, as `install` does, and uninstall
+  every package the lock does not list (running its uninstall hooks).
+  `--dry-run` shows both lists. Not the same as VIPM's `vipm sync`, which
+  updates `vipm.toml` from a `.lvproj`.
+  - Why after the lock: the resolver does not produce the full set of
+    needed packages today. A dependency already installed at a satisfying
+    version is not followed further, so its own dependencies would look
+    unneeded and be removed. The lock records the whole closure.
+  - Pieces already there: `install::list_installed` and the uninstall
+    sequence (`uninstall_one`: PreUninstall, recorded files, PostUninstall,
+    one palette refresh). Still inline in `cmd_install`: the resolver and
+    the install sequence, to be extracted so `install` and `sync` share them.
+  - Proposed scope: venvs and `--prefix` only, refused with `--global`;
+    remove extras first, once resolution has succeeded.
 - **`lvpm add` / `lvpm remove`**, editing the manifest while preserving
   comments and formatting.
 - **Constraint grammar**, one for every dependency table, following Cargo:
