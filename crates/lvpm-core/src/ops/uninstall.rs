@@ -383,6 +383,45 @@ mod tests {
     }
 
     #[test]
+    fn a_pre_uninstall_vi_outside_the_hooks_directory_is_refused_and_not_run() {
+        use crate::ops::testing::{FakeInstallation, Recorded, env_on, scratch_dir};
+        let dir = scratch_dir("uninstall-planted-hook");
+        let fake = FakeInstallation::new(&dir);
+        let planted = dir.join("planted-PreUninstall.vi");
+        std::fs::write(&planted, "vi").unwrap();
+        let store = fake.roots().store_dir();
+        std::fs::create_dir_all(&store).unwrap();
+        let record = store.join("alpha.json");
+        let manifest = serde_json::json!({
+            "name": "alpha", "version": "1.0", "display_name": null, "installed_at": 0,
+            "target": "fake", "files": [], "skipped_hooks": [],
+            "pre_uninstall_vi": planted.to_string_lossy().replace('\\', "/"),
+        });
+        std::fs::write(&record, manifest.to_string()).unwrap();
+
+        let sink = Recorded::default();
+        let mut env = env_on(&sink, &dir);
+        fake.place(&mut env);
+        env.flags.labview_version = Some("2099".into());
+        let why = uninstall(&env, Some("alpha"), false).unwrap_err();
+
+        assert!(
+            why.to_string().contains("outside this destination"),
+            "{why:#}"
+        );
+        let events = sink.events();
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                Event::HookStarting { .. } | Event::HookRan { .. } | Event::HookFailed { .. }
+            )),
+            "a hook was tried: {events:?}"
+        );
+        assert!(record.exists(), "the record is kept");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn naming_nothing_or_a_package_that_is_not_installed_is_refused() {
         let (dir, _) = scratch_with_alpha("refused");
         let sink = Recorder::default();

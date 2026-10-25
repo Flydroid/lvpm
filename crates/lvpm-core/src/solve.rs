@@ -788,6 +788,38 @@ mod tests {
     }
 
     #[test]
+    fn a_package_reached_only_through_others_moves_to_its_newest_and_takes_a_held_sibling_along() {
+        // d needs e, which needs x, and s; x 2.0 needs s 2.0; the lock holds s
+        // 1.0, and the upgrade is of x alone (AC-U2: whatever no longer
+        // satisfies the new set moves with it).
+        let index = Index {
+            entries: vec![
+                entry("d", "1.0", &[("e", "1.0"), ("s", "1.0")]),
+                entry("e", "1.0", &[("x", "1.0")]),
+                entry("x", "1.0", &[]),
+                entry("x", "2.0", &[("s", "2.0")]),
+                entry("s", "1.0", &[]),
+                entry("s", "2.0", &[]),
+            ],
+        };
+        let held = [("d", "1.0"), ("e", "1.0"), ("s", "1.0")]
+            .map(|(name, version)| (name.to_string(), Version::parse(version)));
+        let resolution = solve(
+            &manifest(&[("d", "*")]),
+            &index,
+            &held,
+            &["X".to_string()],
+            None,
+            &CancelToken::new(),
+        )
+        .expect("solves");
+        assert_eq!(
+            chosen(&resolution),
+            [("d", "1.0"), ("e", "1.0"), ("s", "2.0"), ("x", "2.0")]
+        );
+    }
+
+    #[test]
     fn version_sets_read_as_constraints() {
         let v = Version::parse;
         assert_eq!(describe(&Ranges::full()), "*");

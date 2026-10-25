@@ -1197,6 +1197,29 @@ mod tests {
     }
 
     #[test]
+    fn a_cancel_during_the_last_sources_load_is_a_cancel_and_not_a_missing_archive() {
+        use super::super::testing::CancelOn;
+        let scratch = Scratch::new("cancelled-last-load");
+        let project = manifest(
+            "dead = \"http://127.0.0.1:1/feed\"
+",
+        );
+        let token = crate::cancel::CancelToken::new();
+        // The feed is the last source; its load starts, is cancelled, and ends
+        // with nothing, with no source left for the loop to look at the token.
+        let sink = CancelOn::new(&token, |event| {
+            matches!(event, Event::FeedCheckStart { .. })
+        });
+        let mut env = scratch.env(&sink, vec![]);
+        env.cancel = token;
+        let lock = locked_as("alpha", "2.0", b"nobody has these bytes");
+
+        let why = fetch_locked(&env, &project, &[lock]).unwrap_err();
+        assert_eq!(sink.answered(), Some(true), "the cancel was not accepted");
+        assert!(matches!(why, SyncError::Cancelled), "{why:?}");
+    }
+
+    #[test]
     fn nothing_wanted_opens_nothing() {
         let scratch = Scratch::new("nothing");
         let env = scratch.env(&NullSink, vec![]);
@@ -1429,6 +1452,58 @@ mod tests {
                 Event::SyncPlanned { .. } | Event::PackageStart { .. }
             )),
             "nothing was announced or started: {events:?}"
+        );
+    }
+
+    /// Removes `path` when the lock starts to hash `package`: after the
+    /// sources were read, and before the archive is fetched from them.
+    struct RemoveWhenHashing<'a> {
+        package: &'a str,
+        path: PathBuf,
+    }
+
+    impl EventSink for RemoveWhenHashing<'_> {
+        fn emit(&self, event: Event) {
+            if matches!(&event, Event::LockHashing { name, .. } if name == self.package) {
+                std::fs::remove_file(&self.path).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn a_kept_archive_that_cannot_be_fetched_fails_the_sync_and_says_why() {
+        let project = project("unfetched", &["gamma"]);
+        project.sync(&SyncOptions::default()).0.unwrap();
+        let (lock, installed) = (project.lock_bytes(), project.installed());
+
+        // The lock is out of date, so it is made again keeping gamma 1.0. The
+        // cache is gone, and the folder's gamma is listed and then unreadable.
+        project.write_manifest(&["gamma", "alpha"]);
+        std::fs::remove_dir_all(project.root.join("cache")).unwrap();
+        let gamma = project.folder().join("gamma-1.0.vip");
+        let sink = RemoveWhenHashing {
+            package: "gamma",
+            path: gamma.clone(),
+        };
+        let outcome = sync(&project.sync_env(&sink), &SyncOptions::default());
+
+        let Err(SyncError::Lock(LockError::ArchivesUnavailable(failures))) = outcome else {
+            panic!("expected archives that could not be fetched, got {outcome:?}");
+        };
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert_eq!(
+            (failures[0].name.as_str(), failures[0].version.as_str()),
+            ("gamma", "1.0")
+        );
+        assert!(
+            failures[0].reason.contains("gamma-1.0.vip"),
+            "{}",
+            failures[0].reason
+        );
+        assert_eq!(
+            (project.lock_bytes(), project.installed()),
+            (lock, installed),
+            "nothing changed"
         );
     }
 
@@ -1888,9 +1963,24 @@ mod tests {
             ),
             "{events:?}"
         );
-        assert!(
-            !project.root.join("dest").exists(),
-            "nothing went to a scratch destination"
+        // Only the project's own files, the installation and its machine
+        // places: no scratch destination, venv or store was made beside them.
+        let mut made: Vec<String> = std::fs::read_dir(&project.root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        made.sort();
+        assert_eq!(
+            made,
+            [
+                "LabVIEW 2099",
+                "cache",
+                "lvpm.lock",
+                "lvpm.toml",
+                "machine",
+                "more-packages",
+                "packages"
+            ]
         );
     }
 

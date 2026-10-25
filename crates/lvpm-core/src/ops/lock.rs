@@ -1364,6 +1364,18 @@ mod tests {
         assert_eq!(staged_files(&project.root), Vec::<String>::new());
     }
 
+    #[test]
+    fn a_lock_replaces_the_old_one_whole_and_leaves_no_staged_file() {
+        let project = ProjectDir::new("write-replaces", MANIFEST, &[]);
+        std::fs::write(project.lock_path(), "the old lock").unwrap();
+        write_atomically(&project.lock_path(), "the new lock").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(project.lock_path()).unwrap(),
+            "the new lock"
+        );
+        assert_eq!(staged_files(&project.root), Vec::<String>::new());
+    }
+
     // ---- upgrade ----
 
     #[test]
