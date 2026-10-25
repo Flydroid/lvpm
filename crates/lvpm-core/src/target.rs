@@ -10,7 +10,7 @@
 #![allow(clippy::disallowed_methods)]
 
 use anyhow::{Result, bail};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug, Clone)]
 pub struct LvTarget {
@@ -186,6 +186,59 @@ pub struct Roots {
     pub target: Option<LvTarget>,
 }
 
+/// Every `Target Dir` token that names a place shared by what is installed
+/// there, rather than the one package's own folder.
+const SHARED_TOKENS: [&str; 19] = [
+    "<vi.lib>",
+    "<user.lib>",
+    "<instr.lib>",
+    "<menus>",
+    "<resource>",
+    "<help>",
+    "<project>",
+    "<templates>",
+    "<examples>",
+    "<fonts>",
+    "<temp>",
+    "<OS Public Application Data>",
+    "<OS Application Files>",
+    "<OS Public Documents>",
+    "<OS User Documents>",
+    "<OS User Desktop>",
+    "<OS User Application Data>",
+    "<OS Boot Volume Root>",
+    "<OS System Core Libraries>",
+];
+
+/// Is `p` at or below `root`, once `.` and `..` are resolved in both by name?
+/// A `..` that climbs out of the path puts it outside. Names are compared
+/// ignoring case on Windows, where the file system does. The file system is
+/// not asked, so a link inside `root` is followed by whatever opens the path.
+pub(crate) fn within(root: &Path, p: &Path) -> bool {
+    fn resolved(p: &Path) -> Option<PathBuf> {
+        let mut out = PathBuf::new();
+        for part in p.components() {
+            match part {
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    if !out.pop() {
+                        return None;
+                    }
+                }
+                other => out.push(other.as_os_str()),
+            }
+        }
+        match cfg!(windows) {
+            true => Some(PathBuf::from(out.to_string_lossy().to_lowercase())),
+            false => Some(out),
+        }
+    }
+    match (resolved(root), resolved(p)) {
+        (Some(root), Some(p)) => p.starts_with(root),
+        _ => false,
+    }
+}
+
 fn env_path(key: &str, fallback: &str) -> PathBuf {
     PathBuf::from(std::env::var(key).unwrap_or_else(|_| fallback.to_string()))
 }
@@ -342,30 +395,43 @@ impl Roots {
         if self.application.starts_with(dir) {
             return true;
         }
-        [
-            "<vi.lib>",
-            "<user.lib>",
-            "<instr.lib>",
-            "<menus>",
-            "<resource>",
-            "<help>",
-            "<project>",
-            "<templates>",
-            "<examples>",
-            "<fonts>",
-            "<temp>",
-            "<OS Public Application Data>",
-            "<OS Application Files>",
-            "<OS Public Documents>",
-            "<OS User Documents>",
-            "<OS User Desktop>",
-            "<OS User Application Data>",
-            "<OS Boot Volume Root>",
-            "<OS System Core Libraries>",
-        ]
-        .iter()
-        .filter_map(|t| self.expand(t).ok())
-        .any(|root| root == dir)
+        SHARED_TOKENS
+            .iter()
+            .filter_map(|t| self.expand(t).ok())
+            .any(|root| root == dir)
+    }
+
+    /// Where an install through these roots may have put files: the sandbox or
+    /// the venv, when there is one; else the LabVIEW tree and the machine
+    /// places a package names. Not the boot volume's root, which is every
+    /// path on the drive: a record naming one is refused.
+    fn write_roots(&self) -> Vec<PathBuf> {
+        match (&self.scratch, &self.venv) {
+            (Some(root), _) | (None, Some(root)) => vec![root.clone()],
+            (None, None) => std::iter::once(self.application.clone())
+                .chain(
+                    SHARED_TOKENS
+                        .iter()
+                        .filter(|t| **t != "<OS Boot Volume Root>")
+                        .filter_map(|t| self.expand(t).ok()),
+                )
+                .collect(),
+        }
+    }
+
+    /// Is `p`, as written in an install record, somewhere an install through
+    /// these roots may have put it? Decided on the words of the path, with `.`
+    /// and `..` resolved, so `<venv>/../elsewhere` is outside.
+    pub(crate) fn is_inside(&self, p: &Path) -> bool {
+        self.write_roots().iter().any(|root| within(root, p))
+    }
+
+    /// Where extracted hook VIs are kept, beside the manifests.
+    pub(crate) fn hooks_dir(&self) -> PathBuf {
+        self.store_dir()
+            .parent()
+            .map(|p| p.join("hooks"))
+            .unwrap_or_default()
     }
 
     /// Guard against a package writing outside the sandbox, or the venv.
@@ -463,6 +529,33 @@ mod tests {
         assert_eq!(Roots::project_store(venv, &t).application, venv);
         assert_eq!(r.venv(), Some(venv));
         assert!(r.target.is_some());
+    }
+
+    #[test]
+    fn within_resolves_dots_by_name_and_ignores_case_only_where_the_file_system_does() {
+        let root = Path::new("/a/b");
+        assert!(within(root, Path::new("/a/b")));
+        assert!(within(root, Path::new("/a/b/c/../d")));
+        assert!(within(root, Path::new("/a/./b/c")));
+        assert!(!within(root, Path::new("/a/b/../c")));
+        assert!(!within(root, Path::new("/a/b/../../../c")));
+        assert!(!within(root, Path::new("/a/bc")));
+        assert!(!within(root, Path::new("c")));
+        assert_eq!(within(root, Path::new("/A/B/c")), cfg!(windows));
+    }
+
+    #[test]
+    fn a_labview_install_may_write_the_machine_places_a_package_names_but_not_the_drive_root() {
+        let t = LvTarget {
+            version: 26.3,
+            bitness: 64,
+            path: PathBuf::from(r"C:\LV2026"),
+        };
+        let r = Roots::labview(&t);
+        assert!(r.is_inside(&r.expand("<vi.lib>/addons/x.vi").unwrap()));
+        assert!(r.is_inside(&r.expand("<OS Public Application Data>/x/y.dat").unwrap()));
+        assert!(!r.is_inside(&r.expand("<OS Boot Volume Root>/x.dll").unwrap()));
+        assert!(!r.is_inside(Path::new(r"C:\LV2026\..\Windows\evil.dll")));
     }
 
     #[test]

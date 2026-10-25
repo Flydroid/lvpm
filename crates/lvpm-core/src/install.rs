@@ -345,11 +345,7 @@ pub fn extract_hook(
     let Ok(mut src) = zip.by_name(member) else {
         return Ok(None);
     };
-    let dir = roots
-        .store_dir()
-        .parent()
-        .map(|p| p.join("hooks"))
-        .unwrap_or_default();
+    let dir = roots.hooks_dir();
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let dest = dir.join(format!("{package}-{member}"));
     let mut buf = Vec::with_capacity(src.size() as usize);
@@ -390,10 +386,41 @@ pub fn mark_hook_skipped(roots: &Roots, name: &str, hook: &str) -> Result<()> {
     write_manifest(roots, &m)
 }
 
+/// The install record is a file on disk, and uninstall deletes and runs what
+/// it names: refuse a record that names a file outside the places this
+/// destination installs to, or a hook VI outside its hooks directory.
+pub fn check_record(roots: &Roots, manifest: &Manifest) -> Result<()> {
+    let hooks = roots.hooks_dir();
+    let hook_vis = [
+        &manifest.post_install_vi,
+        &manifest.pre_install_vi,
+        &manifest.pre_uninstall_vi,
+        &manifest.post_uninstall_vi,
+    ]
+    .into_iter()
+    .flatten();
+    let outside: Vec<&String> = manifest
+        .files
+        .iter()
+        .filter(|f| !roots.is_inside(Path::new(f)))
+        .chain(hook_vis.filter(|h| !crate::target::within(&hooks, Path::new(h))))
+        .collect();
+    if let Some(first) = outside.first() {
+        bail!(
+            "refusing to remove {}: its install record names {} path(s) outside this \
+             destination, the first {first:?}; nothing was removed or run",
+            manifest.name,
+            outside.len()
+        );
+    }
+    Ok(())
+}
+
 /// Remove every file the manifest recorded, then prune directories this
 /// leaves empty. Directories that still hold anything are left alone.
 pub fn uninstall(roots: &Roots, name: &str) -> Result<(usize, Manifest)> {
     let manifest = read_manifest(roots, name)?;
+    check_record(roots, &manifest)?;
     let mut removed = 0;
     let mut dirs: Vec<PathBuf> = Vec::new();
 
@@ -451,6 +478,54 @@ mod tests {
         assert!(safe_relative("/etc/passwd").is_err());
         assert!(safe_relative(r"C:\windows\system32\evil.dll").is_err());
         assert!(safe_relative("vi.lib/addons/ok.llb").is_ok());
+    }
+
+    /// A record for `files`, with the hook VIs it is given, installed nowhere.
+    fn record(files: &[&str], pre_uninstall_vi: Option<&str>) -> Manifest {
+        Manifest {
+            name: "a".into(),
+            version: "1".into(),
+            display_name: None,
+            installed_at: 0,
+            target: "t".into(),
+            files: files.iter().map(|f| f.to_string()).collect(),
+            skipped_hooks: Vec::new(),
+            relinked: false,
+            relink_folders: Vec::new(),
+            post_install_vi: None,
+            pre_install_vi: None,
+            pre_uninstall_vi: pre_uninstall_vi.map(String::from),
+            post_uninstall_vi: None,
+            skipped_groups: Vec::new(),
+            archive_sha256: None,
+        }
+    }
+
+    #[test]
+    fn a_record_is_refused_for_a_file_outside_the_destination_or_a_hook_outside_its_directory() {
+        let roots = Roots::scratch(Path::new("/box"));
+        let hooks = roots.hooks_dir().to_string_lossy().replace('\\', "/");
+        let ok = record(
+            &["/box/LabVIEW/a.txt"],
+            Some(&format!("{hooks}/a-PreUninstall.vi")),
+        );
+        check_record(&roots, &ok).unwrap();
+
+        for files in [
+            &["/etc/passwd"][..],
+            &["/box/../etc/passwd"],
+            &["/box/LabVIEW/../../etc/passwd"],
+            &["a/relative.txt"],
+            &["/box/LabVIEW/a.txt", "/boxed/b.txt"],
+        ] {
+            let why = check_record(&roots, &record(files, None)).unwrap_err();
+            assert!(
+                why.to_string().contains("outside this destination"),
+                "{files:?}: {why}"
+            );
+        }
+        let hook_elsewhere = record(&["/box/LabVIEW/a.txt"], Some("/box/LabVIEW/evil.vi"));
+        assert!(check_record(&roots, &hook_elsewhere).is_err());
     }
 
     #[test]

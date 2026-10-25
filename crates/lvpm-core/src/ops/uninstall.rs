@@ -113,6 +113,8 @@ fn say_if_still_listed(env: &OpEnv, package: &str) {
 pub fn uninstall_one(env: &OpEnv, session: &mut InstallSession, package: &str) -> Result<usize> {
     let roots = session.store().clone();
     let before = install::read_manifest(&roots, package)?;
+    // Before the PreUninstall VI runs, not only before the files go.
+    install::check_record(&roots, &before)?;
     // Hooks act on the LabVIEW installation; a venv is not one, so none run there.
     let hooks = roots.venv().is_none();
 
@@ -301,6 +303,38 @@ mod tests {
         env.cancel = crate::cancel::CancelToken::new();
         uninstall(&env, Some("alpha"), false).unwrap();
         assert!(!env.cancel.cancel(), "the uninstall had begun to delete");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_record_that_names_a_file_outside_the_destination_removes_nothing() {
+        let (dir, file) = scratch_with_alpha("outside");
+        let outside = dir.with_file_name(format!("lvpm-outside-{}.txt", std::process::id()));
+        std::fs::write(&outside, "keep").unwrap();
+        // Written as the record would have it: `..` climbs out of the prefix.
+        let climbing = format!(
+            "{}/../{}",
+            dir.to_string_lossy().replace('\\', "/"),
+            outside.file_name().unwrap().to_string_lossy()
+        );
+        let record = Roots::scratch(&dir).store_dir().join("alpha.json");
+        let manifest = serde_json::json!({
+            "name": "alpha", "version": "1.0", "display_name": null, "installed_at": 0,
+            "target": "scratch",
+            "files": [file.to_string_lossy().replace('\\', "/"), climbing],
+            "skipped_hooks": [],
+        });
+        std::fs::write(&record, manifest.to_string()).unwrap();
+
+        let sink = Recorder::default();
+        let why = uninstall(&env_for(&sink, &dir), Some("alpha"), false).unwrap_err();
+        assert!(
+            why.to_string().contains("outside this destination"),
+            "{why:#}"
+        );
+        assert!(file.exists() && outside.exists(), "something was deleted");
+        assert!(record.exists(), "the record is kept");
+        let _ = std::fs::remove_file(&outside);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
