@@ -115,7 +115,7 @@ crates.io index are all built this way.
 | Folder | local disk / UNC share | offline, air-gapped, quick team sharing (`sources.local`, **exists**) |
 | VIPM / NI indexes | vipm.io, download.ni.com | the existing ecosystem, read-only (**exists**) |
 | OCI registry | ghcr.io, GitLab, Azure Container Registry, Harbor, Artifactory | inner source; content-addressed, standard auth, signatures via the referrers API |
-| GitHub Releases, direct | release files of one repo | `libX = { github = "owner/repo", version = "^1.2" }`, no infrastructure |
+| GitHub Releases, direct | release files of one repo | `libX = { github = "owner/repo", version = ">=1.2" }`, no infrastructure |
 | Community index | a git repo of metadata; the files stay on GitHub Releases or OCI | open source discovery and name ownership |
 
 GitHub Packages has no generic or PyPI-style feed, and Azure Artifacts has no OCI
@@ -125,7 +125,8 @@ feed as a fallback transport.
 ### GitHub Releases, direct
 
 - Versions come from the release tags.
-- The release file is picked by naming convention: `*.lvpkg` first, `*.vip` as fallback.
+- The release file is picked by naming convention: `*.lvpkg` first, `*.vip` as fallback
+  (`.vip` only until `.lvpkg` ships; see [build-slices.md](build-slices.md#decisions-before-s1)).
 - Its SHA-256 is pinned in `lvpm.lock`.
 - If the release has a GitHub artifact attestation (Sigstore), lvpm verifies that the
   file was built by that repo's workflow. Otherwise it is trusted on first use and

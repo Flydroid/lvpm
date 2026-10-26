@@ -14,8 +14,8 @@ This folder is this fork's direction. The upstream author's plan stays in
 | Step | Command | Where it is |
 |---|---|---|
 | 1. Start a library or app | `lvpm init` | planned (M1) |
-| 2. Add dependencies | `lvpm add @org/libA@^1.4` | planned (M1) |
-| 3. Develop in an isolated env | `lvpm install` → `lvpm launch` | **works** (venv + overlay); `sync` planned (M1) |
+| 2. Add dependencies | `lvpm add libA@">=1.4"` | **works** (`name@constraint`; `@org` scopes planned, M3; `^` not yet) |
+| 3. Develop in an isolated env | `lvpm install` → `lvpm launch` | **works** (venv + overlay, `lvpm.lock`, exact `sync`) |
 | 4. Build packages | `lvpm build` → `.lvpkg` and/or `.vip` | proposed (M2) |
 | 5. Publish | tag → CI signs and publishes | proposed (M3) |
 | 6. Build the application | `lvpm build` with a `.lvproj` build spec, + SBOM | proposed (M2) |
@@ -47,8 +47,9 @@ Each one is usable on its own. Ticks mean done.
 - [x] NIPM dependencies checked
 
 **M1 — reproducible projects**
-- [ ] `lvpm.lock` with SHA-256, `lock --check`, `sync` (also removes extras)
-- [ ] `init` (incl. `--from project.vipc`), `add`, `remove`, `info`, `update`
+- [x] `lvpm.lock` with SHA-256, `lock --check`, `sync` (also removes extras)
+- [x] `add`, `remove` (`--dev`)
+- [ ] `init` (incl. `--from project.vipc`), `info`, `update`
 - [ ] `--json`, documented exit codes, `--yes`, `--labview-bitness`
 
 **M2 — build**
