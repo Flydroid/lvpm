@@ -45,10 +45,10 @@ split, and S10 is split into S10a–d with only what is left.
     marked *(manual)* needs a real service, VIPM or CI; its evidence goes in
     the PR, not in `cargo test`.
 - Every new command or flag has a scenario and a line in the command table in docs/usage.md.
-- Core operations live in `crates/lvpm-core/src/` (under `ops/`), report
-  through `events.rs` and do no terminal I/O. The CLI front end is
-  `src/main.rs` (arguments, exit codes) and `src/render/` (output). A slice
-  that adds an operation also touches `events.rs` and `src/render/mod.rs`.
+- Follow [ADR 5](../adr/0005-core-and-cli-split.md): operations in
+  `crates/lvpm-core/src/ops/`, reporting through `events.rs`, with no terminal
+  I/O; arguments in `src/main.rs`, output in `src/render/`. A slice that adds
+  an operation also touches `events.rs` and `src/render/mod.rs`.
 - Format knowledge comes only from published specifications and observed
   files ([PROVENANCE.md](../../PROVENANCE.md)). No VIPM or JKI code.
 - [../roadmap.md](../roadmap.md) belongs to the upstream author: don't edit
@@ -60,20 +60,42 @@ split, and S10 is split into S10a–d with only what is left.
 
 These are hard to undo, so settle them as ADRs (`/adr-tools`) before S1 starts:
 
-1. **The `[package]` keys in `lvpm.toml`.** Users commit them. Check them
-   against `vipm.toml` so nobody confuses the two files. A package's
-   dependencies stay in `[dependencies]`, as the design says; `[package]`
-   does not get a second list.
-2. **`.vip` first, `.lvpkg` later.** Every consumer already reads `.vip`;
-   `.lvpkg` is needed for OCI referrers and its `RECORD`/SBOM layout (S7a).
-   Until then a `.vip` gets a detached attestation (S6).
-3. **The upstream relationship.** Contribute back or keep a long-lived fork.
-   It decides naming and how changes go upstream.
-4. **How feeds are configured.** Extend `[sources]`, or replace it with a
-   `[[feeds]]` table (with a migration). S7c's `scopes`, S7b's OCI feeds and
-   S8's index all add to whatever this picks.
-5. **Record the core/CLI split** that the lockfile work made, so slices cite
-   the ADR instead of restating the rule.
+1. **The package keys in `lvpm.toml`.** Decided in
+   [ADR 1](../adr/0001-manifest-project-and-distribution.md): one `[project]`
+   identity, `labview = ">=2021"` as a constraint, packaging in
+   `[distribution]`, and LabVIEW build specs stay in the `.lvproj`.
+2. **`.vip` first, `.lvpkg` later.** Decided in
+   [ADR 2](../adr/0002-vip-first-lvpkg-later.md). `.vip` stays first-class
+   for good. `lvpm build` writes no install hooks for now (ADR 2, decision 6).
+3. **The upstream relationship.** The goal is to contribute back to
+   [Flydroid/lvpm](https://github.com/Flydroid/lvpm), whose authors focus on
+   venvs and the core. This fork works on what they don't: build, publish,
+   trust. Until the alignment meeting on 2026-10-30 the name stays `lvpm`
+   and no ADR on the relationship is written. These three points are not separate from upstream
+   work, so they are on the agenda:
+   - **`lvpm build`.** Upstream PR #15 proposes a `[build]` table in
+     `lvpm.toml` and a `Build.vi` runner. ADR 1 rules out `[build]`.
+   - **The manifest.** ADR 1 makes upstream's `labview = "2025"` an error,
+     and upstream has users. Upstream PR #16 also adds
+     `[dependency-groups]` with `--with`, `include-groups` and `main`. ADR 1
+     keeps `[dev-dependencies]` as the group `dev`, and S11 plans `--group`.
+   - **The core/CLI split and hooks.** Upstream's `refactor-main.md` (PR #15)
+     plans its own split of `main.rs` and an event layer. This fork already
+     has `crates/lvpm-core` and `events.rs` ([ADR 5](../adr/0005-core-and-cli-split.md)).
+     PR #15's `--hooks auto|always|never` meets ADR 3.
+   - **Spellings.** Propose `index = "<name>"` in place of the roadmap's
+     `source`, and confirm `hooks = "run"` on the dependency line (ADR 4).
+4. **How feeds are configured.** Decided in
+   [ADR 4](../adr/0004-sources-first-wins-and-pinning.md): `[sources]` stays,
+   the first source that lists a name wins (S13), a dependency pins a source
+   with `index = "<name>"` (S7c), no `scopes` for now, and `hooks = "run"`
+   on the same line is the project's hook allowlist.
+5. **The core/CLI split.** Recorded as built in
+   [ADR 5](../adr/0005-core-and-cli-split.md).
+6. **Install hooks.** Decided in
+   [ADR 3](../adr/0003-install-hooks-off-by-default.md): off by default
+   everywhere, a warning with instructions when one is skipped, and an
+   allowlist by package name. `lvpm build` writes none (ADR 2).
 
 ## Pilot libraries
 
@@ -99,10 +121,10 @@ link. Checked 2026-10-26 from each repository's `.vipb`.
 
 | Wave | Slices | Can run in parallel |
 |---|---|---|
-| 1 | S0 acceptance scenarios, S5 `lvpm check`, S10a–d project commands | yes (S5 and S10a–d touch `src/main.rs`; S5, S10a and S10b also touch `events.rs` and `src/render/mod.rs`: merge one first, rebase the others) |
-| 2 | S1 `lvpm build` | — |
+| 1 | S0 acceptance scenarios, S5 `lvpm check`, S10a–d project commands, S11 dependency groups, S12 hooks off by default, S13 first source wins | yes (S5, S10a–d, S11 and S12 touch `src/main.rs`; S5, S10a, S10b and S12 also touch `events.rs`; S5, S10a, S10b and S12 touch `src/render/mod.rs`; S10a, S11 and S12 touch `manifest_edit.rs`; S11 and S12 touch `ops/sync.rs`, `ops/uninstall.rs` and `project.rs`, so build them one after the other: merge one first, rebase the others; S11 and S13 touch `lockfile.rs`) |
+| 2 | S1 `lvpm build`, S7c pinned sources | yes (both touch `project.rs` and `src/main.rs`) |
 | 3 | S1b VIPM round trip, S2 publish to folder, S4 GitHub Releases, S5b build gate, S9 app builds + SBOM | yes (S2, S5b and S9 touch `src/main.rs`; S1b, S5b and S9 touch `ops/build.rs`; S1b and S2 touch `tests/features/build-slices/`: merge one first, rebase the others) |
-| 4 | S6 attestations and policy, S7a `.lvpkg`, S7c `@org` scopes | yes (S6 and S7c touch `project.rs` and `lockfile.rs`; S7a and S7c touch `index.rs`) |
+| 4 | S6 attestations and policy, S7a `.lvpkg` | yes (no shared files) |
 | 5 | S7b OCI feeds, S8 community index | yes (both touch `project.rs`) |
 
 Almost every slice also appends a line to `tests/acceptance.rs` (`FEATURE_FILES`)
@@ -112,8 +134,8 @@ collisions, and the notes above leave them out.
 S1b is the merge gate for the risky unknown: if VIPM rejects an lvpm-built
 `.vip`, re-plan S2, S4 and S7a here before any of them merges.
 
-Scopes (S7c) land before OCI feeds (S7b) on purpose: no org registry should
-sit next to a public feed without the one-feed-per-name rule.
+Pinned sources (S7c) land before OCI feeds (S7b) on purpose: no org registry
+should sit next to a public feed without a way to pin a package to it.
 
 Not sliced yet, with the milestone they belong to:
 - the `ppl` kind (M2) and `lvpm convert` (M4): add slices after S7a. The M2
@@ -182,10 +204,13 @@ Prerequisite: the ADRs under "Decisions before S1".
 Goal: one command turns a library into a `.vip` that lvpm installs.
 
 In scope:
-- A `[package]` table in `lvpm.toml`: name, version, minimum LabVIEW and
-  library path, plus the `[package.vip]` fields
+- A `[distribution]` table in `lvpm.toml` with `top-level-library`, plus the
+  `[distribution.vip]` fields
   [distribution-design.md](distribution-design.md#2-build-lvpm-build) lists.
-  Dependencies come from `[dependencies]`.
+  Name and version come from `[project]`, dependencies from `[dependencies]`.
+- `[project] labview` becomes a constraint (`">=2021"`), per ADR 1. S1 accepts
+  only `>=`; `project.rs` hands callers the lower bound, so the lock and venv
+  code don't change.
 - Collect files by `.lvlib` membership, not by folder glob.
 - Write the `spec` file (the inverse of `spec::parse`) and a
   deterministic zip (sorted entries, fixed timestamps) into `dist/`.
@@ -197,12 +222,12 @@ Acceptance criteria:
 - [ ] `lvpm build` writes `dist/<name>-<version>.vip`; building twice gives byte-identical files.
 - [ ] `spec::parse` reads the written spec back to the same name, version, file groups and `Requires`.
 - [ ] A VI on disk that is not a member of the library is not in the package (pilot A's test libraries).
-- [ ] A missing or invalid `[package]` table fails with a message naming the key.
+- [ ] A missing or invalid `[distribution]` key fails with a message naming the key.
 - [ ] The built `.vip` installs with `lvpm install` from a folder feed; S0's `@pending-s1` build scenario is completed, untagged and passes.
 
 Demo: `lvpm build` in pilot A, then `lvpm install` the result in project B.
 
-Decide in `/specs`: the `[package]` keys are fixed by the ADR, not here.
+Decide in `/specs`: nothing about key names; ADR 1 fixes them.
 
 ### Slice S1b: VIPM installs an lvpm-built `.vip`
 
@@ -212,22 +237,35 @@ Decide in `/specs`: the `[package]` keys are fixed by the ADR, not here.
 Goal: VIPM users can consume what lvpm builds.
 
 In scope:
-- A manual round trip: build both pilots, install each in VIPM, mass compile.
+- A round trip: build both pilots, install each in VIPM, mass compile.
+- Black-box probing, as [PROVENANCE.md](../../PROVENANCE.md) allows: VIPM is
+  observed, never decompiled or disassembled.
+  1. Write down which `spec` keys VIPM writes, from published specs (the local
+     VIPM cache has about 1,800).
+  2. Build pilot A with VIPM from its own `.vipb` and diff the archive against
+     lvpm's, entry by entry.
+  3. Install `.vip` variants, each with one key missing or one value changed
+     (`ID` content-derived, random or empty; `Format Version`; no `icon.bmp`;
+     no `license`), and record which VIPM accepts.
+  4. For accepted variants, diff the installed LabVIEW tree against VIPM's
+     own install of the same package.
 - Whatever spec or zip changes VIPM needs, each with a scenario or unit test
   named after the VIPM requirement it covers.
 
-Out of scope: automating VIPM (it has no headless install we may script
-against without its code).
+Out of scope: any tool that decompiles or disassembles VIPM.
 
 Acceptance criteria:
 - [ ] *(manual)* Both pilots built by lvpm install in VIPM and mass compile; the steps and the VIPM version are recorded next to S0's feature file.
+- [ ] A table of the probed variants (what changed, accepted or not, VIPM version) is in `docs/`, and PROVENANCE.md cites it for `.vip` writing.
 - [ ] *(manual)* B's `.vip` makes VIPM install its dependency.
 - [ ] README milestone "`.vip` output, verified by a round-trip install in VIPM" is ticked.
 
 Demo: install pilot B's lvpm-built `.vip` in VIPM on a clean machine.
 
 Decide in `/specs`: what lvpm does if VIPM rejects the file (fallback:
-`.vip` for lvpm only and `.lvpkg` sooner).
+`.vip` for lvpm only and `.lvpkg` sooner); whether the probing is scripted
+through VIPM's own CLI or run by hand. Scripting it needs VIPM's license
+terms (Community or Pro) to allow this use; check them first.
 
 ### Slice S2: `lvpm publish --to <folder>`
 
@@ -240,6 +278,8 @@ In scope:
 - Copy `dist/*.vip` into a folder or UNC share. Folder feeds already index
   every `.vip` in a directory, so no index file is needed.
 - Refuse to overwrite an existing version (published versions are immutable).
+  The file is written under a temporary name and renamed without replacing,
+  so a failed or concurrent publish leaves one file or none.
 
 Out of scope: hosted feeds, signing.
 
@@ -260,7 +300,8 @@ Decide in `/specs`: whether `--to` can default to a configured feed.
 Goal: the open-source loop without any registry of your own.
 
 In scope:
-- `libX = { github = "owner/repo", version = ">=1.2" }` in `lvpm.toml`.
+- `libX = { github = "owner/repo", version = ">=1.2" }` in `lvpm.toml`: a direct
+  source for that one package, never looked up in `[sources]` (ADR 4, decision 6).
 - Versions come from release tags; the release file is `*.vip` (`*.lvpkg` first once S7a ships).
 - The lock's `source` field names the GitHub feed; the file's SHA-256 is pinned on first lock.
 - A CI template that runs `lvpm build` on a tag and uploads with `gh release upload`.
@@ -270,6 +311,7 @@ Out of scope: attestations (S6), the community index (S8).
 Acceptance criteria:
 - [ ] A project installs pilot B from a GitHub release (scenario against a loopback fake of the releases API).
 - [ ] A re-uploaded release file with a different hash fails `sync` (with or without `--locked`), and nothing is installed.
+- [ ] A line with both `github` and `index` fails when the manifest is read, naming the package.
 - [ ] Private repos work with the token from `gh auth token`; no token is ever written to `lvpm.toml` or the lock.
 - [ ] *(manual)* The CI template publishes a release from a tag in a pilot B fork.
 
@@ -302,7 +344,7 @@ Acceptance criteria:
 Demo: break a link in pilot A; `lvpm check` names the VI and the link.
 
 Decide in `/specs`: where the fixture VIs come from, given PROVENANCE rules;
-the minimum LabVIEW comes from a flag until S1's `[package]` exists.
+the minimum LabVIEW comes from `[project] labview`.
 
 ### Slice S5b: `lvpm build` runs the check
 
@@ -359,24 +401,36 @@ Acceptance criteria:
 
 Demo: build pilot B as `.lvpkg`, publish to a folder, install in project A.
 
-Decide in `/specs`: `package.toml` keys (reuse the `[package]` ADR).
+Decide in `/specs`: `package.toml` keys (reuse ADR 1's names).
 
-### Slice S7c: `@org` scopes
+### Slice S7c: Pinned sources
 
-**Depends-on:** S2
-**Files:** `crates/lvpm-core/src/project.rs`, `crates/lvpm-core/src/index.rs`, `crates/lvpm-core/src/solve.rs`, `crates/lvpm-core/src/lockfile.rs`
+**Depends-on:** S11, S13
+**Files:** `crates/lvpm-core/src/project.rs`, `crates/lvpm-core/src/index.rs`, `crates/lvpm-core/src/solve.rs`, `crates/lvpm-core/src/lockfile.rs`, `crates/lvpm-core/src/manifest_edit.rs`, `crates/lvpm-core/src/ops/add_remove.rs`, `src/main.rs`, `tests/features/sources/`
 
-Goal: dependency confusion has nowhere to start.
+Goal: an internal package comes from the internal source or not at all.
+Rules as in [ADR 4](../adr/0004-sources-first-wins-and-pinning.md).
 
-In scope: feeds declare `scopes`, and `@org/*` resolves from exactly one feed.
-`lvpm add @org/name` parses the scope.
+In scope:
+- `name = { version = "...", index = "<name>" }` in `[dependencies]` and every group.
+- A pinned package resolves only from that source, with no fallback.
+- `lvpm add <pkg> --index <name>` writes the table form.
+
+Out of scope: `scopes`; a root table of pins for transitive dependencies (list one as a direct dependency instead, ADR 4).
 
 Acceptance criteria:
-- [ ] A public package with the same `@org/` name is never picked over the scoped feed.
-- [ ] A scoped name with no matching feed fails with the scope named.
-- [ ] Changing a feed's `scopes` makes `lock --check` fail.
+- [ ] A pinned package is taken from its source although another source lists a higher version.
+- [ ] A pinned package its source doesn't list fails naming the package and the source.
+- [ ] A pinned package whose source can't be reached fails naming the source.
+- [ ] `lvpm add @org/name --index <name>` writes the table form; the short form still parses.
+- [ ] A pin naming a source that `[sources]` doesn't define fails when the manifest is read.
+- [ ] Adding, changing or removing a pin makes `lock --check` fail.
+- [ ] A transitive dependency listed as `name = { version = "*", index = "<name>" }` resolves from that source.
 
-Demo: two pilot libraries in a scoped folder feed, consumed by an application, with a same-named decoy in another folder feed.
+Demo: pilot A pinned to a hosted index of its own, with a same-named, higher-versioned decoy on a second source.
+
+Decide in `/specs`: how pins enter the lock's inputs, and whether the lock
+format version goes up.
 
 
 ### Slice S7b: OCI feeds
@@ -401,7 +455,7 @@ Acceptance criteria:
 
 Demo: pilot A in an org registry, consumed by project B.
 
-Decide in `/specs`: OCI media types; Rust OCI client or `oras`.
+Decide in `/specs`: OCI media types; Rust OCI client or `oras`; how a refused existing tag is enforced atomically.
 
 ### Slice S8: Federated community index
 
@@ -511,3 +565,90 @@ Demo: `lvpm sync --yes` in CI.
 
 Decide in `/specs`: whether `lvpm update` is an alias of `lock --upgrade`
 plus `sync`, or is left out with a README note saying why.
+
+### Slice S11: Dependency groups
+
+**Depends-on:** none
+**Files:** `crates/lvpm-core/src/project.rs`, `crates/lvpm-core/src/lockfile.rs`, `crates/lvpm-core/src/manifest_edit.rs`, `crates/lvpm-core/src/ops/lock.rs`, `crates/lvpm-core/src/ops/sync.rs`, `crates/lvpm-core/src/ops/add_remove.rs`, `crates/lvpm-core/src/ops/uninstall.rs`, `src/main.rs`, `tests/features/lvpm-lockfile/`
+
+Goal: CI installs tooling a developer doesn't need, and the other way round,
+from one lock. Names as in
+[ADR 1](../adr/0001-manifest-project-and-distribution.md).
+
+In scope:
+- `[dependency-groups.<name>]` beside `[dev-dependencies]`, which is the group `dev`.
+- The lockfile records, per package, the groups that are the only ones needing it (today's `dev = true`).
+- `lvpm add/remove --group <name>`; `--dev` stays as `--group dev`.
+- `lvpm sync --group <name>` adds a group; `--no-dev` keeps working.
+
+Out of scope: `--only-group`, a configurable default set of groups.
+
+Acceptance criteria:
+- [ ] `lvpm sync --group ci` installs the `ci` group; `lvpm sync` alone leaves it out and removes it if installed.
+- [ ] A package that the main dependencies and `ci` both need is installed by every `sync`.
+- [ ] Adding or removing a group entry makes the lock stale, as a dependency change does today.
+- [ ] A `[dependency-groups.dev]` table fails with a message naming `[dev-dependencies]`.
+- [ ] Every existing dev scenario still passes unchanged.
+
+Demo: a pilot project with a `ci` group; `lvpm sync` on a dev machine, `lvpm sync --group ci` in CI.
+
+Decide in `/specs`: the lockfile field's name and shape; whether `sync` installs `dev` by default (today it does).
+
+### Slice S12: Install hooks off by default
+
+**Depends-on:** none
+**Files:** `crates/lvpm-core/src/ops/install.rs`, `crates/lvpm-core/src/ops/sync.rs`, `crates/lvpm-core/src/ops/hooks.rs`, `crates/lvpm-core/src/ops/uninstall.rs`, `crates/lvpm-core/src/config.rs`, `crates/lvpm-core/src/project.rs`, `crates/lvpm-core/src/events.rs`, `src/main.rs`, `src/render/mod.rs`, `src/render/install.rs`, `src/render/uninstall.rs`, `src/render/hooks.rs`, `crates/lvpm-core/src/manifest_edit.rs`, `tests/features/hooks/`
+
+Goal: installing a package runs none of its code unless you allowed it, and
+you always learn when a hook was skipped. Rules as in
+[ADR 3](../adr/0003-install-hooks-off-by-default.md).
+
+In scope:
+- Hooks are skipped by default on developer machines too.
+- A warning after every install or sync that skipped a hook, naming the package and hook, with the `lvpm run-hooks` command and the allowlist line to add.
+- The project allowlist is `hooks = "run"` on the dependency line ([ADR 4](../adr/0004-sources-first-wins-and-pinning.md)); global installs use one in the user config.
+- Uninstall hooks run only if the install hook ran.
+
+Out of scope: running hooks in a venv (never); hooks in lvpm-built packages (ADR 2); pinning each allowed hook VI's hash in `lvpm.lock` (ADR 3).
+
+Acceptance criteria:
+- [ ] A global install of a package with a `PostInstall` hook does not run it, warns, and exits 0.
+- [ ] The warning names the package and the hook, and shows both the `lvpm run-hooks` command and the allowlist line; following either runs the hook *(manual: needs LabVIEW)*.
+- [ ] With the package on the allowlist, the next install runs the hook without a warning.
+- [ ] `--hooks` runs every hook for that one command.
+- [ ] A package whose install hook was skipped runs no uninstall hook.
+- [ ] The README hooks line is updated to the new default.
+- [ ] `lvpm add pkg@<newer>` on a line with `hooks = "run"` keeps `hooks = "run"`.
+- [ ] `hooks = "run"` in a dependency's own `lvpm.toml` allows nothing.
+- [ ] A transitive dependency listed as `name = { version = "*", hooks = "run" }` runs its hook.
+
+Demo: install pilot A globally; lvpm skips its `PostInstall` and says how to allow it.
+
+Decide in `/specs`: the user-config key; the warning's exact wording.
+
+### Slice S13: The first source wins
+
+**Depends-on:** none
+**Files:** `crates/lvpm-core/src/index.rs`, `crates/lvpm-core/src/lockfile.rs`, `tests/features/sources/`, `tests/support/`, `tests/steps/`
+
+Goal: a higher version of the same name on another source can't replace
+yours. Rules as in [ADR 4](../adr/0004-sources-first-wins-and-pinning.md).
+
+In scope:
+- Each name resolves from the first source that lists it: `[sources]` in file order, then the public defaults.
+- `lock --check` compares `[sources]` as a list, since its order now matters.
+
+Out of scope: pins (S7c); any change to `[sources]` syntax.
+
+Acceptance criteria:
+- [ ] A name on two sources resolves from the first one, even if the second lists a higher version.
+- [ ] A name only the second source lists still resolves from it.
+- [ ] Reordering `[sources]` makes `lock --check` fail.
+- [ ] A name on a `[sources]` entry and on a public default resolves from the `[sources]` entry, even if the default lists a higher version.
+- [ ] A name the first source lists with no fitting version fails naming that source; it never falls through.
+- [ ] With the first source unreachable, `lvpm lock` fails naming it, even if a later source lists the name.
+- [ ] Every existing lockfile scenario still passes; the unit test that says source order doesn't matter is replaced by one that says it does.
+
+Demo: the same package name on two stub sources; `lvpm lock` picks the first one's version.
+
+Decide in `/specs`: where `sources.local` and imported cache packages sit in the order.

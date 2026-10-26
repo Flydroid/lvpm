@@ -18,7 +18,7 @@ The workflow it serves:
 | **kind** | what a package contains: `source` or `ppl` |
 | **format** | the container: `.lvpkg` or `.vip` |
 | **feed** | any place packages are resolved from (folder, index, OCI registry, GitHub repo); the existing `[sources]` table and `sources.local` setting configure feeds |
-| `lvpm.toml` | the project manifest a developer edits; its `[package]` table describes what to build |
+| `lvpm.toml` | the project manifest a developer edits; its `[project]` table names the package and its `[distribution]` table says what to ship |
 | `package.toml` | the metadata file `lvpm build` writes inside each `.lvpkg`, generated from `lvpm.toml` |
 
 ## 1. Package: two axes, not one
@@ -53,24 +53,24 @@ Rules for every package:
 ## 2. Build: `lvpm build`
 
 ```toml
-[package]
+[project]
 name    = "@hexagon/motion-lib"
 version = "2.1.0"                 # SemVer
-labview = "2021"                  # minimum; source packages are saved at this version
-library = "src/Motion.lvlib"      # membership defines the payload, not a folder glob
+labview = ">=2021"                # minimum; source packages are saved at its lower bound
 
-[package.build]
-kinds   = ["source"]              # add "ppl" for a binary build (needs LabVIEW, e.g. the NI container)
+[distribution]
+top-level-library = "src/Motion.lvlib"  # membership defines the payload, not a folder glob
+kinds   = ["source"]              # "ppl" names an existing .lvproj build spec (needs LabVIEW)
 formats = ["lvpkg", "vip"]
 
-[package.vip]                     # only what VIPM needs and lvpm cannot derive
+[distribution.vip]                 # only what VIPM needs and lvpm cannot derive
 name         = "hexagon_lib_motion"            # VIPM has no @scope
 vendor       = "Hexagon"
 display-name = "Motion Library"
 icon         = "assets/icon.png"
 version-map  = "{major}.{minor}.{patch}.{build}"
 
-[package.vip.dependency-names]    # scoped name -> VIPM name, for Requires
+[distribution.vip.dependency-names]  # scoped name -> VIPM name, for Requires
 "@hexagon/libA" = "hexagon_lib_a"
 ```
 
@@ -81,7 +81,7 @@ What `build` does, in order:
    [`lvpm check`](../roadmap.md#dependency-analysis-lvpm-check--lvpm-tree)
    is planned to bring (a Rust port of `tools/deptree.py`, which is not in
    this repository):
-   - every VI is saved at or below `labview`, with compiled code separated;
+   - every VI is saved at or below the lower bound of `labview`, with compiled code separated;
    - there are no broken links;
    - every external link resolves to `vi.lib`, the package itself, or a declared dependency.
 3. Infer dependencies from the links and fail if they disagree with `[dependencies]`.
@@ -92,7 +92,7 @@ What `build` does, in order:
 `spec.rs` already parses the `spec` file inside a `.vip`: name, version, file
 groups, `Target Dir`, `Requires`, `Exclusive_LabVIEW_Version`. Writing one is the
 inverse. The payload carries over unchanged, because the overlay already gives
-`<vilib>`-relative linkage. What lvpm cannot derive is in `[package.vip]`.
+`<vilib>`-relative linkage. What lvpm cannot derive is in `[distribution.vip]`.
 
 Limits:
 
@@ -149,17 +149,15 @@ feed as a fallback transport.
 - An organisation runs its own index the same way, or puts a caching proxy in
   front of all of it.
 
-## 4. Consuming: scopes, lock, policy
+## 4. Consuming: sources, pins, lock, policy
 
 ```toml
-[[feeds]]
-name   = "internal"
-url    = "oci://hexagon.azurecr.io/lv"
-scopes = ["@hexagon"]             # @hexagon/* resolves only here
+[sources]                         # searched in this order, then the public defaults
+internal  = "oci://<org>.azurecr.io/lv"
+community = "git+https://github.com/<org>/lvpm-index"   # placeholder
 
-[[feeds]]
-name = "community"
-url  = "git+https://github.com/<org>/lvpm-index"   # placeholder
+[dependencies]
+"@hexagon/motion-lib" = { version = ">=2.1", index = "internal" }  # only from internal
 
 [policy]
 require-signature  = true
@@ -167,10 +165,13 @@ trusted-publishers = ["https://github.com/hexagon/*"]
 min-release-age    = "3d"         # cf. uv --exclude-newer
 ```
 
-- Each package resolves from **exactly one** feed. Versions from different feeds
-  are never merged, so dependency confusion has nowhere to start.
+- Each package resolves from **exactly one** feed: the first source that lists
+  it, or the one it pins with `index`. Versions from different feeds are never
+  merged, so dependency confusion has nowhere to start
+  ([ADR 4](../adr/0004-sources-first-wins-and-pinning.md)).
+  The `oci://` and `git+` URLs are the forms S7b and S8 add.
 - **One version per name per LabVIEW instance**, because LabVIEW has one global namespace.
-- `lvpm.lock` records name, version, feed, SHA-256, signer and provenance subject.
+- `lvpm.lock` records name, version, source, SHA-256, signer and provenance subject.
   This supersedes the roadmap's MD5-based lock; MD5 is kept only to check
   legacy packages against their index.
   `lvpm install --locked` and `lvpm lock --check` make CI refuse drift.
@@ -228,5 +229,3 @@ External facts this design relies on, as of 2026-10:
 - Who hosts the first community index, and under which organisation.
 - Whether VIPM installs lvpm-written `.vip` files correctly (needs a round-trip test).
 - Which CI OIDC issuers Sigstore's public instance accepts for Azure Pipelines.
-- The `lvpm.toml` names for `[package]` keys, chosen so they don't collide with
-  `vipm.toml` and confuse users of both.

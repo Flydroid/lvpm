@@ -5437,8 +5437,8 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         <text data-detail="fine" x="1030" y="256" class="t-cloud" font-size="7" text-anchor="middle">proposed</text>
         </g>
 
-        <g id="node-resolver" data-node-id="resolver" data-node-label="lvpm install (add · sync proposed)" tabindex="0" role="button" aria-label="Focus lvpm install (add · sync proposed), proposed: one feed per scope · verify SHA-256, signature, provenance · one version per name per LabVIEW, Architecture component" aria-pressed="false" data-node-kind="security" data-node-sublabel="proposed: one feed per scope · verify SHA-256, signature, provenance · one version per name per LabVIEW" data-node-context="Architecture component">
-          <title>lvpm install (add · sync proposed) · proposed: one feed per scope · verify SHA-256, signature, provenance · one version per name per LabVIEW · Architecture component</title>
+        <g id="node-resolver" data-node-id="resolver" data-node-label="lvpm install (add · sync proposed)" tabindex="0" role="button" aria-label="Focus lvpm install (add · sync proposed), proposed: first source wins · verify SHA-256, signature, provenance · one version per name per LabVIEW, Architecture component" aria-pressed="false" data-node-kind="security" data-node-sublabel="proposed: first source wins · verify SHA-256, signature, provenance · one version per name per LabVIEW" data-node-context="Architecture component">
+          <title>lvpm install (add · sync proposed) · proposed: first source wins · verify SHA-256, signature, provenance · one version per name per LabVIEW · Architecture component</title>
           <rect x="250" y="380" width="840" height="64" rx="8" class="c-mask"/>
           <rect x="250" y="380" width="840" height="64" rx="8" class="c-security" data-animate="node" style="--step:6" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="security" class="semantic-sigil s-security" transform="translate(256 386) scale(0.6875)">
@@ -5446,7 +5446,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
             <path d="m5.8 8 1.5 1.5 3-3"/>
           </g>
           <text data-node-label="" data-detail-anchor="" x="670" y="410" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">lvpm install (add · sync proposed)</text>
-        <text data-detail="context" x="670" y="426" class="t-muted" font-size="9" text-anchor="middle">proposed: one feed per scope · verify SHA-256, signature, provenance · one version per name per LabVIEW</text>
+        <text data-detail="context" x="670" y="426" class="t-muted" font-size="9" text-anchor="middle">proposed: first source wins · verify SHA-256, signature, provenance · one version per name per LabVIEW</text>
         </g>
 
         <g id="node-nipm" data-node-id="nipm" data-node-label="NIPM drivers" tabindex="0" role="button" aria-label="Focus NIPM drivers, DAQmx · VISA · RT, Architecture component" aria-pressed="false" data-node-kind="external" data-node-sublabel="DAQmx · VISA · RT" data-node-context="Architecture component">
@@ -5461,8 +5461,8 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         <text data-detail="context" x="125" y="586" class="t-muted" font-size="9" text-anchor="middle">DAQmx · VISA · RT</text>
         </g>
 
-        <g id="node-lock" data-node-id="lock" data-node-label="lvpm.lock" tabindex="0" role="button" aria-label="Focus lvpm.lock, sha256 · feed · signer · --check, Architecture component" aria-pressed="false" data-node-kind="database" data-node-sublabel="sha256 · feed · signer · --check" data-node-tag="proposed" data-node-context="Architecture component">
-          <title>lvpm.lock · sha256 · feed · signer · --check · Architecture component · proposed</title>
+        <g id="node-lock" data-node-id="lock" data-node-label="lvpm.lock" tabindex="0" role="button" aria-label="Focus lvpm.lock, sha256 · source · signer · --check, Architecture component" aria-pressed="false" data-node-kind="database" data-node-sublabel="sha256 · source · signer · --check" data-node-tag="proposed" data-node-context="Architecture component">
+          <title>lvpm.lock · sha256 · source · signer · --check · Architecture component · proposed</title>
           <rect x="330" y="540" width="190" height="64" rx="8" class="c-mask"/>
           <rect x="330" y="540" width="190" height="64" rx="8" class="c-database" data-animate="node" style="--step:12" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(336 546) scale(0.6875)">
@@ -5470,7 +5470,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
             <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
           </g>
           <text data-node-label="" data-detail-anchor="" x="425" y="570" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">lvpm.lock</text>
-        <text data-detail="context" x="425" y="586" class="t-muted" font-size="9" text-anchor="middle">sha256 · feed · signer · --check</text>
+        <text data-detail="context" x="425" y="586" class="t-muted" font-size="9" text-anchor="middle">sha256 · source · signer · --check</text>
         <text data-detail="fine" x="425" y="596" class="t-database" font-size="7" text-anchor="middle">proposed</text>
         </g>
 
@@ -5861,7 +5861,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         <ul>
           <li>SHA-256 pinned in lvpm.lock; lock --check in CI</li>
           <li>Publish from CI only: OIDC, Sigstore, SLSA provenance</li>
-          <li>@org scopes resolve from one feed only: no dependency confusion</li>
+          <li>First source that lists a name wins; a dependency can pin a source</li>
         </ul>
       </div>
 
