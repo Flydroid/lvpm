@@ -214,20 +214,19 @@ pub fn create(
     let min_year = min_lv.map(project::labview_year).transpose()?;
 
     ensure!(!targets.is_empty(), "no LabVIEW installations detected");
-    let want = labview_version.or(min_lv).ok_or_else(|| {
-        anyhow!(
-            "which LabVIEW? pass --labview-version <YYYY>, or set labview in {}\n\
-             hint: `lvpm targets` lists what is installed",
-            manifest_path.display()
-        )
-    })?;
-    let target = target::select(targets, want)?;
+    let target =
+        target::select_for_project(targets, labview_version, min_year)?.ok_or_else(|| {
+            anyhow!(
+                "which LabVIEW? pass --labview-version <YYYY>, or set labview in {}\n\
+                 hint: `lvpm targets` lists what is installed",
+                manifest_path.display()
+            )
+        })?;
     ensure!(
         target.version >= MIN_LV,
         "{} cannot mount a venv: LVAddons.AdditionalLocations needs LabVIEW 2024 Q1 or later",
         target.label()
     );
-    target::require_minimum(&target, min_year)?;
 
     // A project that has no manifest yet gets one, pinned to the LabVIEW it
     // was just bound to — that is what the minimum means from here on.

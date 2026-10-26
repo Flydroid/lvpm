@@ -80,12 +80,40 @@ Feature: The current CLI's output is recorded so later changes can be compared a
       | a venv for LabVIEW 2026                       | lvpm install beta                         | .lv-venv  | venv-install-beta |
       | a venv with beta installed                    | lvpm relink --all                         | .lv-venv  | relink-all        |
       | a venv with hooked installed                  | lvpm run-hooks hooked                     | -         | run-hooks         |
-      | a venv for LabVIEW 2026 and the VI fixture package | lvpm install lvpm_vi_fixture         | names:.lv-venv | venv-install-vi-fixture |
-      | a venv with lvpm_vi_fixture installed         | lvpm relink --all                         | names:.lv-venv | relink-all-vi-fixture |
       | a venv for LabVIEW 2026                       | lvpm refresh                              | -         | refresh           |
       | a venv for LabVIEW 2026                       | lvpm start                                | -         | start             |
       | a venv for LabVIEW 2026                       | lvpm launch                               | -         | launch            |
       | a venv for LabVIEW 2026                       | lvpm venv remove --yes                    | .lv-venv  | venv-remove-yes   |
+
+  # These two start a LabVIEW on the venv, which waits for a click on a machine
+  # where LabVIEW is headless (CI's container). There their headless copies
+  # below run instead.
+  @labview @interactive-labview
+  Scenario Outline: LabVIEW-bound command output on a started venv LabVIEW matches its recording
+    Given <setup>
+    When I run "<command>"
+    And I list the files under "<files>"
+    Then stdout, stderr and the exit code equal the recording "<name>"
+
+    Examples:
+      | setup                                              | command                      | files          | name                    |
+      | a venv for LabVIEW 2026 and the VI fixture package | lvpm install lvpm_vi_fixture | names:.lv-venv | venv-install-vi-fixture |
+      | a venv with lvpm_vi_fixture installed              | lvpm relink --all            | names:.lv-venv | relink-all-vi-fixture   |
+
+  # The same two as a headless machine runs them: lvpm starts the venv's
+  # LabVIEW headless, and an install relinks only when asked to.
+  @labview
+  Scenario Outline: LabVIEW-bound command output on a headless venv LabVIEW matches its recording
+    Given <setup>
+    And LV_RTE_HEADLESS is set
+    When I run "<command>"
+    And I list the files under "<files>"
+    Then stdout, stderr and the exit code equal the recording "<name>"
+
+    Examples:
+      | setup                                              | command                               | files          | name                             |
+      | a venv for LabVIEW 2026 and the VI fixture package | lvpm install lvpm_vi_fixture --relink | names:.lv-venv | venv-install-vi-fixture-headless |
+      | a venv with lvpm_vi_fixture installed              | lvpm relink --all                     | names:.lv-venv | relink-all-vi-fixture-headless   |
 
   # The one scenario that acts on the LabVIEW installation, with the fixture
   # package `lvpm_test_fixture`: a VI under vi.lib/_lvpm_test_fixture and a real

@@ -1,0 +1,13 @@
+.lv-venv/
+.lv-venv/.gitignore
+.lv-venv/.lvpm/
+.lv-venv/.lvpm/installed/
+.lv-venv/.lvpm/installed/lvpm_vi_fixture.json
+.lv-venv/.lvpm/labview.ini
+.lv-venv/.lvpm/venv.json
+.lv-venv/lvpm_vi_fixture/
+.lv-venv/lvpm_vi_fixture/1/
+.lv-venv/lvpm_vi_fixture/1/lvaddoninfo.json
+.lv-venv/lvpm_vi_fixture/1/vi.lib/
+.lv-venv/lvpm_vi_fixture/1/vi.lib/lvpm_vi_fixture/
+.lv-venv/lvpm_vi_fixture/1/vi.lib/lvpm_vi_fixture/payload.vi

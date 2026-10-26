@@ -120,8 +120,9 @@ cargo update -w
 
 ### Main moved while my PR was open
 
-The `ci-ok` check is the only required check, and branches must be up to
-date with `main` before they merge. When another PR merges first:
+Branch protection should require only the `ci-ok` check, and branches must be
+up to date with `main` before they merge (an admin sets this in the repository
+settings). When another PR merges first:
 
 1. Rebase on `main` (or press **Update branch** on the PR).
 2. If `main`'s version is now equal to or above yours, the `version` check

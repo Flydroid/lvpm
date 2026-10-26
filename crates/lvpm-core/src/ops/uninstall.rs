@@ -335,6 +335,47 @@ mod tests {
     }
 
     #[test]
+    fn a_headless_uninstall_from_the_installation_skips_the_palette_refresh() {
+        let dir = crate::ops::testing::scratch_dir("uninstall-headless");
+        let fake = crate::ops::testing::FakeInstallation::new(&dir);
+        let file = fake.target.path.join("vi.lib").join("alpha.txt");
+        std::fs::write(&file, "alpha").unwrap();
+        let store = fake.roots().store_dir();
+        std::fs::create_dir_all(&store).unwrap();
+        let manifest = serde_json::json!({
+            "name": "alpha", "version": "1.0", "display_name": null, "installed_at": 0,
+            "target": "LabVIEW 2099", "files": [file.to_string_lossy().replace('\\', "/")],
+            "skipped_hooks": [],
+        });
+        std::fs::write(store.join("alpha.json"), manifest.to_string()).unwrap();
+
+        let sink = Recorder::default();
+        let mut env = env_for(&sink, &dir);
+        env.flags.prefix = None;
+        fake.place(&mut env);
+        env.headless = true;
+        env.flags.global = true;
+        env.flags.labview_version = Some("2099".into());
+        uninstall(&env, Some("alpha"), false).unwrap();
+        assert!(!file.exists(), "the package's file is gone");
+
+        let events = sink.0.lock().unwrap().clone();
+        assert!(events.contains(&Event::PhaseSkipped {
+            phase: Phase::Refresh,
+            reason: SkipReason::Headless,
+            skipped: 1
+        }));
+        // A refresh would start LabVIEW in a container.
+        assert!(!events.iter().any(|e| matches!(
+            e,
+            Event::PhaseStarted {
+                phase: Phase::Refresh
+            }
+        )));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn an_uninstall_after_an_accepted_cancel_deletes_nothing_and_one_that_ran_refuses_a_cancel() {
         let (dir, file) = scratch_with_alpha("cancelled");
         let sink = Recorder::default();

@@ -820,10 +820,10 @@ fn refresh_palettes(env: &OpEnv, session: &InstallSession, applied: &Applied) {
         )),
         // A headless LabVIEW (containers, CI) shows no palette to anyone, and
         // rebuilding one would start LabVIEW for nothing when the install had
-        // no hooks to run.
-        Some(_) if written > 0 && env.headless => {
-            env.sink.emit(skipped(SkipReason::Headless, written))
-        }
+        // no hooks to run. An uninstall's removals count the same.
+        Some(_) if env.headless && (written > 0 || applied.removed > 0) => env
+            .sink
+            .emit(skipped(SkipReason::Headless, written + applied.removed)),
         Some(t) if written > 0 || applied.removed > 0 => {
             env.sink.emit(Event::PhaseStarted {
                 phase: Phase::Refresh,

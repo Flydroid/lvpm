@@ -4,7 +4,8 @@
 //! `harness = false`: this file has its own `main`. Run it with
 //! `cargo test --test acceptance`; capture recordings with `LVPM_RECORD=1`
 //! (`LVPM_RECORD=force` replaces existing ones). `@labview` scenarios need a
-//! real LabVIEW and run only with `LVPM_TEST_LABVIEW=1`. A failed step fails
+//! real LabVIEW and run only with `LVPM_TEST_LABVIEW=1`; `LVPM_TEST_ONLY_LABVIEW=1`
+//! runs nothing else, as CI's LabVIEW container does. A failed step fails
 //! the run, and so does a skipped one: every step has a definition.
 
 // Test code builds sandboxes and reads the test process's environment; the
@@ -25,6 +26,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use support::golden::{Mode, Output};
 use support::sandbox::Sandbox;
+use support::selection::{
+    INTERACTIVE_TAG, LABVIEW_TAG, PENDING_TAG_PREFIX, Selection, UNSAFE_TAG, select,
+};
 
 /// The features the harness runs, relative to the package root. Later slices
 /// add theirs here.
@@ -45,15 +49,11 @@ const FEATURE_FILES: &[&str] = &[
     "tests/features/lvpm-lockfile/slice-15-cancellation-before-files-are-written.feature",
     "tests/features/lvpm-lockfile/slice-16-documentation-and-help-text.feature",
 ];
-const LABVIEW_TAG: &str = "labview";
-/// A scenario that needs a later slice, tagged `@pending-<slice>`. It is not
-/// run until that slice removes the tag.
-const PENDING_TAG_PREFIX: &str = "pending-";
-/// A scenario that would change the user's own LabVIEW installation: a sync
-/// takes out every package its lock does not list, so none may run against
-/// one. The harness never runs these, whatever else is set.
-const UNSAFE_TAG: &str = "unsafe";
 const TEST_LABVIEW_ENV_VAR: &str = "LVPM_TEST_LABVIEW";
+const ONLY_LABVIEW_ENV_VAR: &str = "LVPM_TEST_ONLY_LABVIEW";
+/// The LabVIEW here is headless (a container): its `@interactive-labview`
+/// scenarios cannot run, and their headless copies stand in for them.
+const HEADLESS_LABVIEW_ENV_VAR: &str = "LVPM_TEST_LABVIEW_HEADLESS";
 /// The program name every recorded command starts with; the binary under test
 /// is run in its place.
 const PROGRAM: &str = "lvpm";
@@ -134,31 +134,23 @@ impl CliWorld {
     }
 }
 
-fn runs_labview_scenarios() -> bool {
-    std::env::var(TEST_LABVIEW_ENV_VAR).is_ok_and(|value| value == "1")
+fn env_flag(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|value| value == "1")
 }
 
 fn has_labview_tag(scenario: &Scenario) -> bool {
     scenario.tags.iter().any(|tag| tag == LABVIEW_TAG)
 }
 
-fn has_unsafe_tag(scenario: &Scenario) -> bool {
-    scenario.tags.iter().any(|tag| tag == UNSAFE_TAG)
-}
-
-fn has_pending_tag(scenario: &Scenario) -> bool {
-    scenario
-        .tags
-        .iter()
-        .any(|tag| tag.starts_with(PENDING_TAG_PREFIX))
-}
-
-/// How many scenarios of a feature the harness did not run, and why.
+/// How many scenarios of a feature the harness ran (`@labview` ones) and did
+/// not run, by reason.
 #[derive(Default)]
-struct NotRun {
-    labview: usize,
-    unsafe_to_run: usize,
-    pending: usize,
+struct ScenarioCounts {
+    labview_ran: usize,
+    labview_not_run: usize,
+    unsafe_not_run: usize,
+    pending_not_run: usize,
+    interactive_not_run: usize,
 }
 
 /// Whatever a scenario started on its venv is stopped, whether it passed or not.
@@ -176,15 +168,24 @@ fn after_scenario<'a>(
     })
 }
 
-/// Run one feature file; the scenarios it did not run, and how it went.
-fn run_feature(path: PathBuf, mode: Mode) -> (NotRun, Result<(), String>) {
+/// Run one feature file; its scenario counts, and how it went.
+fn run_feature(path: PathBuf, mode: Mode) -> (ScenarioCounts, Result<(), String>) {
     let labview_not_run = Arc::new(AtomicUsize::new(0));
     let unsafe_not_run = Arc::new(AtomicUsize::new(0));
     let pending_not_run = Arc::new(AtomicUsize::new(0));
-    let (counted_labview, counted_unsafe, counted_pending) = (
+    let labview_ran = Arc::new(AtomicUsize::new(0));
+    let interactive_not_run = Arc::new(AtomicUsize::new(0));
+    let (counted_labview, counted_unsafe, counted_pending, counted_labview_ran) = (
         labview_not_run.clone(),
         unsafe_not_run.clone(),
         pending_not_run.clone(),
+        labview_ran.clone(),
+    );
+    let counted_interactive = interactive_not_run.clone();
+    let (test_labview, only_labview, headless_labview) = (
+        env_flag(TEST_LABVIEW_ENV_VAR),
+        env_flag(ONLY_LABVIEW_ENV_VAR),
+        env_flag(HEADLESS_LABVIEW_ENV_VAR),
     );
     let writer = futures::executor::block_on(
         CliWorld::cucumber()
@@ -202,18 +203,17 @@ fn run_feature(path: PathBuf, mode: Mode) -> (NotRun, Result<(), String>) {
             .after(after_scenario)
             .fail_on_skipped()
             .filter_run(path, move |_, _, scenario| {
-                if has_unsafe_tag(scenario) {
-                    counted_unsafe.fetch_add(1, Ordering::SeqCst);
-                    return false;
-                }
-                if has_pending_tag(scenario) {
-                    counted_pending.fetch_add(1, Ordering::SeqCst);
-                    return false;
-                }
-                let runs = runs_labview_scenarios() || !has_labview_tag(scenario);
-                if !runs {
-                    counted_labview.fetch_add(1, Ordering::SeqCst);
-                }
+                let (counter, runs) =
+                    match select(&scenario.tags, test_labview, only_labview, headless_labview) {
+                        Selection::Run if has_labview_tag(scenario) => (&counted_labview_ran, true),
+                        Selection::Run => return true,
+                        Selection::NotLabview => return false,
+                        Selection::Unsafe => (&counted_unsafe, false),
+                        Selection::Pending => (&counted_pending, false),
+                        Selection::NeedsLabview => (&counted_labview, false),
+                        Selection::Interactive => (&counted_interactive, false),
+                    };
+                counter.fetch_add(1, Ordering::SeqCst);
                 runs
             }),
     );
@@ -226,12 +226,14 @@ fn run_feature(path: PathBuf, mode: Mode) -> (NotRun, Result<(), String>) {
         )),
         false => Ok(()),
     };
-    let not_run = NotRun {
-        labview: labview_not_run.load(Ordering::SeqCst),
-        unsafe_to_run: unsafe_not_run.load(Ordering::SeqCst),
-        pending: pending_not_run.load(Ordering::SeqCst),
+    let counts = ScenarioCounts {
+        labview_ran: labview_ran.load(Ordering::SeqCst),
+        labview_not_run: labview_not_run.load(Ordering::SeqCst),
+        unsafe_not_run: unsafe_not_run.load(Ordering::SeqCst),
+        pending_not_run: pending_not_run.load(Ordering::SeqCst),
+        interactive_not_run: interactive_not_run.load(Ordering::SeqCst),
     };
-    (not_run, outcome)
+    (counts, outcome)
 }
 
 /// The default main thread stack is 1 MiB on Windows, which the cucumber
@@ -260,15 +262,23 @@ fn run_features() {
     }
     let mut failures = Vec::new();
     let (mut labview_not_run, mut unsafe_not_run, mut pending_not_run) = (0, 0, 0);
+    let (mut labview_ran, mut interactive_not_run) = (0, 0);
     for feature in FEATURE_FILES {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(feature);
-        let (not_run, outcome) = run_feature(path, mode);
-        labview_not_run += not_run.labview;
-        unsafe_not_run += not_run.unsafe_to_run;
-        pending_not_run += not_run.pending;
+        let (counts, outcome) = run_feature(path, mode);
+        labview_ran += counts.labview_ran;
+        labview_not_run += counts.labview_not_run;
+        unsafe_not_run += counts.unsafe_not_run;
+        pending_not_run += counts.pending_not_run;
+        interactive_not_run += counts.interactive_not_run;
         if let Err(why) = outcome {
             failures.push(format!("{feature}: {why}"));
         }
+    }
+    if env_flag(ONLY_LABVIEW_ENV_VAR) {
+        println!(
+            "{labview_ran} @{LABVIEW_TAG} scenarios run (only those: {ONLY_LABVIEW_ENV_VAR}=1)"
+        );
     }
     if labview_not_run > 0 {
         println!(
@@ -279,6 +289,11 @@ fn run_features() {
         println!(
             "{unsafe_not_run} @{UNSAFE_TAG} scenarios never run: each would change a real \
              LabVIEW installation"
+        );
+    }
+    if interactive_not_run > 0 {
+        println!(
+            "{interactive_not_run} @{INTERACTIVE_TAG} scenarios left to their headless copies ({HEADLESS_LABVIEW_ENV_VAR}=1)"
         );
     }
     if pending_not_run > 0 {

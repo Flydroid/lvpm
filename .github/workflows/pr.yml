@@ -58,18 +58,117 @@ jobs:
           cargo test --workspace --locked --no-fail-fast
           echo "::endgroup::"
         shell: bash
+      # smoke.test.sh runs in lint; its Windows twin needs Windows PowerShell.
+      - name: Self-test the Windows smoke flow
+        if: runner.os == 'Windows'
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File ci/e2e/smoke.test.ps1
 
   # The same build and packaging main releases with.
   build:
     uses: ./.github/workflows/build.yml
     with:
       ref: ${{ github.event.pull_request.head.sha }}
+      acceptance: true
 
   package:
     needs: [build]
     uses: ./.github/workflows/package.yml
     with:
       ref: ${{ github.event.pull_request.head.sha }}
+
+  # The CLI smoke flow inside NI's LabVIEW images, with the binary build made.
+  # Steps branch on row fields (os), never on image names, so a new image is
+  # one new row.
+  e2e:
+    name: e2e (${{ matrix.os }} ${{ matrix.year }})
+    needs: [build]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: linux, runner: ubuntu-latest, year: 2025, image: "nationalinstruments/labview:2025q3patch1-linux" }
+          - { os: linux, runner: ubuntu-latest, year: 2026, image: "nationalinstruments/labview:2026q3-linux" }
+          # Process isolation needs the host's Windows build: ltsc2022 = windows-2022.
+          - { os: windows, runner: windows-2022, year: 2026, image: "nationalinstruments/labview:2026q3-windows", acceptance: true }
+    env:
+      IMAGE: ${{ matrix.image }}
+      YEAR: ${{ matrix.year }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: lvpm-${{ matrix.os }}
+          path: bin
+      - name: Check disk space for the image
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          # The Windows image unpacks to about 20 GB.
+          $free = [int]((Get-PSDrive C).Free / 1GB)
+          "C: has $free GB free"
+          if ($free -lt 25) { "::error::infrastructure: $free GB free, need 25"; exit 1 }
+      # The windows-2022 image ships Docker with its service stopped.
+      - name: Start the Docker engine
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          Start-Service docker
+          docker version
+      - name: Pull ${{ matrix.image }}
+        shell: bash
+        timeout-minutes: 50
+        run: |
+          for i in 1 2 3; do
+            docker pull "$IMAGE" && exit 0
+            [ $i = 3 ] || sleep 30
+          done
+          echo "::error::infrastructure: image could not be pulled: $IMAGE"; exit 1
+      # The step summary is written to a mounted directory and copied out
+      # afterwards: Windows containers cannot bind-mount a single file.
+      - name: Smoke flow
+        if: matrix.os == 'linux'
+        shell: bash
+        run: |
+          chmod +x bin/lvpm; mkdir -p out
+          docker run --rm --entrypoint bash -e GITHUB_STEP_SUMMARY=/out/summary.md \
+            -v "$PWD/bin:/lvpm:ro" -v "$PWD/ci/e2e:/e2e:ro" -v "$PWD/out:/out" \
+            "$IMAGE" /e2e/smoke.sh /lvpm/lvpm /e2e/fixture "$YEAR"
+      - name: Smoke flow
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force out | Out-Null
+          docker run --rm --isolation=process --entrypoint powershell -e GITHUB_STEP_SUMMARY=C:\out\summary.md `
+            -v "${PWD}\bin:C:\lvpm:ro" -v "${PWD}\ci\e2e:C:\e2e:ro" -v "${PWD}\out:C:\out" `
+            $env:IMAGE -NoProfile -ExecutionPolicy Bypass -File C:\e2e\smoke.ps1 C:\lvpm\lvpm.exe C:\e2e\fixture $env:YEAR
+          exit $LASTEXITCODE
+      - uses: actions/download-artifact@v4
+        if: matrix.acceptance
+        with:
+          name: lvpm-acceptance
+          path: C:\src\lvpm
+      - name: The @labview acceptance scenarios
+        if: matrix.acceptance
+        shell: pwsh
+        # A run that records missing recordings runs the scenarios twice.
+        timeout-minutes: 45
+        run: ci/e2e/labview-acceptance.ps1 -Image $env:IMAGE -Year $env:YEAR
+      - uses: actions/upload-artifact@v4
+        if: failure() && matrix.acceptance
+        with:
+          name: golden-${{ matrix.os }}-${{ matrix.year }}
+          path: out/golden
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Copy the e2e summary
+        if: always()
+        shell: bash
+        run: '[ ! -f out/summary.md ] || cat out/summary.md >> "$GITHUB_STEP_SUMMARY"'
 
   lint:
     name: lint
@@ -88,7 +187,7 @@ jobs:
             [[ "$f" == *.test.sh ]] && continue
             echo "::group::$f"; bash "$f" || status=1; echo "::endgroup::"
           done
-          for f in ci/lint/*.test.sh ci/*.test.sh; do
+          for f in ci/lint/*.test.sh ci/*.test.sh ci/e2e/*.test.sh; do
             echo "::group::$f"; bash "$f" || status=1; echo "::endgroup::"
           done
           exit $status
@@ -98,7 +197,7 @@ jobs:
   ci-ok:
     name: ci-ok
     if: always()
-    needs: [version, test, build, package, lint]
+    needs: [version, test, build, package, e2e, lint]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

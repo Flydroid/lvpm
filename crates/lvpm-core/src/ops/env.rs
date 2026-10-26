@@ -172,24 +172,19 @@ impl<'a> OpEnv<'a> {
         // Read before anything is chosen, so a `labview` that is no year is
         // refused whichever way the installation is picked.
         let min_year = min_lv.map(project::labview_year).transpose()?;
-        let want = self
-            .flags
-            .labview_version
-            .as_deref()
-            .or(min_lv)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "which LabVIEW? pass --labview-version <YYYY>, or set labview in {}\n\
-                     hint: `lvpm targets` lists what is installed",
-                    manifest_path.display()
-                )
-            })?;
+        let requested = self.flags.labview_version.as_deref();
+        ensure!(
+            requested.or(min_lv).is_some(),
+            "which LabVIEW? pass --labview-version <YYYY>, or set labview in {}\n\
+             hint: `lvpm targets` lists what is installed",
+            manifest_path.display()
+        );
         ensure!(
             !self.targets.is_empty(),
             "no LabVIEW installations detected"
         );
-        let t = target::select(&self.targets, want)?;
-        target::require_minimum(&t, min_year)?;
+        let t = target::select_for_project(&self.targets, requested, min_year)?
+            .expect("checked above: a flag or a manifest year is set");
         self.sink.emit(Event::HeadlessInstallationChosen {
             repo: repo.to_path_buf(),
             labview: t.label(),

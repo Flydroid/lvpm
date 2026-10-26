@@ -154,6 +154,34 @@ pub fn select(targets: &[LvTarget], want: &str) -> Result<LvTarget> {
     );
 }
 
+/// The installation a project means: `requested` (`--labview-version`) if
+/// given, else the manifest's `labview` year, else, when that year is not
+/// installed, the oldest newer one, since the manifest's year is a minimum.
+pub(crate) fn select_for_project(
+    targets: &[LvTarget],
+    requested: Option<&str>,
+    min_year: Option<u32>,
+) -> Result<Option<LvTarget>> {
+    let Some(want) = requested
+        .map(str::to_string)
+        .or(min_year.map(|y| y.to_string()))
+    else {
+        return Ok(None);
+    };
+    let want = want.as_str();
+    let t = match (requested, min_year) {
+        (None, Some(year)) if !targets.iter().any(|t| t.year() == year) => targets
+            .iter()
+            .filter(|t| t.year() > year)
+            .min_by_key(|t| t.year())
+            .cloned()
+            .map_or_else(|| select(targets, want), Ok)?,
+        _ => select(targets, want)?,
+    };
+    require_minimum(&t, min_year)?;
+    Ok(Some(t))
+}
+
 /// The project's `labview` is a minimum: a newer LabVIEW may stand in for it,
 /// an older one may not. `minimum` is the year [`labview_year`] read, if the
 /// project names one.
@@ -270,6 +298,24 @@ fn env_path(key: &str, fallback: &str) -> PathBuf {
     PathBuf::from(std::env::var(key).unwrap_or_else(|_| fallback.to_string()))
 }
 
+/// Where a machine place is when its Windows variable is unset: Windows' own
+/// default there, the nearest Linux place elsewhere, so nothing lands in a
+/// relative `C:\...` directory under the current one.
+fn machine_default(windows: &str) -> String {
+    if cfg!(windows) {
+        return windows.to_string();
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
+    match windows {
+        "C:\\Users\\Default" => home,
+        "C:\\Program Files" | "C:\\Program Files (x86)" => "/usr/local".into(),
+        "C:\\ProgramData" => "/var/lib".into(),
+        "C:\\Users\\Public" => "/usr/local/share".into(),
+        "C:\\Users\\Default\\AppData\\Roaming" => format!("{home}/.config"),
+        _ => "/".into(),
+    }
+}
+
 impl Roots {
     /// Everything under one directory. Nothing outside it is ever touched.
     pub fn scratch(prefix: &Path) -> Roots {
@@ -302,7 +348,7 @@ impl Roots {
     pub fn labview_on(t: &LvTarget, machine: Option<&Path>) -> Roots {
         let place = |key: &str, fallback: &str| match machine {
             Some(dir) => dir.join(key),
-            None => env_path(key, fallback),
+            None => env_path(key, &machine_default(fallback)),
         };
         let userprofile = place("USERPROFILE", "C:\\Users\\Default");
         let program_files = if t.bitness == 32 {
@@ -320,14 +366,18 @@ impl Roots {
             user_desktop: userprofile.join("Desktop"),
             user_appdata: place("APPDATA", "C:\\Users\\Default\\AppData\\Roaming"),
             boot_volume: machine.map_or_else(
-                || {
-                    PathBuf::from(
+                || match cfg!(windows) {
+                    true => PathBuf::from(
                         std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into()) + "\\",
-                    )
+                    ),
+                    false => PathBuf::from("/"),
                 },
                 |dir| dir.join("SystemDrive"),
             ),
-            system_core: place("SystemRoot", "C:\\Windows").join("System32"),
+            system_core: match (machine, cfg!(windows)) {
+                (None, false) => PathBuf::from("/usr/lib"),
+                _ => place("SystemRoot", "C:\\Windows").join("System32"),
+            },
             scratch: None,
             venv: None,
             target: Some(t.clone()),
@@ -498,6 +548,48 @@ impl Roots {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn lv(year: u32) -> LvTarget {
+        LvTarget {
+            version: f64::from(year - 2000),
+            bitness: 64,
+            path: PathBuf::from(format!("/usr/local/natinst/LabVIEW-{year}-64")),
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn a_linux_installation_keeps_its_manifests_and_machine_places_absolute() {
+        let r = Roots::labview(&lv(2026));
+        assert_eq!(
+            r.store_dir(),
+            Path::new("/var/lib/lvpm/LabVIEW-2026-64bit/installed")
+        );
+        for tok in [
+            "<OS Public Application Data>",
+            "<OS Boot Volume Root>",
+            "<OS System Core Libraries>",
+        ] {
+            assert!(r.expand(tok).unwrap().is_absolute(), "{tok} is relative");
+        }
+    }
+
+    #[test]
+    fn a_project_takes_its_year_else_the_oldest_newer_one_never_an_older_one() {
+        let pick = |have: &[u32], requested: Option<&str>, min: Option<u32>| {
+            let targets: Vec<_> = have.iter().map(|y| lv(*y)).collect();
+            select_for_project(&targets, requested, min).map(|t| t.map(|t| t.year()))
+        };
+        assert_eq!(
+            pick(&[2024, 2025, 2026], None, Some(2025)).unwrap(),
+            Some(2025)
+        );
+        assert_eq!(pick(&[2027, 2026], None, Some(2025)).unwrap(), Some(2026));
+        assert_eq!(pick(&[2026], Some("2026"), Some(2025)).unwrap(), Some(2026));
+        assert_eq!(pick(&[2026], None, None).unwrap(), None);
+        assert!(pick(&[2024], None, Some(2025)).is_err());
+        assert!(pick(&[2024, 2026], Some("2024"), Some(2025)).is_err());
+    }
 
     #[test]
     fn scratch_keeps_every_token_inside_the_prefix() {
