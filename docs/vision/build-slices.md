@@ -44,7 +44,7 @@ split, and S10 is split into S10a–d with only what is left.
     fake on `127.0.0.1`, as the existing feed scenarios are. A criterion
     marked *(manual)* needs a real service, VIPM or CI; its evidence goes in
     the PR, not in `cargo test`.
-- Every new command or flag has a scenario and a line in the README command table.
+- Every new command or flag has a scenario and a line in the command table in docs/usage.md.
 - Core operations live in `crates/lvpm-core/src/` (under `ops/`), report
   through `events.rs` and do no terminal I/O. The CLI front end is
   `src/main.rs` (arguments, exit codes) and `src/render/` (output). A slice
@@ -52,7 +52,7 @@ split, and S10 is split into S10a–d with only what is left.
 - Format knowledge comes only from published specifications and observed
   files ([PROVENANCE.md](../../PROVENANCE.md)). No VIPM or JKI code.
 - [../roadmap.md](../roadmap.md) belongs to the upstream author: don't edit
-  it. Update this folder and the README command table instead.
+  it. Update this folder and the command table in docs/usage.md instead.
 - Tick the matching milestone box in [README.md](README.md#milestones) in
   the same PR.
 
@@ -106,7 +106,7 @@ link. Checked 2026-10-26 from each repository's `.vipb`.
 | 5 | S7b OCI feeds, S8 community index | yes (both touch `project.rs`) |
 
 Almost every slice also appends a line to `tests/acceptance.rs` (`FEATURE_FILES`)
-and to the README command table; those are one-line conflicts, not
+and to the command table in docs/usage.md; those are one-line conflicts, not
 collisions, and the notes above leave them out.
 
 S1b is the merge gate for the risky unknown: if VIPM rejects an lvpm-built

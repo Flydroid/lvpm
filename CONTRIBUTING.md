@@ -130,4 +130,121 @@ settings). When another PR merges first:
    your version above it and run `cargo update -w` again.
 3. Push. CI runs again on the updated branch.
 
+## Releases
+
+### How releases are made
+
+Every merge to `main` publishes the version in `Cargo.toml` as release
+`v<version>`, holding the Windows zip, the Linux tar.gz and `SHA256SUMS`.
+Each PR must raise the version (see [Raise the version in every PR](#raise-the-version-in-every-pr)).
+Releases run one at a time. If merges land faster than releases finish, a
+waiting release can be replaced by a newer one, so a version in between is
+never released; the next release has the higher version. A replaced run
+never starts, so it reports nothing: check the Releases list if a version is
+missing. The
+workflow is [release.yml](.github/workflows/release.yml); the design is in
+[the CI spec](docs/specs/lvpm-ci-pipeline.md).
+
+### Continuous integration
+
+Every PR runs [pr.yml](.github/workflows/pr.yml): the version check, `cargo
+test` on Windows and Linux, the release build and packaging, the CI lint
+checks, and the CLI smoke flow (targets, search, `lock --check`, install,
+list, uninstall) inside NI's LabVIEW images:
+
+| Image | OS | LabVIEW | Also runs |
+| --- | --- | --- | --- |
+| `nationalinstruments/labview:2025q3patch1-linux` | Linux | 2025 | |
+| `nationalinstruments/labview:2026q3-linux` | Linux | 2026 | |
+| `nationalinstruments/labview:2026q3-windows` | Windows | 2026 | the `@labview` acceptance scenarios |
+
+Branch protection on `main` must require the `ci-ok` check, which passes only
+when every other job passed, and must require branches to be up to date before
+merging. An admin sets this in the repository settings. Adding a job or an
+image row never changes the required checks.
+The design is in [the CI spec](docs/specs/lvpm-ci-pipeline.md).
+
+### Release failed
+
+Failed runs show as red **Release** runs on `main` under
+[Actions](https://github.com/ThatsTheEnd/lvpm/actions/workflows/release.yml).
+
+1. Read the run's job summary. It names the version, the job that failed and
+   what to do next.
+2. If **guard** says `tag v<version> already exists`, open the
+   [Releases](https://github.com/ThatsTheEnd/lvpm/releases) list first. A
+   published `v<version>` with 3 assets means the release is done and there
+   is nothing to fix. Otherwise the version is taken: raise it in a new PR.
+3. If **publish** failed at "Check the version is still not released", a
+   newer version was released after this run started: raise the version in a
+   new PR.
+4. For any other job, re-run the failed jobs, but not while another Release
+   run is in progress. A draft release left by the failed run is deleted and
+   created again, and the installer never picks a draft.
+
+Releases before v0.4.0 (v0.2.1 and older) are in the repository this one
+was forked from. Releases here start at v0.4.0.
+
+### Test a local release installation
+
+From a Windows checkout with the build tools installed:
+
+```powershell
+.\scripts\install.ps1 -BuildLocal
+```
+
+This runs `cargo build --release --locked`, packages the executable,
+README and licenses into a temporary zip, verifies its SHA-256, and uses
+the normal release installation path. It replaces any existing per-user
+lvpm in `%LOCALAPPDATA%\lvpm\bin` and adds that directory to your user
+`PATH`. No GitHub release or cargo-dist setup is required. The version
+remains the one declared in Cargo.toml; temporary packaging files are removed.
+The local checksum checks the packaged bytes, not publisher authenticity.
+
+For an isolated test without changing your installed lvpm or user PATH:
+
+```powershell
+.\scripts\install.ps1 -BuildLocal -InstallDir "$PWD\sandbox\local-installer\bin" -NoPath
+.\sandbox\local-installer\bin\lvpm.exe --version
+```
+
+An existing release zip can also be installed with `-Archive <FILE>` and
+`-Sha256 <EXPECTED-HASH>` instead of building it. Local modes cannot be
+combined with GitHub release selection options.
+
+## Layout
+
+lvpm is two crates. `lvpm-core` (`crates/lvpm-core/`) holds the package
+management and does no terminal I/O; `lvpm` (`src/`) is the CLI over it.
+Modules are in `crates/lvpm-core/src/`, except `main.rs` and `render/` (in
+`src/`) and the rows that give a path.
+
+| Module                         | Responsibility                                                                                                          |
+| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
+| `main.rs`                      | The CLI: flags, building the `OpEnv` core runs in, calling `ops`, the VI Server diagnostic commands                    |
+| `render/`                      | The CLI's output: one file per core module words that module's events and what its queries return                      |
+| `ops/`                         | The operations a front end calls, each taking an `OpEnv` and reporting through events: `install`, `uninstall`, `lock`, `sync`, `add_remove`, `route` (what an `install` means), `venv_cmd`, `query`, `relink`, `hooks`, `refresh`, `start`, `launch_cmd`; `env` settles the destination |
+| `events.rs`                    | What core reports while it works, as typed data, and the `EventSink` that receives it                                   |
+| `errors.rs`                    | Errors that carry what went wrong as data, worded without naming a command or flag                                      |
+| `cancel.rs`                    | The `CancelToken`: a cancel is honoured until an operation writes its first file                                        |
+| `config.rs`                    | lvpm's settings: `LVPM_CONFIG_<KEY>` over built-in defaults                                                             |
+| `lockfile.rs`                  | `lvpm.lock`: the resolved set, its text and its staleness                                                               |
+| `solve.rs`                     | The PubGrub solver that picks one set of versions for a manifest                                                        |
+| `manifest_edit.rs`             | Edit one entry of `lvpm.toml` and leave every other byte as it was                                                      |
+| `index.rs`                     | Fetch and parse package directories (`.ogpd` / `index.vipr`), resolve names to versions                                |
+| `fetch.rs`                     | Acquire package bytes: cache lookup, downloads, integrity verification, and cache population                            |
+| `cache.rs`                     | The cache: the SQLite index of known sources and the content-addressed store of what they served                        |
+| `spec.rs`                      | The `spec` manifest inside a package (the OGPT `.ogp` format and VIPM's `.vip` dialect)                                 |
+| `project.rs`                   | The project manifest `lvpm.toml`: dependencies and their constraints, sources, minimum LabVIEW, lookup from a directory |
+| `target.rs`                    | LabVIEW detection, and where each `Target Dir` token points                                                             |
+| `install.rs`                   | Plan, unpack, extract hook VIs, record a manifest, uninstall                                                            |
+| `venv.rs`                      | A project's `.lv-venv/` venv by default: binding, lookup from the working directory, `lvpm venv`                       |
+| `launch.rs`                    | Start LabVIEW on a venv: the `-pref` ini, readiness by handshake, detached spawning                                     |
+| `relink.rs`                    | Drive the embedded relink VI over installed folders; folder collapsing and retries                                      |
+| `refresh.rs`                   | Rebuild palettes and menus through LabVIEW's own shipping VIs                                                           |
+| `viserver.rs`                  | The VI Server TCP protocol: connection, methods, flattened data                                                         |
+| `version.rs`                   | Package version ordering: OGPT `version-release`, VIPM's four-part form; not semver                                     |
+| `crates/lvpm-core/src/lv-src/relink-package.vi` | The relink VI embedded into the executable at build time (LabVIEW 2020)                                                 |
+| `scripts/install.ps1`          | Download, verify and install the latest release                                                                         |
+
 Thank you for helping improve lvpm.

@@ -122,7 +122,7 @@ jobs:
           if [ "$job" = guard ]; then
             next="the version is already released or below the highest tag; raise the version in a new PR (see guard's summary)."
           else
-            next="if publish failed at \"Check the version is still not released\", a newer version is already released: raise the version in a new PR. Otherwise re-run the failed jobs; a leftover draft release is replaced. See the README's \"Release failed\" runbook."
+            next="if publish failed at \"Check the version is still not released\", a newer version is already released: raise the version in a new PR. Otherwise re-run the failed jobs; a leftover draft release is replaced. See the \"Release failed\" runbook in CONTRIBUTING.md."
           fi
           echo "Release v${VERSION:-<unknown>} failed in $job: $next" | tee -a "$GITHUB_STEP_SUMMARY"
           echo "::error::Release v${VERSION:-<unknown>} failed in $job"

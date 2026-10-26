@@ -1,5 +1,5 @@
 //! Steps of the documentation scenarios: the CLI's own `--help`, read the way a
-//! user reads it, against the README.
+//! user reads it, against the usage guide (docs/usage.md).
 //!
 //! The command tree is enumerated from the built binary's `-h` output, so the
 //! test sees what the user sees and needs no access to the clap definitions.
@@ -8,7 +8,7 @@ use crate::CliWorld;
 use cucumber::{then, when};
 use std::path::Path;
 
-/// The flags the lock workflow adds or relies on. Each must exist and be in the README.
+/// The flags the lock workflow adds or relies on. Each must exist and be in the usage guide.
 const LOCK_FLAGS: &[&str] = &[
     "--locked",
     "--frozen",
@@ -98,9 +98,9 @@ impl CliWorld {
     }
 }
 
-fn readme() -> String {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("README.md");
-    let text = std::fs::read_to_string(&path).expect("read README.md");
+fn usage_guide() -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/usage.md");
+    let text = std::fs::read_to_string(&path).expect("read docs/usage.md");
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
@@ -129,19 +129,19 @@ async fn everything_has_help(world: &mut CliWorld) {
     assert!(silent.is_empty(), "no help text: {silent:#?}");
 }
 
-#[then("every subcommand and every lock-related flag appears in the README")]
+#[then("every subcommand and every lock-related flag appears in the usage guide")]
 async fn everything_is_in_the_readme(world: &mut CliWorld) {
-    let readme = readme();
+    let guide = usage_guide();
     let undocumented: Vec<_> = world
         .docs
         .subcommands
         .iter()
-        .filter(|item| !readme.contains(&format!("lvpm {}", item.name)))
+        .filter(|item| !guide.contains(&format!("lvpm {}", item.name)))
         .map(|item| format!("lvpm {}", item.name))
         .collect();
     assert!(
         undocumented.is_empty(),
-        "not in the README: {undocumented:#?}"
+        "not in the usage guide: {undocumented:#?}"
     );
     for flag in LOCK_FLAGS {
         let in_the_tree = world
@@ -150,7 +150,7 @@ async fn everything_is_in_the_readme(world: &mut CliWorld) {
             .iter()
             .any(|item| item.name.ends_with(&format!(" {flag}")));
         assert!(in_the_tree, "{flag} is not a flag of any command");
-        assert!(readme.contains(flag), "{flag} is not in the README");
+        assert!(guide.contains(flag), "{flag} is not in the usage guide");
     }
 }
 
@@ -179,10 +179,10 @@ async fn help_names_the_manifest_key(world: &mut CliWorld, key: String) {
     assert!(help.contains(&quoted), "`{quoted}` is not in:\n{help}");
 }
 
-#[when("the README's add section is read")]
+#[when("the usage guide's add section is read")]
 async fn read_the_add_section(world: &mut CliWorld) {
-    let text = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("README.md"))
-        .expect("read README.md");
+    let text = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/usage.md"))
+        .expect("read docs/usage.md");
     let (mut in_fence, mut level, mut section) = (false, 0, String::new());
     for line in text.lines() {
         in_fence ^= line.starts_with("```");
@@ -199,7 +199,10 @@ async fn read_the_add_section(world: &mut CliWorld) {
             section.push('\n');
         }
     }
-    assert!(!section.is_empty(), "the README has no section on adding");
+    assert!(
+        !section.is_empty(),
+        "the usage guide has no section on adding"
+    );
     world.docs.readme_section = section;
 }
 
