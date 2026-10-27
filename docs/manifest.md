@@ -365,7 +365,7 @@ Tracked in [roadmap.md](roadmap.md#the-manifest-and-the-lockfile---wip):
     remove extras first, once resolution has succeeded.
 - **`lvpm add` / `lvpm remove`**, editing the manifest while preserving
   comments and formatting.
-- **Constraint grammar**, one for every dependency table, following Cargo:
+- **Future constraint grammar (Cargo)**, one for every dependency table:
 
   | Written           | Meaning                                    | Example range                       |
   | ----------------- | ------------------------------------------ | ----------------------------------- |
