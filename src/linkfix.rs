@@ -38,7 +38,7 @@ use anyhow::{bail, ensure, Context, Result};
 use md5::{Digest, Md5};
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 
@@ -944,32 +944,6 @@ pub struct Tree {
     owner: HashMap<String, String>,
     /// lowercase basename -> logical paths (for resolving build-machine absolutes)
     by_name: HashMap<String, Vec<String>>,
-    /// Roots holding a library or class saved in LabVIEW 2010 or earlier.
-    old_roots: HashSet<usize>,
-    /// Lowercase file names of the methods of those old classes.
-    old_methods: HashSet<String>,
-}
-
-/// The newest LabVIEW whose libraries and classes linkfix leaves as packaged.
-///
-/// Measured 2026-10 (NovaXC on LabVIEW 2026): rewriting the links of the
-/// members of jki_lib_serialization (9.0) or jki_lib_unicode (10.0) classes
-/// sends the compiler into endless recursion on project load, with or without
-/// their compiled code separated, and so does rewriting the
-/// jki_lib_json_serialization (2020) methods that override the 9.0 ones. The
-/// same rewrite is fine for classes from 2013 on. LabVIEW's own save fixes it
-/// only by rewriting the class file too, binary private data and all.
-const OLD_LIBRARY_MAJOR: u32 = 10;
-
-/// The major LabVIEW version a `.lvlib`/`.lvclass` was saved in, from its
-/// `LVVersion` attribute (`10008000` is 10, `9008000` is 9).
-fn library_major(head: &str) -> Option<u32> {
-    let at = head.find("LVVersion=\"")? + "LVVersion=\"".len();
-    let digits: String = head[at..].chars().take_while(|c| c.is_ascii_digit()).collect();
-    if digits.len() <= 6 {
-        return None;
-    }
-    digits[..digits.len() - 6].parse().ok()
 }
 
 fn lower(s: &str) -> String {
@@ -999,56 +973,10 @@ impl Tree {
                 files.insert(lower(&logical), Entry { logical, physical, root: i });
             }
         }
-        let mut t = Tree { files, owner: HashMap::new(), by_name, old_roots: HashSet::new(), old_methods: HashSet::new() };
+        let mut t = Tree { files, owner: HashMap::new(), by_name };
         t.read_libraries()?;
         t.read_llbs()?;
-        t.find_old_libraries();
         Ok(t)
-    }
-
-    /// Mark the packages that hold a library or class from LabVIEW 2010 or
-    /// earlier, and collect the method names of those old classes.
-    fn find_old_libraries(&mut self) {
-        let mut old_classes = HashSet::new();
-        for e in self.files.values() {
-            let l = lower(&e.logical);
-            if !(l.ends_with(".lvlib") || l.ends_with(".lvclass")) || l.contains(".llb/") {
-                continue;
-            }
-            let Ok(bytes) = std::fs::read(&e.physical) else { continue };
-            let head = String::from_utf8_lossy(&bytes[..bytes.len().min(512)]).into_owned();
-            if library_major(&head).is_some_and(|v| v <= OLD_LIBRARY_MAJOR) {
-                self.old_roots.insert(e.root);
-                if l.ends_with(".lvclass") {
-                    old_classes.insert(e.logical.clone());
-                }
-            }
-        }
-        for (member, owner) in &self.owner {
-            if old_classes.contains(owner) {
-                self.old_methods.insert(lower(basename(member)));
-            }
-        }
-    }
-
-    /// Why a file must stay as packaged, if it must: see [`OLD_LIBRARY_MAJOR`].
-    fn keep_as_packaged(&self, e: &Entry) -> Option<String> {
-        if self.old_roots.contains(&e.root) {
-            return Some(format!(
-                "left as packaged: its package has libraries or classes saved in LabVIEW {OLD_LIBRARY_MAJOR} or \
-                 earlier (link edits crash LabVIEW 2026's compiler)"
-            ));
-        }
-        // An override has its parent method's file name; the inheritance itself
-        // is only in the class's binary genealogy, so match by name.
-        let in_class = self.owner.get(&lower(&e.logical)).is_some_and(|o| lower(o).ends_with(".lvclass"));
-        if in_class && self.old_methods.contains(&lower(basename(&e.logical))) {
-            return Some(format!(
-                "left as packaged: may override a method of a LabVIEW {OLD_LIBRARY_MAJOR} or earlier class \
-                 (link edits crash LabVIEW 2026's compiler)"
-            ));
-        }
-        None
     }
 
     /// Members of every `.llb`, so links INTO an LLB resolve and get their
@@ -1848,15 +1776,6 @@ pub fn fix_tree(roots: &[PathBuf], dry_run: bool, m: Methods) -> Result<(Tree, V
 
 /// Fix one file of the tree; `None` for a file that turns out not to be ours.
 fn fix_entry(e: &Entry, tree: &Tree, dry_run: bool, m: Methods) -> Option<Outcome> {
-    // Only the VIs stay as packaged. Their libraries and classes still get
-    // the source-only property: measured 2026-10-25, a source-only child
-    // class (JSON Serializer) over an unmarked 9.0 parent crashes the
-    // compiler just like the link edits do, and marking both loads clean.
-    if !is_library_xml(&e.physical)
-        && let Some(why) = tree.keep_as_packaged(e)
-    {
-        return Some(Outcome { path: e.physical.clone(), result: Err(anyhow::anyhow!(why)) });
-    }
     let bytes = match std::fs::read(&e.physical) {
         Ok(b) => b,
         Err(err) => return Some(Outcome { path: e.physical.clone(), result: Err(err.into()) }),
@@ -2063,13 +1982,6 @@ mod tests {
         assert!(link_token("help/x.chm").is_none());
     }
 
-    #[test]
-    fn library_major_reads_lvversion() {
-        assert_eq!(library_major(r#"<Library LVVersion="9008000">"#), Some(9));
-        assert_eq!(library_major(r#"<LVClass LVVersion="10008000">"#), Some(10));
-        assert_eq!(library_major(r#"<LVClass LVVersion="26008000">"#), Some(26));
-        assert_eq!(library_major("<Library>"), None);
-    }
 
     #[test]
     fn salt_is_recovered_from_the_stored_hash() {
@@ -2099,7 +2011,7 @@ mod tests {
         }
         let owner = HashMap::from([(lower(class), lib.to_string())]);
         let tree =
-            Tree { files, owner, by_name: HashMap::new(), old_roots: HashSet::new(), old_methods: HashSet::new() };
+            Tree { files, owner, by_name: HashMap::new() };
         assert_eq!(tree.chain("vi.lib/P/C/C.lvclass/C.ctl"), vec![class.to_string(), lib.to_string()]);
     }
 
