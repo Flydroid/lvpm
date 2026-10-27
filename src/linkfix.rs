@@ -259,8 +259,11 @@ const COMPILED_BLOCKS: [[u8; 4]; 23] = [
     *b"CPST",
 ];
 
-/// Upper bound per terminal count when recovering the BDPW salt.
-const SALT_LIMIT: u32 = 64;
+/// Upper bound per terminal count when recovering the BDPW salt. 64 was too
+/// low: opengds_umleditor's `UMLEditor addDiagram.vi` (2020) salts with
+/// (70, 19, 7). The search runs from small counts up, so typical VIs are still
+/// found at once; only a hash that never verifies pays for the full range.
+const SALT_LIMIT: u32 = 256;
 
 fn md5_of(parts: &[&[u8]]) -> [u8; 16] {
     let mut h = Md5::new();
@@ -1999,7 +2002,12 @@ mod tests {
         salt[8..].copy_from_slice(&7u32.to_le_bytes());
         let hash1 = md5_of(&[prefix, &salt]);
         assert_eq!(find_salt(prefix, &hash1), Some(salt.to_vec()));
-        assert_eq!(find_salt(prefix, &[0u8; 16]), None);
+        // Counts above the old limit of 64 (opengds_umleditor: 70, 19, 7).
+        let mut big = [0u8; 12];
+        big[..4].copy_from_slice(&70u32.to_le_bytes());
+        big[4..8].copy_from_slice(&19u32.to_le_bytes());
+        big[8..].copy_from_slice(&7u32.to_le_bytes());
+        assert_eq!(find_salt(prefix, &md5_of(&[prefix, &big])), Some(big.to_vec()));
         // LabVIEW 2010: no salt at all.
         assert_eq!(find_salt(prefix, &md5_of(&[prefix])), Some(Vec::new()));
     }
