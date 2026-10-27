@@ -1784,56 +1784,75 @@ pub fn fix_tree(roots: &[PathBuf], dry_run: bool, m: Methods) -> Result<(Tree, V
         })
         .collect();
     entries.sort_by(|a, b| a.logical.cmp(&b.logical));
-    for e in entries {
-        // Only the VIs stay as packaged. Their libraries and classes still get
-        // the source-only property: measured 2026-10-25, a source-only child
-        // class (JSON Serializer) over an unmarked 9.0 parent crashes the
-        // compiler just like the link edits do, and marking both loads clean.
-        if !is_library_xml(&e.physical)
-            && let Some(why) = tree.keep_as_packaged(e)
-        {
-            outcomes.push(Outcome { path: e.physical.clone(), result: Err(anyhow::anyhow!(why)) });
-            continue;
-        }
-        let bytes = match std::fs::read(&e.physical) {
-            Ok(b) => b,
-            Err(err) => {
-                outcomes.push(Outcome { path: e.physical.clone(), result: Err(err.into()) });
-                continue;
-            }
-        };
-        let result = if is_library_xml(&e.physical) {
-            set_xml_source_only(&bytes).and_then(|new| {
-                let mut changes = Changes::default();
-                if let Some(new) = new {
-                    if !dry_run {
-                        let tmp = e.physical.with_extension("lvpm-tmp");
-                        std::fs::write(&tmp, &new)?;
-                        std::fs::rename(&tmp, &e.physical)?;
-                    }
-                    changes.separated = 1;
-                }
-                Ok(changes)
+
+    // Every file is fixed on its own against the read-only tree, so the files
+    // are spread over one scoped thread per core — interleaved, so the large
+    // ones do not all land on one thread — and put back in order afterwards.
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(entries.len().max(1));
+    let mut done: Vec<(usize, Outcome)> = std::thread::scope(|s| {
+        let workers: Vec<_> = (0..threads)
+            .map(|t| {
+                let (entries, tree) = (&entries, &tree);
+                s.spawn(move || {
+                    (t..entries.len())
+                        .step_by(threads)
+                        .filter_map(|i| fix_entry(entries[i], tree, dry_run, m).map(|o| (i, o)))
+                        .collect::<Vec<_>>()
+                })
             })
-        } else {
-            // A `.vim` that is really an LLB (RSRC type LVAR) is not ours.
-            if bytes.len() < 32 || &bytes[..4] != b"RSRC" || !matches!(&bytes[8..12], b"LVIN" | b"LVCC") {
-                continue;
-            }
-            fix_vi(&bytes, &e.logical, &tree, m).and_then(|(new, ch)| {
-                if let Some(new) = new
-                    && !dry_run
-                {
+            .collect();
+        workers.into_iter().flat_map(|w| w.join().expect("linkfix worker panicked")).collect()
+    });
+    done.sort_by_key(|(i, _)| *i);
+    outcomes.extend(done.into_iter().map(|(_, o)| o));
+    Ok((tree, outcomes))
+}
+
+/// Fix one file of the tree; `None` for a file that turns out not to be ours.
+fn fix_entry(e: &Entry, tree: &Tree, dry_run: bool, m: Methods) -> Option<Outcome> {
+    // Only the VIs stay as packaged. Their libraries and classes still get
+    // the source-only property: measured 2026-10-25, a source-only child
+    // class (JSON Serializer) over an unmarked 9.0 parent crashes the
+    // compiler just like the link edits do, and marking both loads clean.
+    if !is_library_xml(&e.physical)
+        && let Some(why) = tree.keep_as_packaged(e)
+    {
+        return Some(Outcome { path: e.physical.clone(), result: Err(anyhow::anyhow!(why)) });
+    }
+    let bytes = match std::fs::read(&e.physical) {
+        Ok(b) => b,
+        Err(err) => return Some(Outcome { path: e.physical.clone(), result: Err(err.into()) }),
+    };
+    let result = if is_library_xml(&e.physical) {
+        set_xml_source_only(&bytes).and_then(|new| {
+            let mut changes = Changes::default();
+            if let Some(new) = new {
+                if !dry_run {
                     let tmp = e.physical.with_extension("lvpm-tmp");
                     std::fs::write(&tmp, &new)?;
                     std::fs::rename(&tmp, &e.physical)?;
                 }
-                Ok(ch)
-            })
-        };
-        outcomes.push(Outcome { path: e.physical.clone(), result });
-    }
-    Ok((tree, outcomes))
+                changes.separated = 1;
+            }
+            Ok(changes)
+        })
+    } else {
+        // A `.vim` that is really an LLB (RSRC type LVAR) is not ours.
+        if bytes.len() < 32 || &bytes[..4] != b"RSRC" || !matches!(&bytes[8..12], b"LVIN" | b"LVCC") {
+            return None;
+        }
+        fix_vi(&bytes, &e.logical, tree, m).and_then(|(new, ch)| {
+            if let Some(new) = new
+                && !dry_run
+            {
+                let tmp = e.physical.with_extension("lvpm-tmp");
+                std::fs::write(&tmp, &new)?;
+                std::fs::rename(&tmp, &e.physical)?;
+            }
+            Ok(ch)
+        })
+    };
+    Some(Outcome { path: e.physical.clone(), result })
 }
 
 /// Group roots: every `<store>/<package>/1` under a venv store.
