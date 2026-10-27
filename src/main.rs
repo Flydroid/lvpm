@@ -71,7 +71,7 @@ struct RelinkArgs {
     keep_open: bool,
 }
 
-/// Which `[dependency-groups]` a manifest install takes. `main` names
+/// Which named dependency groups a manifest install takes. `main` names
 /// `[dependencies]`, the only group installed by default.
 #[derive(clap::Args, Clone)]
 struct GroupArgs {

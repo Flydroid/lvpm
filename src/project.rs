@@ -18,10 +18,10 @@
 //! [nipm.dependencies]               # NI Package Manager packages, reported only
 //! ni-daqmx-labview-support = "26.0"
 //!
-//! [dependency-groups.test]          # installed only when selected (--with test)
+//! [dependencies.test]                # installed only when selected (--with test)
 //! jki_lib_caraya = "*"
 //!
-//! [dependency-groups.ci]
+//! [dependencies.ci]
 //! include-groups = ["test"]         # everything in test, plus:
 //! ni_vi_analyzer_tests = "1.2.0.3"
 //! ```
@@ -98,11 +98,11 @@ pub struct Project {
     pub dependencies: Vec<(String, Constraint)>,
     /// `[nipm.dependencies]` names, for reporting only.
     pub nipm: Vec<String>,
-    /// `[dependency-groups.<name>]`, in file order.
+    /// `[dependencies.<name>]` group tables, in file order.
     pub groups: Vec<(String, Group)>,
 }
 
-/// One `[dependency-groups.<name>]` table: packages the project needs only
+/// One `[dependencies.<name>]` table: packages the project needs only
 /// sometimes (tests, CI, builds). Never installed unless selected.
 #[derive(Debug, Default, PartialEq)]
 pub struct Group {
@@ -242,8 +242,6 @@ struct File {
     sources: toml::Table,
     dependencies: toml::Table,
     nipm: NipmTable,
-    #[serde(rename = "dependency-groups")]
-    dependency_groups: toml::Table,
 }
 
 #[derive(Deserialize, Default)]
@@ -290,33 +288,38 @@ pub fn parse(text: &str) -> Result<Project> {
         }
     }
     for (name, value) in f.dependencies {
-        let c = dependency("[dependencies]", &name, value)?;
-        p.dependencies.push((name, c));
+        match value {
+            toml::Value::String(s) => {
+                let c = Constraint::parse(&s).with_context(|| format!("[dependencies] {name}"))?;
+                p.dependencies.push((name, c));
+            }
+            toml::Value::Table(t) => {
+                let label = format!("[dependencies.{name}]");
+                if name == MAIN_GROUP {
+                    bail!("{label}: `{MAIN_GROUP}` is the name of [dependencies]; pick another");
+                }
+                let mut g = Group::default();
+                for (key, value) in t {
+                    if key == INCLUDE_KEY {
+                        g.include = string_array(&label, &key, value)?;
+                    } else {
+                        let c = dependency(&label, &key, value)?;
+                        g.dependencies.push((key, c));
+                    }
+                }
+                p.groups.push((name, g));
+            }
+            other => bail!(
+                "[dependencies] {name}: expected a quoted version or group table, got {}",
+                other.type_str()
+            ),
+        }
     }
     p.nipm = f.nipm.dependencies.into_iter().map(|(k, _)| k).collect();
-    for (gname, value) in f.dependency_groups {
-        let label = format!("[dependency-groups.{gname}]");
-        if gname == MAIN_GROUP {
-            bail!("{label}: `{MAIN_GROUP}` is the name of [dependencies]; pick another");
-        }
-        let toml::Value::Table(t) = value else {
-            bail!("{label}: expected a table, got {}", value.type_str());
-        };
-        let mut g = Group::default();
-        for (key, value) in t {
-            if key == INCLUDE_KEY {
-                g.include = string_array(&label, &key, value)?;
-            } else {
-                let c = dependency(&label, &key, value)?;
-                g.dependencies.push((key, c));
-            }
-        }
-        p.groups.push((gname, g));
-    }
     for (gname, g) in &p.groups {
         for inc in &g.include {
             if !p.groups.iter().any(|(n, _)| n == inc) {
-                bail!("[dependency-groups.{gname}] {INCLUDE_KEY}: no group {inc:?}");
+                bail!("[dependencies.{gname}] {INCLUDE_KEY}: no group {inc:?}");
             }
         }
     }
@@ -439,15 +442,15 @@ ni-daqmx-labview-support = "26.0.0.49434-0+f282"
 [dependencies]
 delacor_lib_qmh = "7.1.2.1547"
 
-[dependency-groups.test]
+[dependencies.test]
 jki_lib_caraya = "*"
 oglib_error = ">=6.0"
 
-[dependency-groups.ci]
+[dependencies.ci]
 include-groups = ["test"]
 ni_vi_analyzer_tests = "1.2.0.3"
 
-[dependency-groups.build]
+[dependencies.build]
 vipm_package_builder = "*"
 "#;
 
@@ -505,21 +508,21 @@ vipm_package_builder = "*"
         assert!(p.select(&none, &strings(&["nope"]), &none).is_err());
 
         let cyc = parse(
-            "[dependency-groups.a]\ninclude-groups = [\"b\"]\n[dependency-groups.b]\ninclude-groups = [\"a\"]\n",
+            "[dependencies.a]\ninclude-groups = [\"b\"]\n[dependencies.b]\ninclude-groups = [\"a\"]\n",
         )
         .unwrap();
         let err = cyc.select(&strings(&["a"]), &none, &none).unwrap_err().to_string();
         assert!(err.contains("a -> b -> a"), "{err}");
 
         let clash = parse(
-            "[dependencies]\noglib_error = \"6.0\"\n[dependency-groups.test]\nOGLIB_ERROR = \">=6.0\"\n",
+            "[dependencies]\noglib_error = \"6.0\"\n[dependencies.test]\nOGLIB_ERROR = \">=6.0\"\n",
         )
         .unwrap();
         let err = clash.select(&strings(&["test"]), &none, &none).unwrap_err().to_string();
         assert!(err.contains("in main") && err.contains("in test"), "{err}");
 
         let same = parse(
-            "[dependencies]\noglib_error = \"6.0\"\n[dependency-groups.test]\noglib_error = \"6.0\"\n",
+            "[dependencies]\noglib_error = \"6.0\"\n[dependencies.test]\noglib_error = \"6.0\"\n",
         )
         .unwrap();
         assert_eq!(names(&same.select(&strings(&["test"]), &none, &none).unwrap()), ["oglib_error"]);
@@ -527,11 +530,10 @@ vipm_package_builder = "*"
 
     #[test]
     fn malformed_groups_are_rejected_when_read() {
-        assert!(parse("[dependency-groups.main]\nx = \"1\"\n").is_err(), "main is reserved");
-        assert!(parse("[dependency-groups]\ntest = \"x\"\n").is_err(), "group must be a table");
-        assert!(parse("[dependency-groups.t]\ninclude-groups = \"u\"\n").is_err(), "not an array");
-        assert!(parse("[dependency-groups.t]\ninclude-groups = [\"u\"]\n").is_err(), "unknown include");
-        assert!(parse("[dependency-groups.t]\nx = 1.0\n").is_err(), "unquoted version");
+        assert!(parse("[dependencies.main]\nx = \"1\"\n").is_err(), "main is reserved");
+        assert!(parse("[dependencies.t]\ninclude-groups = \"u\"\n").is_err(), "not an array");
+        assert!(parse("[dependencies.t]\ninclude-groups = [\"u\"]\n").is_err(), "unknown include");
+        assert!(parse("[dependencies.t]\nx = 1.0\n").is_err(), "unquoted version");
     }
 
     #[test]
@@ -585,15 +587,15 @@ vipm_package_builder = "*"
     fn a_shared_include_is_expanded_once_in_a_stable_order() {
         let p = parse(
             r#"
-[dependency-groups.d]
+[dependencies.d]
 pkg_d = "*"
-[dependency-groups.b]
+[dependencies.b]
 include-groups = ["d"]
 pkg_b = "*"
-[dependency-groups.c]
+[dependencies.c]
 include-groups = ["d"]
 pkg_c = "*"
-[dependency-groups.a]
+[dependencies.a]
 include-groups = ["b", "c"]
 pkg_a = "*"
 "#,

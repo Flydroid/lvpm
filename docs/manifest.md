@@ -28,7 +28,7 @@ defaults = true                   # false: only the sources listed here
 delacor_lib_qmh = "7.1.2.1547"    # exactly this version
 oglib_error = ">=6.0.1"           # the newest version satisfying the floor
 
-[dependency-groups.test]          # installed only with --with test
+[dependencies.test]                # installed only with --with test
 jki_lib_caraya = "*"              # the newest version
 
 [nipm.dependencies]               # NI Package Manager packages: reported, not installed
@@ -128,7 +128,7 @@ Rules:
 
 `lvpm install` with no package name installs the selected groups (only
 `[dependencies]` by default, see
-[`[dependency-groups]`](#dependency-groups)) as one plan with one relink
+[named dependency groups](#named-dependency-groups)) as one plan with one relink
 pass:
 
 - Each root asks for what its constraint says. A dependency declared by a
@@ -152,26 +152,26 @@ using the project's `[sources]`, but does not add it to the manifest yet.
 no longer listed. Use `lvpm uninstall <name>`, or `lvpm uninstall --all`
 followed by `lvpm install`, until `lvpm sync` exists (see [To do](#to-do)).
 
-## `[dependency-groups]`
+## Named dependency groups
 
 Named sets of packages the project needs only sometimes: test frameworks,
 CI tooling, build tools. They belong to the project and never become package
 metadata (as in [PEP 735](https://peps.python.org/pep-0735/)). Each group is
-a table with the shape of `[dependencies]`:
+a nested table under `[dependencies]` with the shape of `[dependencies]`:
 
 ```toml
 [dependencies]                    # the group "main"
 delacor_lib_qmh = "7.1.2.1547"
 
-[dependency-groups.test]
+[dependencies.test]
 jki_lib_caraya = "*"
 oglib_error = ">=6.0"
 
-[dependency-groups.ci]
+[dependencies.ci]
 include-groups = ["test"]         # everything in test, plus:
 ni_vi_analyzer_tests = "1.2.0.3"
 
-[dependency-groups.build]
+[dependencies.build]
 vipm_package_builder = "*"
 ```
 
@@ -223,7 +223,7 @@ key such as `labveiw` is silently ignored; check the install banner, which
 echoes the manifest path, project name, groups and `labview` minimum it read.
 This includes `[dev-dependencies]` in an `lvpm.toml`: only a converted
 `vipm.toml` reads that table; an `lvpm.toml` writes
-`[dependency-groups.dev]`.
+`[dependencies.dev]`.
 
 ## Compatibility with `vipm.toml`
 
@@ -277,7 +277,7 @@ written only when `venv create` has no manifest to read.
 | `"=x"`, `"^x"`, `"~x"`                 | Planned in lvpm; not documented for VIPM, which expects a plain version. Likely rejected. |
 | `">=x.y"`, `"*"`, `""`                 | Not compatible: VIPM requires an exact version and rejects empty strings when loading.     |
 | `[project] labview`                    | Not read: VIPM's key is `labview-version`, and it is a pin rather than a minimum.         |
-| `[dependency-groups.*]`                | Not documented for `vipm.toml`; VIPM's only extra table is `[dev-dependencies]`. Unknown. |
+| `[dependencies.<name>]` group tables   | VIPM documents exact-version strings only under `[dependencies]`; nested group tables are not documented and likely rejected. |
 | `[sources]`                            | Not documented for `vipm.toml`; VIPM configures repositories in the application. Unknown. |
 | `[nipm.dependencies]` strings          | Compatible.                                                                                 |
 
@@ -310,8 +310,9 @@ Keep the file as `vipm.toml` and point lvpm at it with `--manifest`: the
 conversion reads `labview-version`, `[dependencies]` and
 `[dev-dependencies]` with VIPM's meaning, so nothing needs duplicating.
 lvpm-only settings cannot go in it: the conversion rejects floors and `*`,
-reports `[sources]` and `[dependency-groups]` as not used, and VIPM's
-handling of them is undocumented.
+reports `[sources]` as not used and requires every `[dependencies]` entry to
+be an exact-version string. Nested lvpm group tables are therefore not usable
+in a `vipm.toml`; VIPM's handling of them is undocumented.
 
 The reverse, an `lvpm.toml` that VIPM also reads, works only within the
 intersection, with both LabVIEW keys:
@@ -335,7 +336,7 @@ VIPM would have to be pointed at it as a path (`vipm install
 ./path/to/lvpm.toml`); VIPM's CLI accepts a manifest path, but its handling
 of the `lvpm.toml` name is undocumented. Dev dependencies cannot be shared
 this way: VIPM reads `[dev-dependencies]`, an `lvpm.toml` reads
-`[dependency-groups.dev]`.
+`[dependencies.dev]`.
 
 This stops working once bare versions become carets in lvpm: the same line
 would pin in VIPM and float in lvpm. The `vipm.toml` route above is
@@ -390,7 +391,7 @@ Tracked in [roadmap.md](roadmap.md#the-manifest-and-the-lockfile---wip):
     `lvpm add` writes `=x` when given a version and a caret on the resolved
     version otherwise, as `cargo add` does.
 - **Dependency groups, remaining** (groups and `--with` / `--without` /
-  `--only` are done, see [`[dependency-groups]`](#dependency-groups)):
+  `--only` are done, see [named dependency groups](#named-dependency-groups)):
   - **Open decision: default groups.** Only `main` installs by default.
     Whether a `dev` group (or a `[project] default-groups` list) should be
     installed by default, as uv does, is undecided. VIPM installs its dev
