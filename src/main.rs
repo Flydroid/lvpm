@@ -338,6 +338,12 @@ enum Cmd {
     /// Import package archives into the shared cache.
     #[command(subcommand)]
     Cache(CacheCmd),
+    /// Package the project's library as dist/<name>-<version>.vip.
+    ///
+    /// Reads lvpm.toml's [distribution] and the library's member list, and
+    /// zips the members; LabVIEW is not needed. Building the same files twice
+    /// gives the same bytes.
+    Build,
     /// Start LabVIEW on the project's venv, optionally opening a project file.
     ///
     /// LabVIEW reads the venv's contents when it starts, so a LabVIEW that
@@ -653,6 +659,10 @@ fn run(cli: &Cli) -> Result<Report> {
             let text = values.iter().map(|value| format!("{value}\n")).collect();
             Report::new(text, json!({ "key": key, "values": values }))
         }
+        Cmd::Build => Ok(Report::said(
+            render::build::built(&ops::build::build(&env)?),
+            "build",
+        )),
         Cmd::Launch { lvproj } => {
             let launched = ops::launch_cmd::launch(&env, lvproj.as_deref())?;
             Ok(Report::said(render::launch::launched(&launched), "launch"))

@@ -1,7 +1,7 @@
 [project]
 name = "lvpm-ci-smoke"
 version = "0.1.0"
-labview = "2025"
+labview = ">=2025"
 
 [dependencies]
 oglib_boolean = "6.0.0.9"

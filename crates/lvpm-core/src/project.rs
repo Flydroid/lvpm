@@ -4,7 +4,7 @@
 //! [project]
 //! name = "NovaXC"
 //! version = "0.1.0"
-//! labview = "2025"                  # the oldest LabVIEW the project is meant for
+//! labview = ">=2025"                # the oldest LabVIEW the project is meant for
 //!
 //! [sources]                         # repositories beyond the public indexes
 //! mirror = "http://host:8090/files" # a hosted index.vipr folder
@@ -160,8 +160,8 @@ pub struct Project {
     pub name: Option<String>,
     /// `project.version`, when stated. Not acted on.
     pub version: Option<String>,
-    /// `project.labview`, when stated: the oldest LabVIEW the project is
-    /// meant for. A venv binds to this version or a newer one; a global
+    /// `project.labview`, when stated, as the year its `">="` names: the
+    /// oldest LabVIEW the project is meant for. A venv binds to this version or a newer one; a global
     /// install still takes its target from `--labview-version`.
     pub labview: Option<String>,
     /// `[sources]`, in file order: a name and an index URL as written.
@@ -174,6 +174,9 @@ pub struct Project {
     pub dev_dependencies: Vec<(String, Constraint)>,
     /// `[nipm.dependencies]` names, for reporting only.
     pub nipm: Vec<String>,
+    /// `[distribution]`, as written: only `lvpm build` reads it, through
+    /// `distribution::validate`.
+    pub distribution: Option<toml::Table>,
 }
 
 impl Default for Project {
@@ -187,6 +190,7 @@ impl Default for Project {
             dependencies: Vec::new(),
             dev_dependencies: Vec::new(),
             nipm: Vec::new(),
+            distribution: None,
         }
     }
 }
@@ -215,6 +219,7 @@ struct File {
     #[serde(rename = "dev-dependencies")]
     dev_dependencies: toml::Table,
     nipm: NipmTable,
+    distribution: Option<toml::Table>,
 }
 
 #[derive(Deserialize, Default)]
@@ -251,7 +256,13 @@ pub(crate) fn parse(text: &str) -> Result<Project> {
     let mut p = Project {
         name: f.project.name,
         version: f.project.version,
-        labview: f.project.labview,
+        labview: f
+            .project
+            .labview
+            .as_deref()
+            .map(labview_minimum)
+            .transpose()?,
+        distribution: f.distribution,
         ..Project::default()
     };
     for (key, value) in f.sources {
@@ -270,6 +281,23 @@ pub(crate) fn parse(text: &str) -> Result<Project> {
     p.dev_dependencies = parse_dependencies("dev-dependencies", f.dev_dependencies)?;
     p.nipm = f.nipm.dependencies.into_iter().map(|(k, _)| k).collect();
     Ok(p)
+}
+
+/// `project.labview` as written, `">=2024"`, to the year it starts at, `"2024"`:
+/// what [`Project::labview`] holds, so every reader of it sees a plain year.
+fn labview_minimum(text: &str) -> Result<String> {
+    let is_year = |s: &str| s.len() == 4 && s.bytes().all(|b| b.is_ascii_digit()) && s >= "2000";
+    let text = text.trim();
+    match text.strip_prefix(">=").map(str::trim) {
+        Some(year) if is_year(year) => Ok(year.to_string()),
+        _ if is_year(text) => {
+            bail!("project.labview = {text:?} is a minimum: write labview = \">={text}\"")
+        }
+        _ => bail!(
+            "project.labview = {text:?} is not a minimum LabVIEW year: \
+             write it like labview = \">=2024\""
+        ),
+    }
 }
 
 /// One dependency table, in file order. `table` names it in error messages.
@@ -331,13 +359,34 @@ mod tests {
     }
 
     #[test]
+    fn labview_is_a_minimum_year_and_every_other_form_is_refused_by_key() {
+        let labview = |value: &str| parse(&format!("[project]\nlabview = {value:?}\n"));
+        assert_eq!(labview(">=2024").unwrap().labview.as_deref(), Some("2024"));
+        assert_eq!(
+            labview(" >= 2024 ").unwrap().labview.as_deref(),
+            Some("2024")
+        );
+        let plain = labview("2024").unwrap_err().to_string();
+        assert!(
+            plain.contains("project.labview") && plain.contains("\">=2024\""),
+            "{plain}"
+        );
+        for value in [
+            ">2024", "^2024", "<=2024", ">=24", ">=2024.1", ">=", "", ">=1999", "soon",
+        ] {
+            let why = labview(value).unwrap_err().to_string();
+            assert!(why.contains("project.labview"), "{value:?}: {why}");
+        }
+    }
+
+    #[test]
     fn reads_every_table_in_file_order() {
         let p = parse(
             r#"
 [project]
 name = "NovaXC"
 version = "0.1.0"
-labview = "2025"
+labview = ">=2025"
 
 [sources]
 mirror = "http://host:8090/files"

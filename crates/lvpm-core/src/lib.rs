@@ -7,11 +7,13 @@
 
 pub mod cache;
 pub mod config;
+pub mod distribution;
 pub mod errors;
 pub mod fetch;
 pub mod index;
 pub mod install;
 pub mod launch;
+pub mod lvlib;
 mod paths;
 pub mod project;
 pub mod refresh;

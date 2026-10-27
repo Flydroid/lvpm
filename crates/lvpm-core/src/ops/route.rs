@@ -114,7 +114,7 @@ mod tests {
         }
     }
 
-    const PROJECT: &str = "[project]\nlabview = \"2024\"\n";
+    const PROJECT: &str = "[project]\nlabview = \">=2024\"\n";
 
     fn mode(dir: &Dir, request: InstallRequest) -> Result<InstallMode, RouteError> {
         install_mode(&dir.env(&NullSink), &request)

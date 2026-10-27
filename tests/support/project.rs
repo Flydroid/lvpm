@@ -33,7 +33,7 @@ impl ProjectManifest {
         let mut text =
             format!("[project]\nname = \"{PROJECT_NAME}\"\nversion = \"{PROJECT_VERSION}\"\n");
         if let Some(year) = &self.labview_year {
-            text.push_str(&format!("labview = \"{year}\"\n"));
+            text.push_str(&format!("labview = \">={year}\"\n"));
         }
         text.push_str("\n[sources]\n");
         for (name, url) in &self.sources {
@@ -65,7 +65,7 @@ mod tests {
             .labview("2026")
             .source("a", "http://h/a")
             .render();
-        let project = text.find("labview = \"2026\"").unwrap();
+        let project = text.find("labview = \">=2026\"").unwrap();
         assert!(project < text.find("[sources]").unwrap(), "{text}");
     }
 
@@ -85,7 +85,7 @@ mod tests {
             .source("a", "http://h/a")
             .render();
         let parsed: toml::Table = text.parse().unwrap();
-        assert_eq!(parsed["project"]["labview"].as_str(), Some("2026"));
+        assert_eq!(parsed["project"]["labview"].as_str(), Some(">=2026"));
         assert_eq!(parsed["sources"]["a"].as_str(), Some("http://h/a"));
         assert_eq!(parsed["sources"]["defaults"].as_bool(), Some(false));
     }

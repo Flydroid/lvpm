@@ -402,7 +402,7 @@ mod tests {
         }
     }
 
-    const MANIFEST: &str = "# mine\n[project]\nlabview = \"2024\"\n\n[dependencies]\n\
+    const MANIFEST: &str = "# mine\n[project]\nlabview = \">=2024\"\n\n[dependencies]\n\
                             Beta = \">=1.0\" # keep\n\n[dev-dependencies]\ncaraya = \"*\"\n";
 
     #[test]
@@ -566,7 +566,7 @@ mod tests {
         ("gamma", "1.0", ""),
     ];
 
-    const PROJECT: &str = "[project]\nlabview = \"2024\"\n\n[sources]\ndefaults = false\n\n\
+    const PROJECT: &str = "[project]\nlabview = \">=2024\"\n\n[sources]\ndefaults = false\n\n\
                            [dependencies]\nbeta = \">=1.0\"\n";
 
     fn payload_path(name: &str) -> String {

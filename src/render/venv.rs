@@ -56,6 +56,10 @@ pub(super) fn render(r: &mut Renderer, event: &Event) {
             r.line(Stream::Err, &format!("wrote {}", path.display()))
         }
         Event::VenvRemoved { dir } => r.line(Stream::Out, &format!("removed {}", dir.display())),
+        Event::VenvPortMoved { from, to } => r.line(
+            Stream::Err,
+            &format!("VI Server port {from} is reserved by Windows now; this venv uses port {to}"),
+        ),
         _ => unreachable!("routed here by Renderer::render: {event:?}"),
     }
 }
@@ -125,5 +129,13 @@ mod tests {
         let dir = PathBuf::from("proj").join(".lv-venv");
         renderer.render(&Event::VenvRemoved { dir: dir.clone() });
         assert_eq!(out.text(), format!("removed {}\n", dir.display()));
+
+        renderer.render(&Event::VenvPortMoved {
+            from: 3412,
+            to: 3413,
+        });
+        assert!(err.text().ends_with(
+            "VI Server port 3412 is reserved by Windows now; this venv uses port 3413\n"
+        ));
     }
 }

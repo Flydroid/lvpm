@@ -89,21 +89,24 @@ static FOREIGN_LISTENERS: LazyLock<HashSet<u16>> = LazyLock::new(|| {
         .map(|out| venv::listening_ports(&String::from_utf8_lossy(&out.stdout)))
         .unwrap_or_default()
 });
-/// A sandbox directory whose venv port is none of those and can be opened:
-/// with Windows' reserved ranges most of 3400–3999 may be out, so this can
-/// take dozens of tries, still far below the limit.
+/// Whether a port can be listened on: Windows reserves blocks anew at each
+/// boot, and lvpm moves a venv off a reserved port, away from `predicted_port`.
+fn binds(port: u16) -> bool {
+    std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).is_ok()
+}
+
+/// A sandbox directory whose venv port is none of those: any one path has a
+/// small chance of colliding, so this is a handful of tries at most.
 const MAX_DIR_ATTEMPTS: usize = 1_000;
 
-fn create_dir_avoiding(taken: &HashSet<u16>) -> TempDir {
+fn create_dir_avoiding(taken: &HashSet<u16>, binds: &dyn Fn(u16) -> bool) -> TempDir {
     for _ in 0..MAX_DIR_ATTEMPTS {
         let dir = tempfile::Builder::new()
             .prefix(TEMP_DIR_PREFIX)
             .tempdir()
             .expect("create the sandbox directory");
         let port = venv::predicted_port(&dir.path().join(WORK_DIR).join(VENV_DIR));
-        // A port Windows has reserved has no listener but cannot be opened
-        // either; `venv create` would step past it, away from `predicted_port`.
-        if !taken.contains(&port) && TcpListener::bind(("127.0.0.1", port)).is_ok() {
+        if !taken.contains(&port) && binds(port) {
             return dir;
         }
     }
@@ -251,7 +254,7 @@ pub struct Sandbox {
 
 impl Sandbox {
     pub fn new() -> Sandbox {
-        let dir = create_dir_avoiding(&FOREIGN_LISTENERS);
+        let dir = create_dir_avoiding(&FOREIGN_LISTENERS, &binds);
         let sandbox = Sandbox {
             dir,
             feed: OnceLock::new(),
@@ -614,10 +617,21 @@ impl Sandbox {
         });
         let port = global::vi_server_port(&ini);
         assert!(
-            global::vi_server_enabled(&ini) && process::port_is_listening(port),
-            "LabVIEW {LABVIEW_YEAR} is not answering VI Server on port {port}: start it yourself, \
-             this scenario never starts or restarts the user's LabVIEW"
+            global::vi_server_enabled(&ini),
+            "LabVIEW {LABVIEW_YEAR} has VI Server switched off in its LabVIEW.ini"
         );
+        // A run that holds the claim found nothing on the port, so it starts
+        // its own LabVIEW, and ends it when the run is over. A headless run
+        // claims nothing: its CI script started the LabVIEW.
+        if !process::port_is_listening(port) {
+            let started = global::start_claimed_labview(&labview.dir, port)
+                .unwrap_or_else(|why| panic!("{why}"));
+            assert!(
+                started,
+                "LabVIEW {LABVIEW_YEAR} is not answering VI Server on port {port}, and this run \
+                 does not hold the global LabVIEW claim, so it starts none"
+            );
+        }
         let mut learned = self.learned();
         learned.labview_port = Some(port);
         learned.store_existed = global::store_dir(&program_data).exists();
@@ -753,7 +767,7 @@ mod tests {
         let cwd = tempfile::tempdir().expect("a working directory");
         std::fs::write(
             cwd.path().join(MANIFEST_FILE),
-            "[project]\nname = \"demo\"\nlabview = \"2026\"\n",
+            "[project]\nname = \"demo\"\nlabview = \">=2026\"\n",
         )
         .expect("write a manifest");
         real_installation_risk(&args, cwd.path(), &[labview_2026()], false, true).is_some()
@@ -896,7 +910,7 @@ mod tests {
         let cwd = tempfile::tempdir().expect("a working directory");
         std::fs::write(
             cwd.path().join(MANIFEST_FILE),
-            "[project]\nname = \"demo\"\nlabview = \"2026\"\n",
+            "[project]\nname = \"demo\"\nlabview = \">=2026\"\n",
         )
         .expect("write a manifest");
         let lvpm_dir = cwd.path().join(VENV_DIR).join(".lvpm");
@@ -1261,9 +1275,14 @@ mod tests {
         let taken: HashSet<u16> = (3400..4000)
             .filter(|port| !(3500..3510).contains(port))
             .collect();
-        let dir = create_dir_avoiding(&taken);
+        let dir = create_dir_avoiding(&taken, &|_| true);
         let port = venv::predicted_port(&dir.path().join(WORK_DIR).join(VENV_DIR));
         assert!((3500..3510).contains(&port), "{port}");
+
+        // Of those, 3500..3505 cannot be bound — reserved by Windows, say.
+        let dir = create_dir_avoiding(&taken, &|p| !(3500..3505).contains(&p));
+        let port = venv::predicted_port(&dir.path().join(WORK_DIR).join(VENV_DIR));
+        assert!((3505..3510).contains(&port), "{port}");
     }
 
     #[test]
@@ -1302,7 +1321,7 @@ mod tests {
         sandbox.put_local_package(beta);
         sandbox.use_local_project(Some("2024"));
         let manifest = std::fs::read_to_string(sandbox.work_dir().join(MANIFEST_FILE)).unwrap();
-        assert!(manifest.contains("labview = \"2024\""), "{manifest}");
+        assert!(manifest.contains("labview = \">=2024\""), "{manifest}");
         let output = sandbox.run_lvpm(&["search", "a"], None);
         assert_eq!(output.exit_code, 0, "{output:?}");
         assert!(output.stdout.contains("alpha"), "{output:?}");
@@ -1326,7 +1345,7 @@ mod tests {
         let sandbox = sandbox_with_feed();
         sandbox.use_loopback_project_for_labview(LABVIEW_YEAR);
         let manifest = std::fs::read_to_string(sandbox.work_dir().join(MANIFEST_FILE)).unwrap();
-        assert!(manifest.contains("labview = \"2026\""), "{manifest}");
+        assert!(manifest.contains("labview = \">=2026\""), "{manifest}");
         sandbox.setup_lvpm(&["search", "a"]);
     }
 

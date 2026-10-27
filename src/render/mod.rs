@@ -7,6 +7,7 @@
 //! owns the two streams. `query` words what a query returns instead, and the
 //! `launch`, `venv` and `viserver` files also word what their commands return.
 
+pub mod build;
 pub mod edit;
 mod env;
 mod headless;
@@ -107,9 +108,9 @@ impl Renderer {
             | Event::UninstallFailed { .. }
             | Event::PostUninstallNotStaged { .. }
             | Event::UninstallHooksNotRun { .. } => uninstall::render(self, event),
-            Event::VenvManifestWritten { .. } | Event::VenvRemoved { .. } => {
-                venv::render(self, event)
-            }
+            Event::VenvManifestWritten { .. }
+            | Event::VenvRemoved { .. }
+            | Event::VenvPortMoved { .. } => venv::render(self, event),
             Event::LockHashing { .. }
             | Event::RequirementUnresolved { .. }
             | Event::LockChanged { .. }

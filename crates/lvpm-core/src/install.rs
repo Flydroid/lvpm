@@ -206,7 +206,7 @@ pub fn plan(roots: &Roots, spec: &Spec, zip: &mut Archive) -> Result<Plan> {
 
         for rel in &group.files {
             let rel_path = safe_relative(rel)?;
-            let entry_name = format!("File Group {}/{}", group.index, rel.replace('\\', "/"));
+            let entry_name = group.entry(rel);
 
             let Some(&zip_index) = by_lower.get(&entry_name.to_lowercase()) else {
                 missing.push(entry_name);

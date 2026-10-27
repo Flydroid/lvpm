@@ -250,6 +250,7 @@ pub fn ensure_instance(
     headless: bool,
     sink: &dyn EventSink,
 ) -> Result<Instance> {
+    let v = &crate::venv::ensure_port(v, sink)?;
     if is_listening(v.port) {
         if fresh {
             bail!(

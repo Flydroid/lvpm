@@ -119,10 +119,12 @@ Feature: The current CLI's output is recorded so later changes can be compared a
   # package `lvpm_test_fixture`: a VI under vi.lib/_lvpm_test_fixture and a real
   # PostInstall hook that writes the package name to a marker file in LabVIEW's
   # temp directory. It refuses to start when the fixture, its manifest or the
-  # marker already exists or the user's LabVIEW is not answering VI Server, it
-  # never starts or restarts a LabVIEW, and an after-hook removes the fixture
-  # even when a step fails.
-  @labview
+  # marker already exists. One test run on the machine at a time claims the
+  # global LabVIEW: a run that finds it already answering (the user's, or
+  # another worktree's) skips this scenario; a run that holds the claim starts
+  # LabVIEW itself and ends that process after the run. An after-hook removes
+  # the fixture even when a step fails.
+  @labview @global-labview
   Scenario: a package is installed into, run against and removed from the LabVIEW installation
     Given no project
     And a LabVIEW 2026 installation

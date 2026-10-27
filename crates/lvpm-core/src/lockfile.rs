@@ -403,7 +403,7 @@ mod tests {
     #[test]
     fn inputs_follow_the_manifest_in_the_manifests_spelling() {
         let project = crate::project::parse(
-            "[project]\nlabview = \"2024\"\n\n[sources]\nmirror = \"http://h/feed\"\ndefaults = false\n\n\
+            "[project]\nlabview = \">=2024\"\n\n[sources]\nmirror = \"http://h/feed\"\ndefaults = false\n\n\
              [dependencies]\nbeta = \">=1.0\"\nalpha = \"2.0\"\n\n[dev-dependencies]\ncaraya = \"*\"\n",
         )
         .unwrap();
@@ -451,7 +451,7 @@ mod tests {
     // ---- staleness ----
 
     /// The manifest `lock()` was resolved from.
-    const MANIFEST: &str = "[project]\nname = \"fixture\"\nlabview = \"2024\"\n\n\
+    const MANIFEST: &str = "[project]\nname = \"fixture\"\nlabview = \">=2024\"\n\n\
                             [sources]\nmirror = \"http://127.0.0.1:8090/feed\"\ndefaults = false\n\n\
                             [dependencies]\nbeta = \">=1.0\"\n\n\
                             [dev-dependencies]\ncaraya = \"*\"\n";
@@ -527,9 +527,9 @@ mod tests {
 
     #[test]
     fn a_changed_labview_makes_the_lock_stale_and_so_does_having_none() {
-        let reason = staleness_after(|text| text.replace("\"2024\"", "\"2025\""));
+        let reason = staleness_after(|text| text.replace(">=2024", ">=2025"));
         assert_eq!(reason, Some(StaleReason::LabviewChanged));
-        let reason = staleness_after(|text| text.replace("labview = \"2024\"\n", ""));
+        let reason = staleness_after(|text| text.replace("labview = \">=2024\"\n", ""));
         assert_eq!(reason, Some(StaleReason::LabviewChanged));
     }
 
@@ -600,7 +600,7 @@ mod tests {
     fn the_first_rule_that_fails_names_the_reason() {
         let project = crate::project::parse(
             &MANIFEST
-                .replace("\"2024\"", "\"2025\"")
+                .replace(">=2024", ">=2025")
                 .replace("defaults = false", "defaults = true"),
         )
         .unwrap();
@@ -615,7 +615,7 @@ mod tests {
 
     #[test]
     fn a_package_in_both_tables_must_be_admitted_by_both_lines() {
-        let both = "[project]\nlabview = \"2024\"\n\n[sources]\ndefaults = false\n\n\
+        let both = "[project]\nlabview = \">=2024\"\n\n[sources]\ndefaults = false\n\n\
                     [dependencies]\ngamma = \">=1.0\"\n\n[dev-dependencies]\ngamma = \"1.5\"\n";
         let mut lock = Lockfile {
             version: FORMAT_VERSION,

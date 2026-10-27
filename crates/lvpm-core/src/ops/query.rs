@@ -248,7 +248,7 @@ mod tests {
         use std::io::Write;
 
         let cwd = super::super::testing::scratch_dir(tag);
-        let manifest = "[project]\nlabview = \"2024\"\n\n[sources]\ndefaults = false\n";
+        let manifest = "[project]\nlabview = \">=2024\"\n\n[sources]\ndefaults = false\n";
         std::fs::write(cwd.join("lvpm.toml"), manifest).unwrap();
         let mut local_sources = Vec::new();
         for (i, packages) in folders.iter().enumerate() {

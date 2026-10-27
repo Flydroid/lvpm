@@ -1105,7 +1105,7 @@ mod tests {
         }
     }
 
-    const MANIFEST: &str = "[project]\nlabview = \"2023\"\n\n[sources]\ndefaults = false\n\n\
+    const MANIFEST: &str = "[project]\nlabview = \">=2023\"\n\n[sources]\ndefaults = false\n\n\
                             [dependencies]\ngamma = \"*\"\n";
 
     #[test]
@@ -1180,16 +1180,22 @@ mod tests {
 
         for (text, expected) in [
             ("[project]\nname = \"x\"\n", "no labview"),
-            ("[project]\nlabview = \"soon\"\n", "not a year"),
+            (
+                "[project]\nlabview = \"soon\"\n",
+                "not a minimum LabVIEW year",
+            ),
         ] {
             let project = ProjectDir::new("manifest", text, &[]);
-            let why = lock(&project.env(&sink)).unwrap_err().to_string();
+            let why = format!(
+                "{:#}",
+                anyhow::Error::from(lock(&project.env(&sink)).unwrap_err())
+            );
             assert!(why.contains(expected), "{why}");
             assert!(!project.lock_path().exists());
         }
     }
 
-    const BOTH_TABLES: &str = "[project]\nlabview = \"2023\"\n\n[sources]\ndefaults = false\n\n\
+    const BOTH_TABLES: &str = "[project]\nlabview = \">=2023\"\n\n[sources]\ndefaults = false\n\n\
                                [dependencies]\ngamma = \">=1.0\"\n\n\
                                [dev-dependencies]\ncaraya = \"*\"\ngamma = \"1.5\"\n";
     const GAMMAS: &[Fixture<'static>] = &[
@@ -1456,7 +1462,7 @@ mod tests {
             ("second", "beta = \"*\"\nalpha = \">=1.0\"\n"),
         ] {
             let manifest = format!(
-                "[project]\nlabview = \"2023\"\n\n[sources]\ndefaults = false\n\n\
+                "[project]\nlabview = \">=2023\"\n\n[sources]\ndefaults = false\n\n\
                  [dependencies]\n{lines}"
             );
             let project = ProjectDir::new(
@@ -1563,7 +1569,7 @@ mod tests {
 
     #[test]
     fn a_conflict_names_the_version_an_upgrade_asked_for_as_a_pin_and_manifest_lines_as_lines() {
-        let manifest = "[project]\nlabview = \"2023\"\n\n[sources]\ndefaults = false\n\n\
+        let manifest = "[project]\nlabview = \">=2023\"\n\n[sources]\ndefaults = false\n\n\
                         [dependencies]\nalpha = \"1.0\"\nbeta = \">=1.0\"\n";
         let project = ProjectDir::new(
             "upgrade-conflict",
@@ -1614,7 +1620,7 @@ mod tests {
         );
     }
 
-    const PINNED_GAMMA: &str = "[project]\nlabview = \"2023\"\n\n[sources]\ndefaults = false\n\n\
+    const PINNED_GAMMA: &str = "[project]\nlabview = \">=2023\"\n\n[sources]\ndefaults = false\n\n\
                                 [dependencies]\ngamma = \"1.0\"\n";
 
     #[test]
@@ -1800,7 +1806,7 @@ mod tests {
 
     #[test]
     fn a_cancel_before_a_feed_is_asked_is_a_cancelled_lock_and_asks_no_feed() {
-        let manifest = "[project]\nlabview = \"2023\"\n\n[sources]\ndefaults = false\n\
+        let manifest = "[project]\nlabview = \">=2023\"\n\n[sources]\ndefaults = false\n\
                         dead = \"http://127.0.0.1:1/feed\"\n\n[dependencies]\ngamma = \"*\"\n";
         let project = ProjectDir::new("cancel-feed", manifest, &[]);
         let sink = Recorder::default();
@@ -1867,7 +1873,7 @@ mod tests {
     fn a_manifest_with_no_dependencies_locks_to_an_empty_lock() {
         let project = ProjectDir::new(
             "empty",
-            "[project]\nlabview = \"2023\"\n\n[sources]\ndefaults = false\n",
+            "[project]\nlabview = \">=2023\"\n\n[sources]\ndefaults = false\n",
             &[],
         );
         let sink = Recorder::default();

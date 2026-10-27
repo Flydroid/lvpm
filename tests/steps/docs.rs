@@ -222,3 +222,50 @@ async fn the_section_shows_the_quoted_example(world: &mut CliWorld, example: Str
         );
     }
 }
+
+/// Every key `[distribution]` and `[distribution.vip]` accept.
+const DISTRIBUTION_KEYS: &[&str] = &[
+    "top-level-library",
+    "kinds",
+    "formats",
+    "name",
+    "vendor",
+    "display-name",
+    "install-dir",
+    "dependency-names",
+];
+
+#[then(
+    "docs/usage.md has a command-table line for lvpm build and documents the [distribution] keys"
+)]
+async fn usage_documents_build(_: &mut CliWorld) {
+    let guide = usage_guide();
+    assert!(
+        guide.contains("| `lvpm build` |"),
+        "no command-table line for lvpm build"
+    );
+    let section = guide
+        .split_once("## Building a package")
+        .map(|(_, rest)| rest.split(" ## ").next().unwrap_or(rest))
+        .expect("usage.md has a Building a package section");
+    let missing: Vec<_> = DISTRIBUTION_KEYS
+        .iter()
+        .filter(|key| {
+            !section.contains(&format!(" {key} =")) && !section.contains(&format!(".{key}]"))
+        })
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "[distribution] keys not documented: {missing:?}"
+    );
+}
+
+#[then("README.md shows lvpm build")]
+async fn readme_shows_build(_: &mut CliWorld) {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("README.md");
+    let text = std::fs::read_to_string(&path).expect("read README.md");
+    assert!(
+        text.contains("$ lvpm build"),
+        "README.md does not show lvpm build"
+    );
+}

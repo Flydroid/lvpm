@@ -3,6 +3,7 @@
 //! call core in-process.
 
 pub mod add_remove;
+pub mod build;
 pub mod cancel;
 pub mod core_io;
 pub mod destination;

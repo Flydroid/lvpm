@@ -3,6 +3,7 @@
 //! front end called it.
 
 pub mod add_remove;
+pub mod build;
 pub mod env;
 pub mod hooks;
 pub mod install;

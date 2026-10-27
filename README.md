@@ -76,6 +76,13 @@ $ lvpm launch MyProject.lvproj              # a LabVIEW that sees the venv
 
 Commit `lvpm.toml` and `lvpm.lock` ([The lock file](docs/usage.md#the-lock-file)).
 
+To package your own library, add a `[distribution]` table to `lvpm.toml`
+([Building a package](docs/usage.md#building-a-package)), then:
+
+```console
+$ lvpm build                                # dist/<name>-<version>.vip, no LabVIEW needed
+```
+
 ## Why
 
 LabVIEW packaging was open before it was closed. The **OpenG Package Tools**
@@ -152,6 +159,10 @@ change to them is a breaking change and gets a major version.
   locations (`<OS ...>`, `<temp>`) are skipped. Both are recorded in the
   manifest and shown by `lvpm list`. No warning yet when a global copy of a
   venv package shadows it.
+
+- `lvpm build` packages one library's members as a `.vip`: no build hooks,
+  no probes or templates from outside the library, no `.lvpkg`, and
+  installing the result with VIPM itself is not tested yet.
 
 [docs/roadmap.md](docs/roadmap.md) has what is planned.
 

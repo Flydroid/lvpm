@@ -51,7 +51,7 @@ Feature: lvpm lock writes the complete resolved set
   Scenario: a manifest without labview is refused with an example
     Given a project manifest without labview
     When I run "lvpm lock"
-    Then the command fails with: add labview = "<year>" under [project] in lvpm.toml
+    Then the command fails with: add labview = ">=<year>" under [project] in lvpm.toml
     And no lvpm.lock exists
 
   Scenario: unreachable archives are all reported in one error

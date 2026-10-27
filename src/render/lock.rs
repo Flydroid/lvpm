@@ -109,13 +109,13 @@ pub(super) fn error_for(error: &LockError, rerun: &str) -> String {
         }
         LockError::NoLabview => format!(
             "{error}, so lvpm does not know which LabVIEW to lock for\n\
-             next: add labview = \"<year>\" under [project] in lvpm.toml (for example \
-             labview = \"2024\"), then run {rerun} again"
+             next: add labview = \">=<year>\" under [project] in lvpm.toml (for example \
+             labview = \">=2024\"), then run {rerun} again"
         ),
         LockError::LabviewNotAYear { .. } => format!(
             "{error}\n\
-             next: write labview = \"<year>\" under [project] in lvpm.toml (for example \
-             labview = \"2024\"), then run {rerun} again"
+             next: write labview = \">=<year>\" under [project] in lvpm.toml (for example \
+             labview = \">=2024\"), then run {rerun} again"
         ),
         LockError::Conflict(conflict) => conflict_text(conflict, rerun),
         LockError::ArchivesUnavailable(failures) => archives_text(failures, rerun),
@@ -614,7 +614,7 @@ mod tests {
     fn a_manifest_without_labview_is_told_what_to_add() {
         let text = error(&LockError::NoLabview);
         assert!(
-            text.contains("add labview = \"<year>\" under [project] in lvpm.toml"),
+            text.contains("add labview = \">=<year>\" under [project] in lvpm.toml"),
             "{text}"
         );
         assert!(text.ends_with("then run `lvpm lock` again"), "{text}");

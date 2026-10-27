@@ -14,8 +14,12 @@ and [SHA256SUMS](../../fixtures/pilots/SHA256SUMS) holds each one's SHA-256. Eve
 scenario that reads them checks them against it first, so a changed archive fails the
 run instead of testing something else. They are committed rather than
 downloaded because the harness keeps `lvpm` off the network, and 2.4 MB is
-small. All four are BSD-licensed (HSE Logger: BSD; the LabVIEW Open Source
-Project packages: 0BSD), and each archive carries its own `license` file.
+small. Each archive carries its own `license` file. The LabVIEW Open Source
+Project packages are 0BSD. HSE Logger's spec says "BSD License", but its
+`license` file is a modified BSD that forbids redistribution "in source
+form". A `.vip` holds source VIs, so whether committing this archive is
+allowed is an open question for its vendor (see the S1 decisions log). The license
+file was read on 2026-10-26.
 
 | Archive | Why it is here |
 |---|---|
@@ -32,9 +36,20 @@ version, do the same, copy the archive here, regenerate `SHA256SUMS` with
 
 ## The pilot sources
 
-S1, S5 and S9 build and check the pilots' sources. They are pinned by commit,
-not committed here; the slice that first needs them decides how it fetches
-them.
+S1, S5 and S9 build and check the pilots' sources. They are pinned by commit
+and not committed here. Pilot A's LICENSE forbids redistributing it in source
+form, so the harness never fetches or copies it anywhere but a test sandbox.
+The `@pilot-source` scenarios read it from a checkout that you make:
+
+```console
+git clone https://code.hampel-soft.com/open-source/hse-logger
+git -C hse-logger checkout f7cc16a391faa1e982b54ae22d2f43c9df1ef581
+LVPM_TEST_PILOT_A=<path to hse-logger> cargo test --test acceptance
+```
+
+The scenario checks that the checkout's HEAD is the pinned commit. Without
+`LVPM_TEST_PILOT_A`, the harness does not run these scenarios and says how
+many it left out.
 
 | Pilot | Repository | Tag | Commit |
 |---|---|---|---|
@@ -47,7 +62,7 @@ them.
 LVPM_TEST_LABVIEW=1 cargo test --test acceptance
 ```
 
-The `@labview` scenario is also `@interactive-labview`, so headless CI skips it. It needs:
+The `@labview` scenarios are also `@interactive-labview`, so headless CI skips them. They need:
 
 - LabVIEW 2026, with none of the pilots installed in it (`vi.lib`, `user.lib`, `instr.lib`). The real
   installation wins over a venv, so a pilot there would be tested in place of
@@ -59,5 +74,11 @@ It installs without relinking, starts a LabVIEW on the venv, waits for its VI
 Server port, and only then runs `LabVIEWCLI -OperationName MassCompile` on
 the venv's packages, so LabVIEWCLI never starts a LabVIEW of its own. The
 venv is a scratch copy, so the compile works in place. A failed compile names
-the VIs the log calls bad. The build and publish scenarios are tagged
-`@pending-s1` and `@pending-s2` until those slices land.
+the VIs the log calls bad. The publish scenario is tagged `@pending-s2` until
+that slice lands.
+
+Scenarios that use the installation's own LabVIEW first claim it with a file
+in `%TEMP%`, so two test runs never share one. If another run holds the
+claim, or something already answers VI Server on the installation's port
+(your own LabVIEW, say), they are not run and the harness says why. The
+LabVIEW the run started is ended when the run ends, even after a panic.

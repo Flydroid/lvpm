@@ -25,6 +25,7 @@ pub fn launch(env: &OpEnv, lvproj: Option<&Path>) -> Result<Launched> {
     let Destination::Venv(venv) = env.destination()? else {
         bail!("launch needs a venv: run it inside a project that has one, or pass --project <DIR>");
     };
+    let venv = crate::venv::ensure_port(&venv, env.sink)?;
     if launch::is_listening(venv.port) {
         bail!(
             "a LabVIEW is already running on this venv (VI Server port {}) — open the project from \

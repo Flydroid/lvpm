@@ -74,8 +74,8 @@ pub enum LockError {
     /// The manifest does not say which LabVIEW to lock for.
     #[error("lvpm.toml has no labview")]
     NoLabview,
-    /// The manifest's `labview` is not a year.
-    #[error("labview = {value:?} in lvpm.toml is not a year")]
+    /// The manifest's `labview` is not a minimum year such as `">=2025"`.
+    #[error("labview = {value:?} in lvpm.toml is not a minimum LabVIEW year")]
     LabviewNotAYear { value: String },
     /// No set of versions satisfies the manifest.
     #[error("{0}")]

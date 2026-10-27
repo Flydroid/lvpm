@@ -15,9 +15,9 @@ async fn fixture_in_local_folder(world: &mut CliWorld) {
         .put_local_package(FixturePackage::find(FIXTURE_NAME, "1.0"));
 }
 
-/// Refuses to go on when the fixture or its marker already exists, or when
-/// the user's LabVIEW is not answering VI Server: nothing here starts or
-/// restarts a LabVIEW.
+/// Refuses to go on when the fixture or its marker already exists. Starts the
+/// installation's LabVIEW when this run holds the global LabVIEW claim and
+/// nothing answers yet; the run ends that process when it is over.
 #[given("the LabVIEW installation is free of the lvpm test fixture")]
 async fn installation_is_free_of_the_fixture(world: &mut CliWorld) {
     world.sandbox.require_clean_labview_installation();

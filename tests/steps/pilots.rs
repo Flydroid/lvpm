@@ -3,12 +3,13 @@
 
 use crate::CliWorld;
 use crate::support::pilots::{
-    CHECKSUMS_FILE, archives, bad_vi_lines, check_checksums, find_files_named, labviewcli,
-    library_names, pilots_dir,
+    CHECKSUMS_FILE, PILOT_A_ARCHIVE, PILOT_A_COMMIT, archives, bad_vi_lines, check_checksums,
+    copy_tree, find_files_named, group_zero_files, labviewcli, library_names, pilots_dir,
 };
 use crate::support::process::{self, port_is_listening};
 use crate::support::project::{MANIFEST_FILE, ProjectManifest};
 use crate::support::sandbox::LABVIEW_YEAR;
+use crate::support::selection::PILOT_A_ENV_VAR;
 use crate::support::venv::{self, VENV_DIR};
 use cucumber::{given, then, when};
 use std::path::{Path, PathBuf};
@@ -30,6 +31,20 @@ const PROJECT_B_PACKAGES: [&str; 4] = [
 ];
 const PILOT_SOURCE_DIR: &str = "pilots";
 const COPIES_DIR: &str = "pilot-copies";
+const PILOT_A_DIR: &str = "pilot-a";
+/// Pilot A's `lvpm.toml`: its repository has none, and this is what it would hold.
+const PILOT_A_MANIFEST: &str = r#"[project]
+name = "hse_lib_hse_logger"
+version = "2.2.2.114"
+labview = ">=2016"
+
+[distribution]
+top-level-library = "Source/HSE-Logger/hse-logger.lvlib"
+
+[distribution.vip]
+vendor = "Hampel Software Engineering"
+display-name = "HSE Logger"
+"#;
 const MASS_COMPILE_LOG: &str = "mass-compile.log";
 /// A LabVIEW loading a venv's addons takes a while to open VI Server.
 const VI_SERVER_TIMEOUT: Duration = Duration::from_secs(300);
@@ -41,6 +56,8 @@ const POLL_INTERVAL: Duration = Duration::from_secs(1);
 pub struct PilotState {
     copies: Option<PathBuf>,
     check: Option<Result<(), String>>,
+    /// The package `lvpm build` wrote for pilot A.
+    pilot_a: Option<PathBuf>,
 }
 
 #[given("the pilot archives")]
@@ -124,6 +141,10 @@ async fn project_b(world: &mut CliWorld) {
     if let Err(why) = check_checksums(&source) {
         panic!("the pilot archives do not match their checksums: {why}");
     }
+    write_project_b_manifest(world);
+}
+
+fn write_project_b_manifest(world: &CliWorld) {
     let mut manifest = ProjectManifest::new().labview(LABVIEW_YEAR).render();
     manifest.push_str("\n[dependencies]\n");
     for (name, version) in PROJECT_B_DEPENDENCIES {
@@ -222,4 +243,109 @@ fn copy_pilots_to(dir: &Path) {
     }
     std::fs::copy(pilots_dir().join(CHECKSUMS_FILE), dir.join(CHECKSUMS_FILE))
         .expect("copy the checksums");
+}
+
+/// Pilot A's source may not be redistributed, so it is read from the checkout
+/// `LVPM_TEST_PILOT_A` names and copied into the sandbox, where the build
+/// writes its `dist/`.
+#[given("pilot A's repository at its pinned commit")]
+async fn pilot_a_source(_: &mut CliWorld) {
+    pilot_a_checkout();
+}
+
+#[when("lvpm build runs in pilot A")]
+async fn build_pilot_a(world: &mut CliWorld) {
+    build_pilot_a_in_sandbox(world);
+}
+
+#[given("pilot A built with lvpm build")]
+async fn pilot_a_built(world: &mut CliWorld) {
+    build_pilot_a_in_sandbox(world);
+}
+
+#[then(
+    expr = "the package's files are the vi.lib files of File Group 0 of {string}, except the ones its library does not list:"
+)]
+async fn pilot_a_files(world: &mut CliWorld, published: String, step: &cucumber::gherkin::Step) {
+    let built = world.pilots.pilot_a.as_ref().expect("pilot A was built");
+    if let Err(why) = check_checksums(&pilots_dir()) {
+        panic!("{why}");
+    }
+    let left_out: Vec<String> = step
+        .table
+        .as_ref()
+        .expect("a table of the files left out")
+        .rows
+        .iter()
+        .map(|row| row[0].clone())
+        .collect();
+    let published = group_zero_files(&pilots_dir().join(published), "vi.lib/");
+    for file in &left_out {
+        assert!(
+            published.contains(file),
+            "{file} is not in the published package"
+        );
+    }
+    let want: Vec<&String> = published.iter().filter(|f| !left_out.contains(f)).collect();
+    let got = group_zero_files(built, "");
+    let got: Vec<&String> = got.iter().collect();
+    assert_eq!(
+        got, want,
+        "the package's files differ from the published ones"
+    );
+}
+
+#[given(
+    "project B depending on both pilots, with a folder feed of the built pilot A and the other pilot archives"
+)]
+async fn project_b_with_built_pilot_a(world: &mut CliWorld) {
+    let built = world.pilots.pilot_a.clone().expect("pilot A was built");
+    if let Err(why) = check_checksums(&pilots_dir()) {
+        panic!("{why}");
+    }
+    let source = world.sandbox.add_local_source_folder(PILOT_SOURCE_DIR);
+    for archive in archives(&pilots_dir()) {
+        let name = archive.file_name().expect("a file name");
+        if name != PILOT_A_ARCHIVE {
+            std::fs::copy(&archive, source.join(name)).expect("copy a pilot archive");
+        }
+    }
+    std::fs::copy(&built, source.join(PILOT_A_ARCHIVE)).expect("copy the built pilot A");
+    write_project_b_manifest(world);
+}
+
+/// The checkout `LVPM_TEST_PILOT_A` names, once its HEAD is the pinned commit.
+fn pilot_a_checkout() -> PathBuf {
+    let checkout = PathBuf::from(
+        std::env::var_os(PILOT_A_ENV_VAR)
+            .unwrap_or_else(|| panic!("{PILOT_A_ENV_VAR} names no checkout of pilot A")),
+    );
+    let head = Command::new("git")
+        .arg("-C")
+        .arg(&checkout)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .unwrap_or_else(|e| panic!("git rev-parse in {}: {e}", checkout.display()));
+    let head = String::from_utf8_lossy(&head.stdout).trim().to_string();
+    assert_eq!(
+        head,
+        PILOT_A_COMMIT,
+        "{PILOT_A_ENV_VAR}={} is not at pilot A's pinned commit",
+        checkout.display()
+    );
+    checkout
+}
+
+fn build_pilot_a_in_sandbox(world: &mut CliWorld) {
+    let dir = world.sandbox.root().join(PILOT_A_DIR);
+    copy_tree(&pilot_a_checkout().join("Source"), &dir.join("Source"));
+    std::fs::write(dir.join(MANIFEST_FILE), PILOT_A_MANIFEST).expect("write pilot A's manifest");
+    let output = world.sandbox.run_lvpm_in(&dir, &["build"], None);
+    assert_eq!(
+        output.exit_code, 0,
+        "lvpm build failed in pilot A: {output:?}"
+    );
+    let built = dir.join("dist").join(PILOT_A_ARCHIVE);
+    assert!(built.is_file(), "lvpm build wrote no {}", built.display());
+    world.pilots.pilot_a = Some(built);
 }

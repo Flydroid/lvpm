@@ -157,7 +157,11 @@ async fn relax_a_constraint(world: &mut CliWorld, name: String, constraint: Stri
 #[when(expr = "I change labview to {string}")]
 async fn change_labview(world: &mut CliWorld, year: String) {
     world.edit_manifest(|text| {
-        replaced(text, "labview = \"2024\"", &format!("labview = \"{year}\""))
+        replaced(
+            text,
+            "labview = \">=2024\"",
+            &format!("labview = \">={year}\""),
+        )
     });
 }
 

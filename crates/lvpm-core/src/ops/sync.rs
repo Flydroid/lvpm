@@ -1001,7 +1001,7 @@ mod tests {
 
     fn manifest(sources: &str) -> Project {
         crate::project::parse(&format!(
-            "[project]\nlabview = \"2024\"\n\n[sources]\n{sources}defaults = false\n"
+            "[project]\nlabview = \">=2024\"\n\n[sources]\n{sources}defaults = false\n"
         ))
         .unwrap()
     }
@@ -1249,7 +1249,8 @@ mod tests {
         }
     }
 
-    const MANIFEST_HEAD: &str = "[project]\nlabview = \"2024\"\n\n[sources]\ndefaults = false\n\n";
+    const MANIFEST_HEAD: &str =
+        "[project]\nlabview = \">=2024\"\n\n[sources]\ndefaults = false\n\n";
 
     /// A project: a manifest depending on `dependencies`, and a folder of the
     /// packages alpha 1.0 and 2.0, beta 1.0 (needing alpha), gamma 1.0.

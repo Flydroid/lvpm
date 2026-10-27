@@ -18,6 +18,7 @@ use crate::project;
 use crate::target::{self, LvTarget, Roots};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use serde::{Deserialize, Serialize};
+use std::net::{Ipv4Addr, TcpListener};
 use std::path::{Path, PathBuf};
 
 /// `LVAddons.AdditionalLocations` exists from LabVIEW 2024 Q1 on.
@@ -238,7 +239,7 @@ pub fn create(
         std::fs::write(
             &manifest_path,
             format!(
-                "[project]\nname = \"{name}\"\nlabview = \"{}\"\n\n[dependencies]\n",
+                "[project]\nname = \"{name}\"\nlabview = \">={}\"\n\n[dependencies]\n",
                 target.year()
             ),
         )
@@ -253,7 +254,7 @@ pub fn create(
     // The payload is disposable and machine-bound: the manifests inside hold
     // absolute paths. Self-ignoring, the way cargo's `target/` is.
     std::fs::write(dir.join(".gitignore"), "*\n")?;
-    let port = openable_from(port_for(&dir));
+    let port = free_port(&dir)?;
     let b = Binding {
         target_key: target.key(),
         target_path: target.path.to_string_lossy().into_owned(),
@@ -293,9 +294,11 @@ pub fn remove(v: &Venv, confirmed: bool, sink: &dyn EventSink) -> Result<()> {
     Ok(())
 }
 
-/// A VI Server port of the venv's own, stable across runs so that a launched
-/// instance and a later `lvpm install` agree on where to meet: a hash of the
-/// venv's path into 3400–3999, clear of the 33xx LabVIEW's own defaults use.
+/// Where a venv's VI Server port search starts: a hash of the venv's path into
+/// 3400–3999, clear of the 33xx LabVIEW's own defaults use. The port the venv
+/// stores is [`free_port`]'s pick from here, since Windows reserves blocks of
+/// ports anew at each boot and a LabVIEW told to listen on one never starts
+/// VI Server.
 pub(crate) fn port_for(dir: &Path) -> u16 {
     let key = dir.to_string_lossy().to_lowercase().replace('\\', "/");
     // FNV-1a, 64-bit — small, dependency-free, and good enough to spread a
@@ -305,17 +308,73 @@ pub(crate) fn port_for(dir: &Path) -> u16 {
         h ^= b as u64;
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
     }
-    3400 + (h % 600) as u16
+    FIRST_PORT + (h % PORT_RANGE as u64) as u16
 }
 
-/// The first port from `start` on, round 3400–3999, that this machine lets
-/// LabVIEW open, or `start` if none is: a reserved or taken port would leave
-/// the venv's LabVIEW without VI Server. Stored at create, so it stays stable.
-fn openable_from(start: u16) -> u16 {
-    (0..600)
-        .map(|i| 3400 + (start - 3400 + i) % 600)
-        .find(|&p| crate::launch::can_open(p))
-        .unwrap_or(start)
+const FIRST_PORT: u16 = 3400;
+const PORT_RANGE: u16 = 600;
+
+/// The first port from `start` on, through the venv range and round to its
+/// start, that `bindable` accepts.
+fn pick_port(start: u16, bindable: &dyn Fn(u16) -> bool) -> Option<u16> {
+    (0..PORT_RANGE)
+        .map(|i| FIRST_PORT + (start - FIRST_PORT + i) % PORT_RANGE)
+        .find(|&p| bindable(p))
+}
+
+/// Whether this process could listen on `port`. Loopback only: a wildcard bind
+/// would raise a firewall prompt, and a reserved port refuses either.
+fn binds(port: u16) -> bool {
+    TcpListener::bind((Ipv4Addr::LOCALHOST, port)).is_ok()
+}
+
+/// A port for `dir`'s venv that nothing holds and Windows has not reserved: the
+/// hashed one if it can be, else the next in range, else one the OS assigns.
+fn free_port(dir: &Path) -> Result<u16> {
+    let free = |p| binds(p) && !crate::launch::is_listening(p);
+    match pick_port(port_for(dir), &free) {
+        Some(p) => Ok(p),
+        None => Ok(TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?
+            .local_addr()?
+            .port()),
+    }
+}
+
+/// The venv with a port LabVIEW can listen on, moved and saved if the stored one
+/// became reserved since. A port a LabVIEW already listens on is kept. Called
+/// only before a LabVIEW is started or contacted: reading a venv changes nothing.
+pub fn ensure_port(v: &Venv, sink: &dyn EventSink) -> Result<Venv> {
+    let keep = binds(v.port) || crate::launch::is_listening(v.port);
+    repair_port(v, keep, || free_port(&v.dir), sink)
+}
+
+fn repair_port(
+    v: &Venv,
+    keep: bool,
+    next: impl FnOnce() -> Result<u16>,
+    sink: &dyn EventSink,
+) -> Result<Venv> {
+    if keep {
+        return Ok(v.clone());
+    }
+    let to = next()?;
+    let bp = binding_path(&v.dir);
+    let mut b: Binding = serde_json::from_str(&std::fs::read_to_string(&bp)?)
+        .with_context(|| format!("reading {}", bp.display()))?;
+    b.port = to;
+    // Staged and renamed: a reader racing the repair sees the old or new binding, never half.
+    let staged = bp.with_extension(format!("json.{}.tmp", std::process::id()));
+    std::fs::write(&staged, serde_json::to_string_pretty(&b)?)
+        .and_then(|()| std::fs::rename(&staged, &bp))
+        .inspect_err(|_| {
+            std::fs::remove_file(&staged).ok();
+        })
+        .with_context(|| format!("writing {}", bp.display()))?;
+    sink.emit(Event::VenvPortMoved { from: v.port, to });
+    Ok(Venv {
+        port: to,
+        ..v.clone()
+    })
 }
 
 #[cfg(test)]
@@ -348,13 +407,44 @@ mod tests {
     }
 
     #[test]
-    fn a_port_that_cannot_be_opened_gives_way_to_the_next_one_that_can() {
-        let start = (3400..4000).find(|&p| crate::launch::can_open(p)).unwrap();
-        let _held = std::net::TcpListener::bind(("127.0.0.1", start)).unwrap();
-        let port = openable_from(start);
-        assert_ne!(port, start);
-        assert!((3400..4000).contains(&port));
-        assert!(crate::launch::can_open(port));
+    fn a_port_is_picked_from_the_hash_on_skipping_what_cannot_be_bound_and_wrapping() {
+        assert_eq!(pick_port(3412, &|_| true), Some(3412));
+        assert_eq!(
+            pick_port(3412, &|p| !(3412..=3417).contains(&p)),
+            Some(3418)
+        );
+        assert_eq!(pick_port(3999, &|p| p != 3999), Some(3400));
+        assert_eq!(pick_port(3412, &|_| false), None);
+    }
+
+    #[test]
+    fn a_stored_port_that_became_reserved_is_moved_saved_and_reported_and_a_good_one_kept() {
+        use crate::ops::testing::Recorded;
+        let root = scratch_dir("port-move");
+        let v = create(
+            &root,
+            Some("2026"),
+            Path::new(".lv-venv"),
+            &[labview_2026()],
+            &NullSink,
+        )
+        .unwrap();
+        let sink = Recorded::default();
+
+        let kept = repair_port(&v, true, || panic!("not asked for a new port"), &sink).unwrap();
+        assert_eq!(kept.port, v.port);
+        assert!(sink.events().is_empty());
+
+        let to = if v.port == 3999 { 3400 } else { v.port + 1 };
+        let moved = repair_port(&v, false, || Ok(to), &sink).unwrap();
+        assert_eq!(moved.port, to);
+        let found = load(&root, Path::new(".lv-venv"), &[labview_2026()]).unwrap();
+        assert_eq!(found.port, to, "the binding file has the new port");
+        assert!(matches!(
+            sink.events()[..],
+            [Event::VenvPortMoved { from, to: t }] if from == v.port && t == to
+        ));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -393,11 +483,14 @@ mod tests {
 
     #[test]
     fn a_venv_is_refused_for_a_manifest_labview_that_is_no_year_or_newer_than_the_installation() {
-        for (labview, said) in [("soon", "not a year"), ("2030", "is older than")] {
+        for (labview, said) in [
+            ("soon", "not a minimum LabVIEW year"),
+            ("2030", "is older than"),
+        ] {
             let repo = scratch_dir(&format!("minimum-{labview}"));
             std::fs::write(
                 repo.join(project::FILE_NAME),
-                format!("[project]\nlabview = \"{labview}\"\n"),
+                format!("[project]\nlabview = \">={labview}\"\n"),
             )
             .unwrap();
             let why = create(
@@ -407,8 +500,8 @@ mod tests {
                 &[labview_2026()],
                 &NullSink,
             )
-            .unwrap_err()
-            .to_string();
+            .unwrap_err();
+            let why = format!("{why:#}");
             assert!(why.contains(said), "{labview}: {why}");
             assert!(!repo.join(".lv-venv").exists());
             let _ = std::fs::remove_dir_all(&repo);

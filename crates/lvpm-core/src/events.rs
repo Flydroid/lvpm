@@ -53,6 +53,9 @@ pub enum Event {
     VenvManifestWritten { path: PathBuf },
     /// The venv directory was deleted.
     VenvRemoved { dir: PathBuf },
+    /// The venv's stored VI Server port can no longer be listened on — Windows
+    /// reserved it since — so the venv moved to `to` before LabVIEW started.
+    VenvPortMoved { from: u16, to: u16 },
 
     // ---- launch ----
     /// A LabVIEW is being started on a venv. `labview` is the installation's

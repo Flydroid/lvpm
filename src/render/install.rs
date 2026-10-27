@@ -33,7 +33,7 @@ pub(super) fn render(r: &mut Renderer, event: &Event) {
             if let Some(v) = labview {
                 r.line(
                     Stream::Err,
-                    &format!("      manifest says labview = {v:?} (minimum)"),
+                    &format!("      manifest says labview = \">={v}\" (minimum)"),
                 );
             }
         }
@@ -263,7 +263,7 @@ mod tests {
             err,
             format!(
                 "manifest: {} (demo) — 1 dependency\n\
-                 \x20     manifest says labview = \"2024\" (minimum)\n\
+                 \x20     manifest says labview = \">=2024\" (minimum)\n\
                  target: LabVIEW 2026 (64-bit)  v26.3  (LV)\n\
                  target: scratch tree at {}\n\
                  loading indexes...\n  4 package versions known\n",

@@ -24,10 +24,12 @@ use futures::future::LocalBoxFuture;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use support::global::GlobalRun;
 use support::golden::{Mode, Output};
-use support::sandbox::Sandbox;
+use support::sandbox::{LABVIEW_YEAR, Sandbox};
 use support::selection::{
-    INTERACTIVE_TAG, LABVIEW_TAG, PENDING_TAG_PREFIX, Selection, UNSAFE_TAG, select,
+    GLOBAL_TAG, INTERACTIVE_TAG, LABVIEW_TAG, PENDING_TAG_PREFIX, PILOT_A_ENV_VAR,
+    PILOT_SOURCE_TAG, Selection, UNSAFE_TAG, select,
 };
 
 /// The features the harness runs, relative to the package root. Later slices
@@ -52,6 +54,7 @@ const FEATURE_FILES: &[&str] = &[
     "tests/features/lvpm-tui/slice-2-package-details-lvpm-info.feature",
     "tests/features/lvpm-tui/slice-3-json-and-the-exit-code-table.feature",
     "tests/features/build-slices/s0-pilot-loop.feature",
+    "tests/features/build-slices/s1-lvpm-build.feature",
 ];
 const TEST_LABVIEW_ENV_VAR: &str = "LVPM_TEST_LABVIEW";
 const ONLY_LABVIEW_ENV_VAR: &str = "LVPM_TEST_ONLY_LABVIEW";
@@ -101,6 +104,8 @@ pub struct CliWorld {
     pub clippy: steps::core_io::ClippyState,
     /// What a pilot-loop scenario has set up and seen.
     pub pilots: steps::pilots::PilotState,
+    /// What an `lvpm build` scenario has set up and seen.
+    pub build: steps::build::BuildState,
 }
 
 impl CliWorld {
@@ -126,6 +131,7 @@ impl CliWorld {
             docs: Default::default(),
             clippy: Default::default(),
             pilots: Default::default(),
+            build: Default::default(),
         }
     }
 
@@ -161,6 +167,7 @@ struct ScenarioCounts {
     unsafe_not_run: usize,
     pending_not_run: usize,
     interactive_not_run: usize,
+    pilot_source_not_run: usize,
 }
 
 /// Whatever a scenario started on its venv is stopped, whether it passed or not.
@@ -179,7 +186,11 @@ fn after_scenario<'a>(
 }
 
 /// Run one feature file; its scenario counts, and how it went.
-fn run_feature(path: PathBuf, mode: Mode) -> (ScenarioCounts, Result<(), String>) {
+fn run_feature(
+    path: PathBuf,
+    mode: Mode,
+    global_busy: bool,
+) -> (ScenarioCounts, Result<(), String>) {
     let labview_not_run = Arc::new(AtomicUsize::new(0));
     let unsafe_not_run = Arc::new(AtomicUsize::new(0));
     let pending_not_run = Arc::new(AtomicUsize::new(0));
@@ -192,6 +203,9 @@ fn run_feature(path: PathBuf, mode: Mode) -> (ScenarioCounts, Result<(), String>
         labview_ran.clone(),
     );
     let counted_interactive = interactive_not_run.clone();
+    let pilot_source_not_run = Arc::new(AtomicUsize::new(0));
+    let counted_pilot_source = pilot_source_not_run.clone();
+    let pilot_source = std::env::var_os(PILOT_A_ENV_VAR).is_some();
     let (test_labview, only_labview, headless_labview) = (
         env_flag(TEST_LABVIEW_ENV_VAR),
         env_flag(ONLY_LABVIEW_ENV_VAR),
@@ -213,16 +227,23 @@ fn run_feature(path: PathBuf, mode: Mode) -> (ScenarioCounts, Result<(), String>
             .after(after_scenario)
             .fail_on_skipped()
             .filter_run(path, move |_, _, scenario| {
-                let (counter, runs) =
-                    match select(&scenario.tags, test_labview, only_labview, headless_labview) {
-                        Selection::Run if has_labview_tag(scenario) => (&counted_labview_ran, true),
-                        Selection::Run => return true,
-                        Selection::NotLabview => return false,
-                        Selection::Unsafe => (&counted_unsafe, false),
-                        Selection::Pending => (&counted_pending, false),
-                        Selection::NeedsLabview => (&counted_labview, false),
-                        Selection::Interactive => (&counted_interactive, false),
-                    };
+                let (counter, runs) = match select(
+                    &scenario.tags,
+                    test_labview,
+                    only_labview,
+                    headless_labview,
+                    global_busy,
+                    pilot_source,
+                ) {
+                    Selection::Run if has_labview_tag(scenario) => (&counted_labview_ran, true),
+                    Selection::Run => return true,
+                    Selection::NotLabview | Selection::GlobalBusy => return false,
+                    Selection::Unsafe => (&counted_unsafe, false),
+                    Selection::Pending => (&counted_pending, false),
+                    Selection::NeedsLabview => (&counted_labview, false),
+                    Selection::Interactive => (&counted_interactive, false),
+                    Selection::NeedsPilotSource => (&counted_pilot_source, false),
+                };
                 counter.fetch_add(1, Ordering::SeqCst);
                 runs
             }),
@@ -242,6 +263,7 @@ fn run_feature(path: PathBuf, mode: Mode) -> (ScenarioCounts, Result<(), String>
         unsafe_not_run: unsafe_not_run.load(Ordering::SeqCst),
         pending_not_run: pending_not_run.load(Ordering::SeqCst),
         interactive_not_run: interactive_not_run.load(Ordering::SeqCst),
+        pilot_source_not_run: pilot_source_not_run.load(Ordering::SeqCst),
     };
     (counts, outcome)
 }
@@ -270,17 +292,27 @@ fn run_features() {
     if let Some(banner) = mode.banner() {
         eprintln!("{banner}");
     }
+    // Held until the features ran, or a panic unwinds: it ends the LabVIEW
+    // this run started and gives the claim back. A headless run uses the
+    // LabVIEW its CI script started, and claims nothing.
+    let global = (env_flag(TEST_LABVIEW_ENV_VAR) && !env_flag(HEADLESS_LABVIEW_ENV_VAR))
+        .then(|| GlobalRun::claim_for_this_run(LABVIEW_YEAR.parse().expect("a year")));
+    let global_busy = global.as_ref().and_then(|run| run.busy.clone());
+    if let Some(why) = &global_busy {
+        println!("@{GLOBAL_TAG} scenarios not run: the global LabVIEW is in use — {why}");
+    }
     let mut failures = Vec::new();
     let (mut labview_not_run, mut unsafe_not_run, mut pending_not_run) = (0, 0, 0);
-    let (mut labview_ran, mut interactive_not_run) = (0, 0);
+    let (mut labview_ran, mut interactive_not_run, mut pilot_source_not_run) = (0, 0, 0);
     for feature in FEATURE_FILES {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(feature);
-        let (counts, outcome) = run_feature(path, mode);
+        let (counts, outcome) = run_feature(path, mode, global_busy.is_some());
         labview_ran += counts.labview_ran;
         labview_not_run += counts.labview_not_run;
         unsafe_not_run += counts.unsafe_not_run;
         pending_not_run += counts.pending_not_run;
         interactive_not_run += counts.interactive_not_run;
+        pilot_source_not_run += counts.pilot_source_not_run;
         if let Err(why) = outcome {
             failures.push(format!("{feature}: {why}"));
         }
@@ -304,6 +336,11 @@ fn run_features() {
     if interactive_not_run > 0 {
         println!(
             "{interactive_not_run} @{INTERACTIVE_TAG} scenarios left to their headless copies ({HEADLESS_LABVIEW_ENV_VAR}=1)"
+        );
+    }
+    if pilot_source_not_run > 0 {
+        println!(
+            "{pilot_source_not_run} @{PILOT_SOURCE_TAG} scenarios not run (set {PILOT_A_ENV_VAR} to a checkout of pilot A)"
         );
     }
     if pending_not_run > 0 {

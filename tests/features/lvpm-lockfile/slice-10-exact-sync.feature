@@ -160,7 +160,7 @@ Feature: lvpm sync makes the destination equal the lock
   Scenario: a manifest without labview is refused at sync with an example
     Given a project manifest without labview
     When I run "lvpm install --prefix dest"
-    Then the command fails with: add labview = "<year>" under [project] in lvpm.toml
+    Then the command fails with: add labview = ">=<year>" under [project] in lvpm.toml
 
   # Three scenarios in this file (the hook one, --global and headless) are
   # tagged @unsafe and never run. A sync takes out every package its lock does

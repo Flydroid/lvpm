@@ -19,6 +19,13 @@ pub struct FileGroup {
     pub files: Vec<String>,
 }
 
+impl FileGroup {
+    /// The zip entry that holds `file` of this group.
+    pub fn entry(&self, file: &str) -> String {
+        format!("File Group {}/{}", self.index, file.replace('\\', "/"))
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Spec {
     pub name: String,
@@ -177,9 +184,59 @@ pub fn parse(text: &str) -> Result<Spec> {
     })
 }
 
+/// `spec` as text, in the `.vip` dialect the published pilot packages use:
+/// what [`parse`] reads back. Every hook key is written, empty unless set.
+pub fn write(s: &Spec) -> String {
+    let mut out = format!(
+        "[Package]\nName=\"{}\"\nVersion=\"{}\"\nFile Format=\"vip\"\nFormat Version=\"2017\"\nDisplay Name=\"{}\"\n\n",
+        s.name,
+        s.version,
+        s.display_name.as_deref().unwrap_or_default()
+    );
+    if let Some(gate) = &s.lv_gate {
+        out += &format!("[Platform]\nExclusive_LabVIEW_Version=\"{gate}\"\n\n");
+    }
+    out += "[Script VIs]\n";
+    for hook in HOOKS {
+        let vi = s.script_vis.iter().find(|(h, _)| h == hook);
+        out += &format!("{hook}=\"{}\"\n", vi.map_or("", |(_, v)| v.as_str()));
+    }
+    out += &format!(
+        "\n[Dependencies]\nRequires=\"{}\"\n\n[Files]\nNum File Groups=\"{}\"\n",
+        s.requires.as_deref().unwrap_or_default(),
+        s.file_groups.len()
+    );
+    for g in &s.file_groups {
+        out += &format!(
+            "\n[File Group {}]\nTarget Dir=\"{}\"\nReplace Mode=\"{}\"\nNum Files={}\n",
+            g.index,
+            g.target_dir,
+            g.replace_mode,
+            g.files.len()
+        );
+        for (i, f) in g.files.iter().enumerate() {
+            out += &format!("File {i}=\"{f}\"\n");
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_written_spec_parses_back_to_itself() {
+        let mut s = parse(SAMPLE).unwrap();
+        s.requires = Some("a>=1.0,c".into());
+        s.lv_gate = Some("LabVIEW>=16.0".into());
+        let back = parse(&write(&s)).unwrap();
+        assert_eq!(format!("{back:?}"), format!("{s:?}"));
+        assert!(
+            write(&s).contains("PostBuild=\"\"\n"),
+            "every hook key is written"
+        );
+    }
 
     // Trimmed from a real package: nfg_lib_tree_control_api-1.0.2.3.vip
     const SAMPLE: &str = r#"

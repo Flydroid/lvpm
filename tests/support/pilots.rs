@@ -132,6 +132,41 @@ pub fn labviewcli() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(LABVIEWCLI_DEFAULT))
 }
 
+/// Pilot A's pinned commit; README.md beside the build-slice features names it.
+pub const PILOT_A_COMMIT: &str = "f7cc16a391faa1e982b54ae22d2f43c9df1ef581";
+/// Pilot A as its vendor published it.
+pub const PILOT_A_ARCHIVE: &str = "hse_lib_hse_logger-2.2.2.114.vip";
+
+/// The file entries of a package below `File Group 0/<under>`, relative to
+/// `File Group 0/`, sorted.
+pub fn group_zero_files(archive: &Path, under: &str) -> Vec<String> {
+    let file = std::fs::File::open(archive)
+        .unwrap_or_else(|e| panic!("opening {}: {e}", archive.display()));
+    let zip = zip::ZipArchive::new(file)
+        .unwrap_or_else(|e| panic!("reading {} as a zip: {e}", archive.display()));
+    let mut files: Vec<String> = zip
+        .file_names()
+        .filter_map(|name| name.strip_prefix("File Group 0/"))
+        .filter(|name| name.starts_with(under) && !name.ends_with('/'))
+        .map(String::from)
+        .collect();
+    files.sort();
+    files
+}
+
+/// Copy the tree below `from` to `to`.
+pub fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap_or_else(|e| panic!("creating {}: {e}", to.display()));
+    for entry in std::fs::read_dir(from).unwrap_or_else(|e| panic!("{}: {e}", from.display())) {
+        let path = entry.expect("a directory entry").path();
+        let target = to.join(path.file_name().expect("a file name"));
+        match path.is_dir() {
+            true => copy_tree(&path, &target),
+            false => drop(std::fs::copy(&path, &target).expect("copy a file")),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

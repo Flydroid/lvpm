@@ -319,15 +319,15 @@ mod tests {
     #[test]
     fn a_headless_install_reads_the_manifests_labview_the_way_locking_does() {
         for (labview, said) in [
-            ("soon", Some("not a year")),
-            ("26", Some("not a year")),
+            ("soon", Some("not a minimum LabVIEW year")),
+            ("26", Some("not a minimum LabVIEW year")),
             ("2030", Some("is older than")),
             ("2024", None),
         ] {
             let repo = scratch_dir(&format!("headless-{labview}"));
             std::fs::write(
                 repo.join(project::FILE_NAME),
-                format!("[project]\nlabview = \"{labview}\"\n"),
+                format!("[project]\nlabview = \">={labview}\"\n"),
             )
             .unwrap();
             let mut env = OpEnv::new(&NullSink, config(), vec![labview_2026()], repo.clone());
