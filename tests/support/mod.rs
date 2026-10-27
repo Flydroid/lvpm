@@ -8,6 +8,7 @@ pub mod fixtures;
 pub mod global;
 pub mod golden;
 pub mod normalise;
+pub mod pilots;
 pub mod process;
 pub mod project;
 pub mod sandbox;

@@ -180,7 +180,7 @@ the container setup).
 
 Acceptance criteria:
 - [ ] `LVPM_TEST_LABVIEW=1 cargo test --test acceptance` installs both pilots from a folder feed into a fresh project venv and mass compiles them.
-- [ ] A pilot `.vip` whose SHA-256 differs from the pin fails the scenario.
+- [ ] A pilot `.vip` whose SHA-256 differs from its checksum in SHA256SUMS fails the scenario.
 - [ ] The run's not-run summary counts the `@pending-s1` and `@pending-s2` scenarios.
 - [ ] Without `LVPM_TEST_LABVIEW=1` the scenarios are reported as not run and `cargo test` stays green.
 - [ ] How the pilot `.vip` files and sources are obtained and pinned is written next to the feature file.

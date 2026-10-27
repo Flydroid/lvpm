@@ -624,6 +624,11 @@ impl Sandbox {
         learned.global_fixture_armed = true;
     }
 
+    /// The directory of the LabVIEW `detect_labview` found.
+    pub fn labview_dir(&self) -> PathBuf {
+        self.detected_labview().dir
+    }
+
     fn detected_labview(&self) -> LabviewInstall {
         let detected = self.learned().labview.clone();
         // The lock is released before this can panic, so a refusal does not

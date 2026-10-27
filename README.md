@@ -44,7 +44,9 @@ irm https://raw.githubusercontent.com/ThatsTheEnd/lvpm/main/scripts/install.ps1 
 .\install.ps1
 ```
 
-This installs per-user and needs no elevation. Script options, the manual
+This installs per-user and needs no elevation. If PowerShell refuses to run
+the script, allow it with [Set-ExecutionPolicy](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.security/set-executionpolicy?view=powershell-7.6).
+Script options, the manual
 download, Linux and building from source are in [docs/install.md](docs/install.md).
 
 ## Quick start

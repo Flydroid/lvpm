@@ -11,7 +11,7 @@ pub const PENDING_TAG_PREFIX: &str = "pending-";
 pub const UNSAFE_TAG: &str = "unsafe";
 /// A `@labview` scenario that needs a LabVIEW someone could click through, not
 /// a headless one: it is not run where the LabVIEW is headless (a container),
-/// and a headless copy of it runs there instead.
+/// and a headless copy of it runs there instead, where one exists.
 pub const INTERACTIVE_TAG: &str = "interactive-labview";
 
 /// Whether a scenario runs, and if not, why.

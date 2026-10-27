@@ -4,7 +4,9 @@ Date: 2026-10-26
 
 ## Status
 
-Proposed. Decided after the upstream alignment meeting on 2026-10-30.
+Accepted 2026-10-26, ahead of the upstream alignment meeting on 2026-10-30, so
+the slices can be built now. If the meeting changes it, a new ADR supersedes
+this one.
 
 ## Context
 

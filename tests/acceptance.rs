@@ -51,6 +51,7 @@ const FEATURE_FILES: &[&str] = &[
     "tests/features/lvpm-tui/slice-1-catalog-listing-uncapped.feature",
     "tests/features/lvpm-tui/slice-2-package-details-lvpm-info.feature",
     "tests/features/lvpm-tui/slice-3-json-and-the-exit-code-table.feature",
+    "tests/features/build-slices/s0-pilot-loop.feature",
 ];
 const TEST_LABVIEW_ENV_VAR: &str = "LVPM_TEST_LABVIEW";
 const ONLY_LABVIEW_ENV_VAR: &str = "LVPM_TEST_ONLY_LABVIEW";
@@ -98,6 +99,8 @@ pub struct CliWorld {
     pub docs: steps::docs::DocsState,
     /// What clippy made of core, in the scenario that checks it does no terminal I/O.
     pub clippy: steps::core_io::ClippyState,
+    /// What a pilot-loop scenario has set up and seen.
+    pub pilots: steps::pilots::PilotState,
 }
 
 impl CliWorld {
@@ -122,6 +125,7 @@ impl CliWorld {
             cancel: Default::default(),
             docs: Default::default(),
             clippy: Default::default(),
+            pilots: Default::default(),
         }
     }
 
