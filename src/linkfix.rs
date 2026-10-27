@@ -1103,6 +1103,11 @@ impl Tree {
         lower(p).ends_with(".lvclass") && self.exists(p).is_some()
     }
 
+    /// Do both files come from the same package?
+    fn same_root(&self, a: &str, b: &str) -> bool {
+        matches!((self.exists(a), self.exists(b)), (Some(x), Some(y)) if x.root == y.root)
+    }
+
     fn read_libraries(&mut self) -> Result<()> {
         let libs: Vec<Entry> = self
             .files
@@ -1220,6 +1225,31 @@ fn logical_to_token(logical: &str) -> Option<Vec<Vec<u8>>> {
     let mut v = vec![tok.as_bytes().to_vec()];
     v.extend(rest.split('/').filter(|s| !s.is_empty()).map(|s| s.as_bytes().to_vec()));
     Some(v)
+}
+
+/// The roots whose token paths a link may use: the ones LabVIEW searches
+/// across add-ons. NI's own add-ons reach `examples`, `help` and the like only
+/// by relative path (2026: 760 same-folder example links, no `<examples>`
+/// token in 21,769 VIs), and so must we: measured 2026-10 on NovaXC, turning
+/// HSE Git API's example links into `<examples>` tokens sent LabVIEW 2026's
+/// compiler into endless recursion once its library loaded those examples.
+const LINK_ROOTS: &[&str] = &["vi.lib", "user.lib", "instr.lib", "resource"];
+
+/// `logical_to_token`, for a link: `None` outside the `LINK_ROOTS`.
+fn link_token(logical: &str) -> Option<Vec<Vec<u8>>> {
+    let folder = logical.split('/').next()?;
+    LINK_ROOTS.iter().any(|r| r.eq_ignore_ascii_case(folder)).then(|| logical_to_token(logical))?
+}
+
+/// The relative PTH0 components from a VI's folder to `logical`, in the form
+/// `resolve_relative` reads.
+fn relative_comps(vi_dir: &str, logical: &str) -> Vec<Vec<u8>> {
+    let from: Vec<&str> = vi_dir.split('/').filter(|s| !s.is_empty()).collect();
+    let to: Vec<&str> = logical.split('/').filter(|s| !s.is_empty()).collect();
+    let common = from.iter().zip(&to).take_while(|(a, b)| a.eq_ignore_ascii_case(b)).count();
+    let mut comps = vec![Vec::new(); 1 + from.len() - common];
+    comps.extend(to[common..].iter().map(|s| s.as_bytes().to_vec()));
+    comps
 }
 
 fn join_relative(dir: &str, rel: &str) -> Option<String> {
@@ -1486,7 +1516,7 @@ pub fn fix_vi(bytes: &[u8], vi_logical: &str, tree: &Tree, m: Methods) -> Result
                 if m.owner
                     && let Some(owner) = owner
                     && !o.path.is_token()
-                    && let Some(tok) = logical_to_token(&owner)
+                    && let Some(tok) = link_token(&owner)
                 {
                     o.path = Pth::token(tok);
                     changes.owner += 1;
@@ -1497,18 +1527,26 @@ pub fn fix_vi(bytes: &[u8], vi_logical: &str, tree: &Tree, m: Methods) -> Result
 
             let Some(target) = target else { continue };
 
-            // Relative and build-machine absolute paths become token paths.
-            if m.paths
-                && (o.path.is_relative() || o.path.is_drive())
-                && let Some(tok) = logical_to_token(&target)
-            {
-                if o.path.is_relative() {
-                    changes.relative += 1;
-                } else {
-                    changes.absolute += 1;
+            // Relative and build-machine absolute paths become token paths in
+            // the link roots; elsewhere a build-machine path becomes relative,
+            // within its own package.
+            if m.paths && (o.path.is_relative() || o.path.is_drive()) {
+                let new = match link_token(&target) {
+                    Some(tok) => Some(Pth::token(tok)),
+                    None if o.path.is_drive() && tree.same_root(vi_logical, &target) => {
+                        Some(Pth { tp: 1, comps: relative_comps(&vi_dir, &target), zero: false })
+                    }
+                    None => None,
+                };
+                if let Some(p) = new {
+                    if o.path.is_relative() {
+                        changes.relative += 1;
+                    } else {
+                        changes.absolute += 1;
+                    }
+                    o.path = p;
+                    sec_changed = true;
                 }
-                o.path = Pth::token(tok);
-                sec_changed = true;
             }
 
             // Qualifier: the target's owner chain with our own chain's common
@@ -1554,7 +1592,7 @@ pub fn fix_vi(bytes: &[u8], vi_logical: &str, tree: &Tree, m: Methods) -> Result
             if !prefix.is_empty()
                 && !is_api
                 && let Some(owner) = tree.owner.get(&lower(&target))
-                && let Some(tok) = logical_to_token(owner)
+                && let Some(tok) = link_token(owner)
                 && set_vils(o, &Pth::token(tok))
             {
                 changes.vils += 1;
@@ -1562,7 +1600,7 @@ pub fn fix_vi(bytes: &[u8], vi_logical: &str, tree: &Tree, m: Methods) -> Result
             } else if let Some((_, v, _)) = vils(o)
                 && v.is_relative()
                 && let Some(l) = resolve_relative(&vi_dir, &v.comps).filter(|l| tree.resolvable(l))
-                && let Some(tok) = logical_to_token(&l)
+                && let Some(tok) = link_token(&l)
                 && set_vils(o, &Pth::token(tok))
             {
                 // A same-library link whose owner ref was already there, but
@@ -2003,6 +2041,26 @@ mod tests {
         );
         let same = vec![b"".to_vec(), b"UTF-8 String.lvclass".to_vec()];
         assert_eq!(resolve_relative("vi.lib/a/b", &same).unwrap(), "vi.lib/a/b/UTF-8 String.lvclass");
+    }
+
+    #[test]
+    fn relative_comps_invert_resolve_relative() {
+        for (dir, target) in [
+            ("vi.lib/addons/_JKI.lib/Serialization/JSON/Library", "vi.lib/addons/_JKI.lib/Serialization/JSON/J.lvlib"),
+            ("vi.lib/a/b", "vi.lib/a/b/C.lvclass"),
+            ("examples/HSE/Git API", "vi.lib/HSE/Git API/GIT-API.lvlib"),
+        ] {
+            assert_eq!(resolve_relative(dir, &relative_comps(dir, target)).unwrap(), target);
+        }
+        assert_eq!(relative_comps("examples/HSE/Git API", "examples/HSE/Git API/Helper.vi").len(), 2);
+    }
+
+    #[test]
+    fn links_use_tokens_only_in_searched_roots() {
+        assert_eq!(link_token("vi.lib/x/y.vi").unwrap()[0], b"<vilib>");
+        assert_eq!(link_token("instr.lib/x/y.vi").unwrap()[0], b"<instrlib>");
+        assert!(link_token("examples/HSE/Git API/Helper.vi").is_none());
+        assert!(link_token("help/x.chm").is_none());
     }
 
     #[test]
