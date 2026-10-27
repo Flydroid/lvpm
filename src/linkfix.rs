@@ -337,24 +337,16 @@ fn find_salt(prefix: &[u8], hash1: &[u8]) -> Option<Vec<u8>> {
 /// Add the `NI.LV.All.SourceOnly = true` tag to `VITS` unless it is there.
 ///
 /// `VITS` is `u32 count` then per tag an `LStr` name and a variant; from
-/// LabVIEW 2016 each variant is preceded by its `u32` length. The layout is
-/// taken from the file's first tag, or from its version when it has none; a
-/// file without a `VITS` block gets one. Returns whether the tag was added,
-/// or `None` (changing nothing) when the layout cannot be told.
-fn tag_source_only(rsrc: &mut Rsrc) -> Result<Option<bool>> {
+/// LabVIEW 2015 each variant is preceded by its `u32` length (measured
+/// 2026-10-27: 88 of 88 tagged 15.0 VIs are sized, 1763 of 1763 13.0/14.0
+/// ones are not, and the tag's value bytes are the same from 13.0 to 16.0).
+/// The layout is taken from the file's first tag, or from its version when it
+/// has none; a file without a `VITS` block gets one. Returns whether the tag
+/// was added.
+fn tag_source_only(rsrc: &mut Rsrc) -> Result<bool> {
     let lvsr_version = be32(&rsrc.section(b"LVSR").context("no LVSR block")?.data, 0)?;
-    let ver = rsrc.version()?;
-    let sized_by_version = if ver >= (16, 0) {
-        Some(true)
-    } else if ver <= (14, 0) {
-        Some(false)
-    } else {
-        None
-    };
+    let sized_by_version = rsrc.version()? >= (15, 0);
     if rsrc.section(b"VITS").is_none() {
-        if sized_by_version.is_none() {
-            return Ok(None);
-        }
         rsrc.edit_blocks(&[], Some((*b"VITS", vec![0; 4])))?;
     }
     let vits = rsrc.section_mut(b"VITS").expect("present or just added");
@@ -362,16 +354,14 @@ fn tag_source_only(rsrc: &mut Rsrc) -> Result<Option<bool>> {
     let mut name = (SOURCE_ONLY_TAG.len() as u32).to_be_bytes().to_vec();
     name.extend_from_slice(SOURCE_ONLY_TAG);
     if d.windows(name.len()).any(|w| w == name) {
-        return Ok(Some(false));
+        return Ok(false);
     }
     let count = be32(d, 0)?;
     let sized = if count > 0 {
         let after = 8 + be32(d, 4)? as usize;
         be32(d, after)? != lvsr_version
-    } else if let Some(sized) = sized_by_version {
-        sized
     } else {
-        return Ok(None);
+        sized_by_version
     };
     let mut tag = name;
     if sized {
@@ -383,14 +373,14 @@ fn tag_source_only(rsrc: &mut Rsrc) -> Result<Option<bool>> {
     out.extend_from_slice(&tag);
     out.extend_from_slice(&d[4..]);
     vits.data = out;
-    Ok(Some(true))
+    Ok(true)
 }
 
 /// Make a VI that embeds its compiled code source-only, as LabVIEW saves
 /// such a VI: set the "separate compiled code" flag, add the matching
 /// [`SOURCE_ONLY_TAG`], and remove the [`COMPILED_BLOCKS`]. Returns false when
-/// there is nothing to do, or when the tag layout cannot be told.
-/// A VI an earlier lvpm left flagged and stripped but untagged gets the tag.
+/// there is nothing to do. A VI an earlier lvpm left flagged and stripped but
+/// untagged gets the tag.
 ///
 /// `BDPW` hashes `LVSR` (not the tags or the removed blocks), so both of its
 /// hashes are recomputed — with the salt recovered from, and the heap hash
@@ -400,12 +390,10 @@ pub fn separate_compiled_code(rsrc: &mut Rsrc) -> Result<bool> {
     let lvsr = rsrc.section(b"LVSR").context("no LVSR block")?.data.clone();
     let flags = be32(&lvsr, 8)?;
     if rsrc.section(b"VICD").is_none() {
-        return Ok(flags & SOURCE_ONLY != 0 && tag_source_only(rsrc)? == Some(true));
+        return Ok(flags & SOURCE_ONLY != 0 && tag_source_only(rsrc)?);
     }
     ensure!(rsrc.version()? >= (10, 0), "separate compiled code needs LabVIEW 2010 or later");
-    if tag_source_only(rsrc)?.is_none() {
-        return Ok(false);
-    }
+    tag_source_only(rsrc)?;
     if flags & SOURCE_ONLY != 0 {
         rsrc.edit_blocks(&COMPILED_BLOCKS, None)?;
         return Ok(true);
@@ -1961,24 +1949,27 @@ mod tests {
             ],
         };
         let mut lv13 = rsrc(0x1300_8000, vec![0, 0, 0, 0]);
-        assert_eq!(tag_source_only(&mut lv13).unwrap(), Some(true));
+        assert!(tag_source_only(&mut lv13).unwrap());
         let mut want = vec![0, 0, 0, 1, 0, 0, 0, 20];
         want.extend_from_slice(SOURCE_ONLY_TAG);
         want.extend_from_slice(&[0x13, 0, 0x80, 0]);
         want.extend_from_slice(&SOURCE_ONLY_TRUE);
         assert_eq!(lv13.section(b"VITS").unwrap().data, want);
-        assert_eq!(tag_source_only(&mut lv13).unwrap(), Some(false));
+        assert!(!tag_source_only(&mut lv13).unwrap());
         assert_eq!(lv13.section(b"VITS").unwrap().data, want, "tag added twice");
 
         let other = [&[0, 0, 0, 1, 0, 0, 0, 1, b'x', 0, 0, 0, 4][..], &[0x17, 0, 0x80, 0]].concat();
         let mut lv17 = rsrc(0x1700_8000, other.clone());
-        assert_eq!(tag_source_only(&mut lv17).unwrap(), Some(true));
+        assert!(tag_source_only(&mut lv17).unwrap());
         let d = &lv17.section(b"VITS").unwrap().data;
         assert_eq!(&d[..4], &[0, 0, 0, 2]);
         assert_eq!(&d[28..32], &21u32.to_be_bytes());
         assert_eq!(&d[d.len() - other.len() + 4..], &other[4..]);
 
-        assert_eq!(tag_source_only(&mut rsrc(0x1500_8000, vec![0, 0, 0, 0])).unwrap(), None);
+        // 2015 already sizes its tag variants, like 2016.
+        let mut lv15 = rsrc(0x1500_8000, vec![0, 0, 0, 0]);
+        assert!(tag_source_only(&mut lv15).unwrap());
+        assert_eq!(&lv15.section(b"VITS").unwrap().data[28..32], &21u32.to_be_bytes());
     }
 
     #[test]
