@@ -1,0 +1,3 @@
+alpha                                                2.0            Alpha  LabVIEW>=20  from http://<FEED>/listed/index.vipr
+alpha                                                1.0            Alpha  LabVIEW>=20  from http://<FEED>/listed/index.vipr
+beta                                                 0.1            Beta  needs alpha>=1.0  LabVIEW>=20  from <SANDBOX>/local-packages

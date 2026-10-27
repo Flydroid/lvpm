@@ -841,7 +841,7 @@ async fn says_the_lock_would_be_updated(world: &mut CliWorld, change: String) {
     );
 }
 
-#[then(regex = r"^it lists (.+)$")]
+#[then(regex = r#"^it lists ("[^"]+"(?:, "[^"]+")*(?: and "[^"]+")?)$"#)]
 async fn it_lists_the_plan(world: &mut CliWorld, listed: String) {
     let stdout = world.output().stdout.clone();
     let lines = lines_of(&stdout);

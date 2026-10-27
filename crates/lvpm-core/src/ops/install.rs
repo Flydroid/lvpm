@@ -19,7 +19,7 @@ use crate::project::{self, Constraint, PackageArg};
 use crate::spec::Spec;
 use crate::target::Roots;
 use crate::version::Version;
-use crate::{install, relink, spec};
+use crate::{install, relink};
 use anyhow::{Result, bail, ensure};
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -131,23 +131,6 @@ impl std::fmt::Display for Req {
     }
 }
 
-fn read_spec(zip: &mut Zip) -> Result<String> {
-    // Almost always literally "spec" at the archive root.
-    let idx = (0..zip.len()).find(|i| {
-        zip.by_index(*i)
-            .map(|f| f.name().eq_ignore_ascii_case("spec"))
-            .unwrap_or(false)
-    });
-    let Some(idx) = idx else {
-        bail!("no `spec` member in .vip archive");
-    };
-    let mut f = zip.by_index(idx)?;
-    let mut buf = Vec::new();
-    std::io::Read::read_to_end(&mut f, &mut buf)?;
-    // spec files are latin-1-ish; lossy is fine for the fields we read.
-    Ok(String::from_utf8_lossy(&buf).into_owned())
-}
-
 /// Install a package by name, or name@version, where the destination flags say,
 /// with what it needs. Naming no package is not an install: in a project it is
 /// a sync (see [`super::route`]), and outside one it is an error.
@@ -201,12 +184,9 @@ pub(super) fn announce_target(env: &OpEnv, store: &Roots) {
 
 /// `name` or `name@version`, as a root of the resolution.
 fn named(package: &str) -> Result<(String, Constraint)> {
-    let PackageArg { name, constraint } = PackageArg::parse(package)?;
-    let constraint = match constraint {
-        Some(written) => Constraint::parse(&written)?,
-        None => Constraint::Any,
-    };
-    Ok((name, constraint))
+    let arg = PackageArg::parse(package)?;
+    let constraint = arg.read_constraint()?;
+    Ok((arg.name, constraint))
 }
 
 /// Depth-first over the dependency graph, from every root at once. No
@@ -437,7 +417,7 @@ fn install_one(
         }
         Err(why) => return Err(why),
     };
-    let spec = spec::parse(&read_spec(&mut zip)?)?;
+    let spec = install::read_spec(&mut zip)?;
     let plan = install::plan(&roots, &spec, &mut zip)?;
     let mut pkg = Unpacking {
         entry,
@@ -905,6 +885,7 @@ mod tests {
                         display_name: None,
                         requires: Vec::new(),
                         lv_min: None,
+                        source: String::new(),
                     },
                     expected_sha256: expected_sha256.map(str::to_string),
                 }],

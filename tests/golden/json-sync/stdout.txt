@@ -1,0 +1,5 @@
+{"data":{"phase":"resolve"},"event":"phase_started"}
+{"data":{"dependencies":1,"labview":"2024","name":"fixture","path":"<SANDBOX>/work/lvpm.toml"},"event":"manifest_in_use"}
+{"data":{"labview":null,"path":"dest/LabVIEW"},"event":"install_target"}
+{"event":"sync_nothing_to_do"}
+{"result":{"command":"sync"}}

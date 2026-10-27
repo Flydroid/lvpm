@@ -1,0 +1,1 @@
+{"result":[{"display_name":"Alpha","lv_min":20.0,"md5":"3fd29c1692a79206d55000a40d1bcdb7","name":"alpha","requires":[],"source":"http://download.ni.com/evaluation/labview/lvtn/vipm/index.vipr","url":"http://download.ni.com/evaluation/labview/lvtn/vipm/packages/alpha-1.0.vip","version":"1.0"}]}

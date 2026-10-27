@@ -31,24 +31,7 @@ pub fn package(
     cancel: &CancelToken,
 ) -> Result<Vec<u8>> {
     ensure_running(cancel)?;
-    if let Some(sha256) = entry.url.strip_prefix("cache:") {
-        let bytes = cache.load(sha256)?.with_context(|| format!(
-            "cached archive for {} is missing or corrupt; run cache add again with the original package", entry.name,
-        ))?;
-        verify_md5(entry, &bytes)?;
-        return Ok(bytes);
-    }
-    if index::is_local_url(&entry.url) {
-        let bytes = std::fs::read(&entry.url).with_context(|| format!("reading {}", entry.url))?;
-        verify_md5(entry, &bytes)?;
-        return Ok(bytes);
-    }
-    if let Some(md5) = &entry.md5
-        && let Some(sha256) =
-            cache.package_sha256(&entry.name, &entry.version.to_string(), &md5.to_lowercase())?
-        && let Some(bytes) = cache.load(&sha256)?
-        && verify_md5(entry, &bytes).is_ok()
-    {
+    if let Some(bytes) = on_hand(cache, entry)? {
         return Ok(bytes);
     }
     let response = client
@@ -61,6 +44,32 @@ pub fn package(
     let sha256 = cache.store(&bytes)?;
     cache.record_download(&LocalEntry::from(entry), &entry.url, &sha256, &md5)?;
     Ok(bytes)
+}
+
+/// The archive's bytes when [`package`] would not download them: from the
+/// cache or a local file. `None` when only the feed has them.
+pub fn on_hand(cache: &Cache, entry: &Entry) -> Result<Option<Vec<u8>>> {
+    if let Some(sha256) = entry.url.strip_prefix("cache:") {
+        let bytes = cache.load(sha256)?.with_context(|| format!(
+            "cached archive for {} is missing or corrupt; run cache add again with the original package", entry.name,
+        ))?;
+        verify_md5(entry, &bytes)?;
+        return Ok(Some(bytes));
+    }
+    if index::is_local_url(&entry.url) {
+        let bytes = std::fs::read(&entry.url).with_context(|| format!("reading {}", entry.url))?;
+        verify_md5(entry, &bytes)?;
+        return Ok(Some(bytes));
+    }
+    if let Some(md5) = &entry.md5
+        && let Some(sha256) =
+            cache.package_sha256(&entry.name, &entry.version.to_string(), &md5.to_lowercase())?
+        && let Some(bytes) = cache.load(&sha256)?
+        && verify_md5(entry, &bytes).is_ok()
+    {
+        return Ok(Some(bytes));
+    }
+    Ok(None)
 }
 
 /// How much of a download is read between two looks at the cancel token.
@@ -132,6 +141,7 @@ mod tests {
             display_name: None,
             requires: Vec::new(),
             lv_min: None,
+            source: String::new(),
         }
     }
 

@@ -604,6 +604,7 @@ impl<'a> Search<'a> {
                 display_name: None,
                 requires: Vec::new(),
                 lv_min: None,
+                source: String::new(),
             },
             expected_sha256: Some(self.sha256()),
         }

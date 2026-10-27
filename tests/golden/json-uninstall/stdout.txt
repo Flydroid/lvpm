@@ -1,0 +1,5 @@
+{"data":{"files":1,"name":"beta","version":"0.1"},"event":"package_removed"}
+{"data":{"phase":"relink","reason":"scratch_destination","skipped":0},"event":"phase_skipped"}
+{"data":{"phase":"hooks","reason":"scratch_destination","skipped":0},"event":"phase_skipped"}
+{"data":{"phase":"refresh","reason":"scratch_destination","skipped":1},"event":"phase_skipped"}
+{"result":{"command":"uninstall"}}

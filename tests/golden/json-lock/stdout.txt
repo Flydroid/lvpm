@@ -1,0 +1,2 @@
+{"data":{"path":"<SANDBOX>/work/lvpm.lock"},"event":"lock_up_to_date"}
+{"result":{"command":"lock"}}

@@ -5,10 +5,6 @@
 # CARGO_MANIFEST_DIR and CARGO_BIN_EXE_lvpm are fixed at compile time.
 param([string] $Image, [Parameter(Mandatory)] [int] $Year, [switch] $InContainer)
 $ErrorActionPreference = 'Stop'
-# Measured on a LabVIEW 2026 machine with LVPM_TEST_LABVIEW=1 and
-# LVPM_TEST_ONLY_LABVIEW=1 (2026-10-25): 29 run, 4 @unsafe never run. Here the
-# 2 @interactive-labview ones give way to their 2 headless copies: 29 again.
-$expected = 29
 $src = 'C:\src\lvpm'
 
 if (-not $InContainer) {
@@ -85,7 +81,11 @@ if ($log -match 'no recording `') {
 }
 
 if ($status -ne 0) { Fail "the @labview scenarios failed (exit $status)" $log }
+# The harness counts every @labview scenario in FEATURE_FILES as run or not run
+# (with the reason), so "none not run" plus "some run" is the full check; no
+# hand-kept total to bump when a slice adds scenarios.
 if ($log -match '@labview scenarios not run') { Fail 'some @labview scenarios were not run' $log }
-if ($log -notmatch "(?m)^$expected @labview scenarios run") { Fail "expected $expected @labview scenarios to run" $log }
+if ($log -notmatch '(?m)^([1-9]\d*) @labview scenarios run') { Fail 'no @labview scenarios ran' $log }
+$ran = $Matches[1]
 if ($log -notmatch '@unsafe scenarios never run') { Fail 'expected the @unsafe scenarios to be reported as never run' $log }
-Write-Host "$expected @labview scenarios passed against LabVIEW $Year"
+Write-Host "$ran @labview scenarios passed against LabVIEW $Year"

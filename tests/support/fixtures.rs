@@ -359,6 +359,11 @@ impl FixturePackage {
 
     /// The `.vip` archive: `spec`, then the payload, then the hook VI.
     pub fn build_vip(&self) -> Vec<u8> {
+        self.build_vip_with("")
+    }
+
+    /// [`FixturePackage::build_vip`] with `extra_spec` appended to the spec.
+    pub fn build_vip_with(&self, extra_spec: &str) -> Vec<u8> {
         let options = SimpleFileOptions::default()
             .compression_method(CompressionMethod::Stored)
             .last_modified_time(DateTime::default())
@@ -372,7 +377,10 @@ impl FixturePackage {
                 .expect("start zip entry in memory");
             writer.write_all(bytes).expect("write zip entry in memory");
         };
-        add("spec", self.spec_text().as_bytes());
+        add(
+            "spec",
+            format!("{}{extra_spec}", self.spec_text()).as_bytes(),
+        );
         add(
             &format!("File Group 0/{}", self.payload_path()),
             &self.payload_bytes(),

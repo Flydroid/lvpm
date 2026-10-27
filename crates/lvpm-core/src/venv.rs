@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 /// `LVAddons.AdditionalLocations` exists from LabVIEW 2024 Q1 on.
 const MIN_LV: f64 = 24.0;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Venv {
     /// The repo root — where `lvpm.toml` lives.
     pub repo: PathBuf,
@@ -253,7 +253,7 @@ pub fn create(
     // The payload is disposable and machine-bound: the manifests inside hold
     // absolute paths. Self-ignoring, the way cargo's `target/` is.
     std::fs::write(dir.join(".gitignore"), "*\n")?;
-    let port = port_for(&dir);
+    let port = openable_from(port_for(&dir));
     let b = Binding {
         target_key: target.key(),
         target_path: target.path.to_string_lossy().into_owned(),
@@ -308,6 +308,16 @@ pub(crate) fn port_for(dir: &Path) -> u16 {
     3400 + (h % 600) as u16
 }
 
+/// The first port from `start` on, round 3400–3999, that this machine lets
+/// LabVIEW open, or `start` if none is: a reserved or taken port would leave
+/// the venv's LabVIEW without VI Server. Stored at create, so it stays stable.
+fn openable_from(start: u16) -> u16 {
+    (0..600)
+        .map(|i| 3400 + (start - 3400 + i) % 600)
+        .find(|&p| crate::launch::can_open(p))
+        .unwrap_or(start)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -335,6 +345,16 @@ mod tests {
         assert_eq!(a, port_for(Path::new("c:/git/repo/.lv-venv")));
         assert!((3400..4000).contains(&a));
         assert_ne!(a, port_for(Path::new(r"C:\Git\Other\.lv-venv")));
+    }
+
+    #[test]
+    fn a_port_that_cannot_be_opened_gives_way_to_the_next_one_that_can() {
+        let start = (3400..4000).find(|&p| crate::launch::can_open(p)).unwrap();
+        let _held = std::net::TcpListener::bind(("127.0.0.1", start)).unwrap();
+        let port = openable_from(start);
+        assert_ne!(port, start);
+        assert!((3400..4000).contains(&port));
+        assert!(crate::launch::can_open(port));
     }
 
     #[test]

@@ -1,0 +1,14 @@
+{"data":{"labview":null,"path":"dest/LabVIEW"},"event":"install_target"}
+{"data":{"phase":"resolve"},"event":"phase_started"}
+{"event":"indexes_loading"}
+{"data":{"versions":2},"event":"indexes_loaded"}
+{"data":{"packages":[{"name":"alpha","version":"1.0"}]},"event":"resolved"}
+{"data":{"dry_run":true,"name":"alpha","version":"1.0"},"event":"package_start"}
+{"data":{"phase":"download"},"event":"phase_started"}
+{"data":{"dry_run":true,"files":1},"event":"package_done"}
+{"data":{"files":[{"overwrites":false,"path":"dest/LabVIEW/vi.lib/lvpm_fixture/alpha.txt"}]},"event":"planned_writes"}
+{"data":{"dry_run":true,"files":1},"event":"install_done"}
+{"data":{"phase":"relink","reason":"scratch_destination","skipped":0},"event":"phase_skipped"}
+{"data":{"phase":"hooks","reason":"scratch_destination","skipped":0},"event":"phase_skipped"}
+{"data":{"phase":"refresh","reason":"scratch_destination","skipped":0},"event":"phase_skipped"}
+{"result":{"command":"install"}}

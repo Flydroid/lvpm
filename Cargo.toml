@@ -2,7 +2,7 @@
 members = ["crates/lvpm-core"]
 
 [workspace.package]
-version = "0.5.2"
+version = "0.8.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/ThatsTheEnd/lvpm"
@@ -16,6 +16,8 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+serde = "1.0.229"
+serde_json = "1.0.151"
 lvpm-core = { path = "crates/lvpm-core" }
 anyhow = "1.0.104"
 clap = { version = "4.6.6", features = ["derive"] }
@@ -25,7 +27,6 @@ cucumber = "0.23.0"
 futures = "0.3.34"
 md-5 = "0.11.0"
 regex = "1.13.1"
-serde_json = "1.0.151"
 sha2 = "0.11.0"
 tempfile = "3.27.0"
 toml = { version = "1.1.5", features = ["preserve_order"] }

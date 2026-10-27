@@ -10,9 +10,10 @@
 #![allow(clippy::disallowed_methods)]
 
 use anyhow::{Result, bail};
+use serde::Serialize;
 use std::path::{Component, Path, PathBuf};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct LvTarget {
     /// Internal version, e.g. 26.3.
     pub version: f64,

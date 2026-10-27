@@ -554,6 +554,7 @@ mod tests {
             script_vis: Vec::new(),
             requires: None,
             lv_gate: None,
+            description: Default::default(),
         }
     }
 

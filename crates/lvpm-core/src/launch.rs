@@ -19,7 +19,7 @@ use crate::events::{Event, EventSink};
 use crate::venv::Venv;
 use crate::viserver::Connection;
 use anyhow::{Context, Result, bail, ensure};
-use std::net::{Ipv4Addr, SocketAddr, TcpStream};
+use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -194,6 +194,13 @@ pub fn is_listening(port: u16) -> bool {
     .is_ok()
 }
 
+/// May a program open this port right now? Windows reserves port ranges
+/// (Hyper-V, WSL) anew at each boot, and on a reserved port LabVIEW keeps its
+/// setting but never serves VI Server. Loopback, so no firewall prompt.
+pub fn can_open(port: u16) -> bool {
+    TcpListener::bind((Ipv4Addr::LOCALHOST, port)).is_ok()
+}
+
 /// Wait until the LabVIEW on `port` completes a VI Server handshake. Refused
 /// connections and error 63 both mean "not yet"; only success ends the wait.
 /// Shared by the venv path and `viserver::ensure_vi_server`. `headless` is
@@ -257,6 +264,14 @@ pub fn ensure_instance(
             child: None,
         });
     }
+    ensure!(
+        can_open(v.port),
+        "this machine does not let LabVIEW open the venv's VI Server port {}: Windows \
+         reserves port ranges anew at each boot (`netsh int ipv4 show excludedportrange \
+         protocol=tcp` lists them).\nRecreate the venv to give it a port that is free now: \
+         `lvpm venv remove`, then `lvpm venv create`.",
+        v.port
+    );
     let ini = write_ini(v)?;
     sink.emit(Event::VenvLabviewStarting {
         labview: v.target.label(),

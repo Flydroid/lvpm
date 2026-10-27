@@ -51,7 +51,7 @@ struct FaultyArchive {
     served: Option<&'static [u8]>,
 }
 
-const NOT_AN_ARCHIVE: &[u8] = b"these bytes are not a zip archive";
+pub const NOT_AN_ARCHIVE: &[u8] = b"these bytes are not a zip archive";
 const FAULTY_ARCHIVES: &[FaultyArchive] = &[
     // The MD5 matches what is served, which is not an archive.
     FaultyArchive {
@@ -135,6 +135,7 @@ impl Pause {
 #[derive(Debug)]
 pub struct Feed {
     addr: SocketAddr,
+    routes: Arc<Mutex<Routes>>,
     hits: Hits,
     stop: Arc<AtomicBool>,
     /// While set, every archive answers 503 and the listings still answer.
@@ -150,7 +151,7 @@ impl Feed {
     pub fn start(packages: &[FixturePackage]) -> Feed {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind a loopback port");
         let addr = listener.local_addr().expect("bound address");
-        let routes = routes(packages);
+        let routes = Arc::new(Mutex::new(routes(packages)));
         let hits = Hits::default();
         let stop = Arc::new(AtomicBool::new(false));
         let archives_refused = Arc::new(AtomicBool::new(false));
@@ -159,13 +160,14 @@ impl Feed {
         let thread = {
             let (hits, stop) = (hits.clone(), stop.clone());
             let (refused, down) = (archives_refused.clone(), down.clone());
-            let pause = pause.clone();
+            let (routes, pause) = (routes.clone(), pause.clone());
             std::thread::spawn(move || {
                 serve(listener, &routes, &hits, &stop, &refused, &down, &pause)
             })
         };
         Feed {
             addr,
+            routes,
             hits,
             stop,
             archives_refused,
@@ -188,6 +190,20 @@ impl Feed {
     /// The `[sources]` entry for the feed of fixture packages.
     pub fn project_source_url(&self) -> String {
         self.source_url(PROJECT_FEED_DIR)
+    }
+
+    /// From now on the feed in `dir` lists what `listing` says, an
+    /// `index.vipr` body. It serves no archive for it. The ETag stays the
+    /// same, so a client that cached the old listing keeps it.
+    pub fn publish(&self, dir: &str, listing: &str) {
+        let mut routes = self.routes.lock().expect("the routes");
+        routes.insert(index_path(dir), listing.as_bytes().to_vec());
+    }
+
+    /// From now on `path` answers `bytes`.
+    pub fn serve(&self, path: &str, bytes: Vec<u8>) {
+        let mut routes = self.routes.lock().expect("the routes");
+        routes.insert(path.to_string(), bytes);
     }
 
     /// The value for `HTTP_PROXY`.
@@ -350,7 +366,7 @@ pub fn listing(packages: &[FixturePackage], with_md5: bool) -> String {
     body
 }
 
-fn md5_hex(bytes: &[u8]) -> String {
+pub fn md5_hex(bytes: &[u8]) -> String {
     let mut hash = Md5::new();
     hash.update(bytes);
     hash.finalize()
@@ -361,7 +377,7 @@ fn md5_hex(bytes: &[u8]) -> String {
 
 fn serve(
     listener: TcpListener,
-    routes: &Routes,
+    routes: &Mutex<Routes>,
     hits: &Hits,
     stop: &AtomicBool,
     archives_refused: &AtomicBool,
@@ -390,7 +406,7 @@ struct Request {
 
 fn handle(
     mut stream: TcpStream,
-    routes: &Routes,
+    routes: &Mutex<Routes>,
     hits: &Hits,
     archives_refused: &AtomicBool,
     pause: &Pause,
@@ -409,7 +425,7 @@ fn handle(
     let refused = archives_refused.load(Ordering::SeqCst) && request.path.ends_with(".vip");
     let response = match refused {
         true => response("503 Service Unavailable", &[], b""),
-        false => respond(&request, routes),
+        false => respond(&request, &routes.lock().expect("the routes")),
     };
     stream.write_all(&response)
 }

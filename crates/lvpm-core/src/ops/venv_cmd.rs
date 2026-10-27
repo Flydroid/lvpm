@@ -7,6 +7,7 @@ use super::env::OpEnv;
 use crate::venv::{self, Venv};
 use crate::{install, launch};
 use anyhow::{Result, bail};
+use serde::Serialize;
 
 /// Create the venv of the project the command is run in, or of `--project`,
 /// and bind it to a LabVIEW: `--labview-version`, else the manifest's.
@@ -25,7 +26,7 @@ pub fn create(env: &OpEnv) -> Result<Venv> {
 }
 
 /// What `lvpm venv status` reports about the venv a command run here would use.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct VenvStatus {
     pub venv: Venv,
     /// Packages installed in the venv.

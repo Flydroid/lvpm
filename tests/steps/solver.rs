@@ -76,6 +76,7 @@ fn entry(name: &str, version: &str) -> Entry {
         display_name: None,
         requires: Vec::new(),
         lv_min: None,
+        source: String::new(),
     }
 }
 

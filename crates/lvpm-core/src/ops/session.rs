@@ -23,7 +23,7 @@ use std::path::PathBuf;
 
 /// What fetching an archive needs, opened when the first archive is wanted:
 /// an uninstall never gets here. Locking has no destination and so no session;
-/// it fetches through the same thing.
+/// it fetches through the same thing, as `info` does on a cache miss.
 pub(super) struct Downloads {
     client: Client,
     cache: Cache,

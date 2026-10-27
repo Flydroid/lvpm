@@ -54,6 +54,16 @@ This is required for the default `x86_64-pc-windows-msvc` Rust target; the boots
 - Run the relevant tests before opening a pull request.
 - Document behavior changes when they affect users or packaging flows.
 
+### Pre-commit checks
+
+`.githooks/pre-commit` runs `cargo fmt --check` and `cargo clippy -D warnings` before each commit. Turn it on once per clone:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+To skip it for one commit, use `git commit --no-verify`. Tests are not part of the hook; run them before you open a pull request.
+
 ## Commit messages
 
 Use Conventional Commits for commit messages:
@@ -94,7 +104,9 @@ Only PRs that followed the agentic dev-team workflow (`/specs`, then
 - a plan file, `plans/<slug>.md`;
 - cucumber BDD scenarios for the changed behavior, as `.feature` files under
   `tests/features/<slug>/`, registered in `FEATURE_FILES` in
-  `tests/acceptance.rs` so `cargo test` runs them.
+  `tests/acceptance.rs` so `cargo test` runs them. Registering is also what
+  puts their `@labview` scenarios into the Windows e2e job: the job takes the
+  count from the harness, so it keeps no total of its own to update.
 
 A PR without them is closed without review. CI does not check this rule;
 maintainers apply it when they review.

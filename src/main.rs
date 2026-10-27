@@ -4,7 +4,7 @@
 // it from `lvpm-core` only.
 #![allow(clippy::disallowed_methods)]
 
-use lvpm_core::events::Event;
+use lvpm_core::events::{Event, EventSink};
 use lvpm_core::manifest_edit::DependencyTable;
 use lvpm_core::ops::install::InstallOptions;
 use lvpm_core::ops::lock::{Upgrade, UpgradeTarget};
@@ -17,7 +17,8 @@ use lvpm_core::{config, launch, target, venv, viserver};
 mod render;
 
 use anyhow::{Context, Result, anyhow, bail};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use serde_json::json;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -48,6 +49,12 @@ struct Cli {
     /// Revalidate remote feeds and re-read local packages instead of trusting cached stats.
     #[arg(long, global = true)]
     refresh: bool,
+
+    /// Write JSON Lines to stdout: one `{"event", "data"}` object per event,
+    /// then one `{"result"}` or `{"error"}`. The diagnostics commands
+    /// (app-probe, vi-probe, vi-save, vi-run) do not take it.
+    #[arg(long, global = true)]
+    json: bool,
 
     #[command(subcommand)]
     cmd: Cmd,
@@ -369,10 +376,24 @@ enum Cmd {
     },
     /// Show what lvpm has installed into the selected target.
     List,
-    /// Search the indexes.
+    /// Show a package's details: its description, requirements, files and
+    /// versions. Downloads the archive into the cache if it is not there yet.
+    Info {
+        /// The package, and optionally which version or constraint (`1.0`,
+        /// `>=1.0`, `*`): newest if not given.
+        #[arg(value_name = "PACKAGE[@VERSION]")]
+        package: String,
+    },
+    /// Search the indexes, or with --all list the whole catalog.
     Search {
         /// Text to look for in package names and display names, ignoring case.
-        query: String,
+        /// Required unless --all is given.
+        #[arg(required_unless_present = "all")]
+        query: Option<String>,
+        /// List every version of every package, with no cap on the rows, and
+        /// the source each came from.
+        #[arg(long)]
+        all: bool,
     },
 }
 
@@ -418,7 +439,7 @@ enum ConfigCmd {
 
 /// The environment every command runs in, built once from the flags and the
 /// process: core reads neither.
-fn op_env<'a>(cli: &Cli, sink: &'a render::CliSink) -> Result<OpEnv<'a>> {
+fn op_env<'a>(cli: &Cli, sink: &'a dyn EventSink) -> Result<OpEnv<'a>> {
     let mut env = OpEnv::new(
         sink,
         config::load()?,
@@ -436,21 +457,101 @@ fn op_env<'a>(cli: &Cli, sink: &'a render::CliSink) -> Result<OpEnv<'a>> {
     Ok(env)
 }
 
-fn main() -> Result<()> {
+impl Cmd {
+    /// The commands that talk to a LabVIEW for a developer to read and print
+    /// as they go, so have no result for `--json`.
+    fn is_diagnostic(&self) -> bool {
+        matches!(
+            self,
+            Cmd::AppProbe { .. } | Cmd::ViProbe { .. } | Cmd::ViSave { .. } | Cmd::ViRun { .. }
+        )
+    }
+}
+
+/// What a command that succeeded has left to print: its text for stdout, a
+/// warning for stderr, and its result for `--json`.
+struct Report {
+    text: String,
+    warning: String,
+    result: serde_json::Value,
+}
+
+impl Report {
+    fn new(text: String, result: impl serde::Serialize) -> Result<Report> {
+        Ok(Report {
+            text,
+            warning: String::new(),
+            result: serde_json::to_value(result)?,
+        })
+    }
+
+    /// A command whose result is only its name.
+    fn said(text: String, command: &str) -> Report {
+        Report {
+            text,
+            warning: String::new(),
+            result: json!({ "command": command }),
+        }
+    }
+
+    fn done(command: &str) -> Report {
+        Report::said(String::new(), command)
+    }
+
+    fn warning(self, warning: String) -> Report {
+        Report { warning, ..self }
+    }
+}
+
+/// Exit codes: 0 done, 1 the command failed, 2 the arguments are wrong (clap's).
+fn main() -> std::process::ExitCode {
+    use std::process::ExitCode;
     let cli = Cli::parse();
-    let sink = render::CliSink::stdio();
-    let env = op_env(&cli, &sink)?;
+    if cli.json && cli.cmd.is_diagnostic() {
+        Cli::command()
+            .error(
+                clap::error::ErrorKind::ArgumentConflict,
+                "--json is not taken by app-probe, vi-probe, vi-save or vi-run",
+            )
+            .exit();
+    }
+    match (run(&cli), cli.json) {
+        (Ok(report), false) => {
+            eprint!("{}", report.warning);
+            print!("{}", report.text);
+            ExitCode::SUCCESS
+        }
+        (Ok(report), true) => {
+            render::json::print(&render::json::result(&report.result));
+            ExitCode::SUCCESS
+        }
+        // As `main() -> Result` would print it, but a feed's text in an error
+        // cannot drive the terminal.
+        (Err(error), false) => {
+            eprintln!("Error: {}", render::printable(format!("{error:?}")));
+            ExitCode::FAILURE
+        }
+        (Err(error), true) => {
+            render::json::print(&render::json::error(&error));
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run(cli: &Cli) -> Result<Report> {
+    let sink: Box<dyn EventSink> = match cli.json {
+        true => Box::new(render::json::JsonSink),
+        false => Box::new(render::CliSink::stdio()),
+    };
+    let env = op_env(cli, sink.as_ref())?;
     match &cli.cmd {
         Cmd::Targets => {
-            print!("{}", render::query::targets(ops::query::targets(&env)));
-            Ok(())
+            let targets = ops::query::targets(&env);
+            Report::new(render::query::targets(targets), targets)
         }
         Cmd::Start { wait } => {
-            print!(
-                "{}",
-                render::viserver::started(&ops::start::start(&env, *wait)?)
-            );
-            Ok(())
+            let started = ops::start::start(&env, *wait)?;
+            Ok(Report::said(render::viserver::started(&started), "start"))
         }
         Cmd::Install {
             package,
@@ -480,35 +581,43 @@ fn main() -> Result<()> {
                     ops::install::install(&env, package, &apply.options(*no_deps, *allow_downgrade))
                 }
             }
+            .map(|()| Report::done("install"))
         }
         Cmd::Add {
             package,
             dev,
             apply,
-        } => cmd_add(&env, package, *dev, apply),
+        } => cmd_add(&env, package, *dev, apply).map(|()| Report::done("add")),
         Cmd::Remove {
             package,
             dev,
             apply,
-        } => cmd_remove(&env, package, *dev, apply),
-        Cmd::Sync { apply, sync } => cmd_sync(&env, &sync.options(apply, env.headless)),
+        } => cmd_remove(&env, package, *dev, apply).map(|()| Report::done("remove")),
+        Cmd::Sync { apply, sync } => {
+            cmd_sync(&env, &sync.options(apply, env.headless)).map(|()| Report::done("sync"))
+        }
         Cmd::Relink {
             package,
             all,
             relink,
-        } => ops::relink::relink(&env, package.as_deref(), *all, &relink.into()),
+        } => ops::relink::relink(&env, package.as_deref(), *all, &relink.into())
+            .map(|()| Report::done("relink")),
         Cmd::RunHooks {
             package,
             all,
             timeout,
-        } => ops::hooks::run_hooks(&env, package.as_deref(), *all, *timeout),
-        Cmd::Refresh { timeout } => ops::refresh::refresh(&env, *timeout),
+        } => ops::hooks::run_hooks(&env, package.as_deref(), *all, *timeout)
+            .map(|()| Report::done("run-hooks")),
+        Cmd::Refresh { timeout } => {
+            ops::refresh::refresh(&env, *timeout).map(|()| Report::done("refresh"))
+        }
         Cmd::Uninstall { package, all } => {
             ops::uninstall::uninstall(&env, package.as_deref(), *all)
+                .map(|()| Report::done("uninstall"))
         }
-        Cmd::AppProbe { ids } => cmd_app_probe(&env, ids),
-        Cmd::ViProbe { vi } => cmd_vi_probe(&env, vi),
-        Cmd::ViSave { vi } => cmd_vi_save(&env, vi),
+        Cmd::AppProbe { ids } => cmd_app_probe(&env, ids).map(|()| Report::done("app-probe")),
+        Cmd::ViProbe { vi } => cmd_vi_probe(&env, vi).map(|()| Report::done("vi-probe")),
+        Cmd::ViSave { vi } => cmd_vi_save(&env, vi).map(|()| Report::done("vi-save")),
         Cmd::ViRun {
             vi,
             sets,
@@ -528,54 +637,64 @@ fn main() -> Result<()> {
             watch.as_deref(),
             *poll_ms,
             done,
-        ),
-        Cmd::Venv(sub) => cmd_venv(&env, sub),
+        )
+        .map(|()| Report::done("vi-run")),
+        Cmd::Venv(sub) => cmd_venv(&env, sub, cli.json),
         Cmd::Cache(CacheCmd::Add { path }) => {
-            print!(
-                "{}",
-                render::query::cache_add(&ops::query::cache_add(&env, path)?)
-            );
-            Ok(())
+            let imports = ops::query::cache_add(&env, path)?;
+            Report::new(render::query::cache_add(&imports), &imports)
         }
         Cmd::Config(ConfigCmd::Set { key, values }) => {
             ops::query::config_set(&env, key, values)?;
-            println!("set {key}");
-            Ok(())
+            Ok(Report::said(format!("set {key}\n"), "config"))
         }
         Cmd::Config(ConfigCmd::Get { key }) => {
-            for value in ops::query::config_get(&env, key)? {
-                println!("{value}");
-            }
-            Ok(())
+            let values = ops::query::config_get(&env, key)?;
+            let text = values.iter().map(|value| format!("{value}\n")).collect();
+            Report::new(text, json!({ "key": key, "values": values }))
         }
         Cmd::Launch { lvproj } => {
             let launched = ops::launch_cmd::launch(&env, lvproj.as_deref())?;
-            print!("{}", render::launch::launched(&launched));
-            Ok(())
+            Ok(Report::said(render::launch::launched(&launched), "launch"))
         }
         Cmd::Lock {
             check,
             upgrade,
             upgrade_package,
-        } => match (check, upgrade, upgrade_package.as_slice()) {
-            (true, ..) => ops::lock::check(&env),
-            (_, true, _) => ops::lock::upgrade(&env, &Upgrade::Everything).map(drop),
-            (_, _, []) => ops::lock::lock(&env).map(drop),
-            (_, _, packages) => {
-                ops::lock::upgrade(&env, &Upgrade::Packages(packages.to_vec())).map(drop)
+        } => {
+            let done = |_| Ok(Report::done("lock"));
+            match (check, upgrade, upgrade_package.as_slice()) {
+                (true, ..) => ops::lock::check(&env)
+                    .map(|()| Report::new(String::new(), json!({ "up_to_date": true }))),
+                (_, true, _) => ops::lock::upgrade(&env, &Upgrade::Everything).map(done),
+                (_, _, []) => ops::lock::lock(&env).map(done),
+                (_, _, packages) => {
+                    ops::lock::upgrade(&env, &Upgrade::Packages(packages.to_vec())).map(done)
+                }
             }
+            .map_err(|why| anyhow!(render::lock::error(&why)))?
         }
-        .map_err(|why| anyhow!(render::lock::error(&why))),
         Cmd::List => {
-            print!("{}", render::query::list(&ops::query::list(&env)?));
-            Ok(())
+            let installed = ops::query::list(&env)?;
+            Report::new(render::query::list(&installed), &installed)
         }
-        Cmd::Search { query } => {
-            print!(
-                "{}",
-                render::query::search(query, &ops::query::search(&env, query)?)
-            );
-            Ok(())
+        Cmd::Search { query, all: true } => {
+            let catalog = ops::query::catalog(&env, query.as_deref())?;
+            let text = render::query::catalog(query.as_deref(), &catalog);
+            let warning = render::query::unread_sources(&catalog.failed);
+            Ok(Report::new(text, &catalog)?.warning(warning))
+        }
+        Cmd::Info { package } => {
+            let info = ops::query::info(&env, package)?;
+            let warning = render::query::unread_sources(&info.failed);
+            Ok(Report::new(render::query::info(&info), &info)?.warning(warning))
+        }
+        Cmd::Search { query, all: false } => {
+            let query = query
+                .as_deref()
+                .expect("clap requires a query without --all");
+            let found = ops::query::search(&env, query)?;
+            Report::new(render::query::search(query, &found), &found)
         }
     }
 }
@@ -616,19 +735,30 @@ fn cmd_sync(env: &OpEnv, options: &SyncOptions) -> Result<()> {
     })
 }
 
-fn cmd_venv(env: &OpEnv, sub: &VenvCmd) -> Result<()> {
+fn cmd_venv(env: &OpEnv, sub: &VenvCmd, under_json: bool) -> Result<Report> {
     match sub {
-        VenvCmd::Create => print!("{}", render::venv::created(&ops::venv_cmd::create(env)?)),
-        VenvCmd::Status => print!(
-            "{}",
-            render::venv::status(ops::venv_cmd::status(env)?.as_ref(), &env.cwd)
-        ),
+        VenvCmd::Create => {
+            let created = ops::venv_cmd::create(env)?;
+            Ok(Report::said(render::venv::created(&created), "venv"))
+        }
+        VenvCmd::Status => {
+            let status = ops::venv_cmd::status(env)?;
+            let text = render::venv::status(status.as_ref(), &env.cwd);
+            Report::new(
+                text,
+                json!({ "exists": status.is_some(), "status": status }),
+            )
+        }
         VenvCmd::Remove { yes } => {
             let venv = ops::venv_cmd::existing(env)?;
+            // Under --json stdin is no place for an answer.
+            if under_json && !yes {
+                bail!("`venv remove` asks before it deletes; pass --yes to delete under --json");
+            }
             ops::venv_cmd::remove(env, &venv, *yes || confirm_removal(&venv)?)?;
+            Ok(Report::done("venv"))
         }
     }
-    Ok(())
 }
 
 /// Ask whether to delete the venv: core takes no input of its own (AC-K6).

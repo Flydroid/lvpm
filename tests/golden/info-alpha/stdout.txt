@@ -1,0 +1,15 @@
+alpha 2.0  Alpha
+summary:       Alpha tools
+description:   Tools for alpha.
+vendor:        Example Vendor
+packager:      Example Packager
+license:       MIT
+url:           https://example.com/alpha
+release notes: Second release.
+requires:      beta>=0.1
+files:
+  <application>
+    vi.lib/lvpm_fixture/alpha.txt
+versions:
+  2.0            from http://<FEED>/listed/index.vipr
+  1.0            from http://<FEED>/listed/index.vipr

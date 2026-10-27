@@ -8,9 +8,10 @@
 //! `[File Group N]` and `[Script VIs]`.
 
 use anyhow::{Context, Result};
+use serde::Serialize;
 use std::collections::HashMap;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct FileGroup {
     pub index: usize,
     pub target_dir: String,
@@ -18,7 +19,7 @@ pub struct FileGroup {
     pub files: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Spec {
     pub name: String,
     pub version: String,
@@ -33,6 +34,21 @@ pub struct Spec {
     /// `[Platform] Exclusive_LabVIEW_Version`, verbatim — e.g. `LabVIEW>=25.3`.
     /// Some packages write it bare, as `>=8.6`.
     pub lv_gate: Option<String>,
+    /// The `[Description]` section, for people to read.
+    pub description: Description,
+}
+
+/// The `[Description]` section, for people to read. A field the spec leaves
+/// out or leaves empty is `None`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct Description {
+    pub description: Option<String>,
+    pub summary: Option<String>,
+    pub vendor: Option<String>,
+    pub packager: Option<String>,
+    pub license: Option<String>,
+    pub url: Option<String>,
+    pub release_notes: Option<String>,
 }
 
 const HOOKS: &[&str] = &[
@@ -91,25 +107,18 @@ pub fn parse(text: &str) -> Result<Spec> {
         let Some(g) = sections.get(&format!("File Group {i}")) else {
             break;
         };
-        let files = match g.get("Num Files").and_then(|n| n.parse::<usize>().ok()) {
-            Some(n) => (0..n)
-                .filter_map(|j| g.get(&format!("File {j}")).cloned())
-                .collect(),
-            // Fall back to scanning `File <n>=` keys when Num Files is absent.
-            None => {
-                let mut v: Vec<(usize, String)> = g
-                    .iter()
-                    .filter_map(|(k, val)| {
-                        k.strip_prefix("File ")?
-                            .parse::<usize>()
-                            .ok()
-                            .map(|n| (n, val.clone()))
-                    })
-                    .collect();
-                v.sort_by_key(|(n, _)| *n);
-                v.into_iter().map(|(_, val)| val).collect()
-            }
-        };
+        // The `File <n>=` keys there are, below Num Files when it is given.
+        // Counting up to Num Files instead would let a spec spin on a huge one.
+        let num_files = g.get("Num Files").and_then(|n| n.parse::<usize>().ok());
+        let mut numbered: Vec<(usize, String)> = g
+            .iter()
+            .filter_map(|(k, val)| {
+                let n = k.strip_prefix("File ")?.parse::<usize>().ok()?;
+                (num_files.is_none_or(|max| n < max)).then(|| (n, val.clone()))
+            })
+            .collect();
+        numbered.sort_by_key(|(n, _)| *n);
+        let files = numbered.into_iter().map(|(_, val)| val).collect();
         file_groups.push(FileGroup {
             index: i,
             target_dir: g.get("Target Dir").cloned().unwrap_or_default(),
@@ -145,6 +154,16 @@ pub fn parse(text: &str) -> Result<Spec> {
     let lv_gate = sections
         .get("Platform")
         .and_then(|s| non_empty(s, "Exclusive_LabVIEW_Version"));
+    let field = |k: &str| sections.get("Description").and_then(|s| non_empty(s, k));
+    let description = Description {
+        description: field("Description"),
+        summary: field("Summary"),
+        vendor: field("Vendor"),
+        packager: field("Packager"),
+        license: field("License"),
+        url: field("URL"),
+        release_notes: field("Release Notes"),
+    };
 
     Ok(Spec {
         name,
@@ -154,6 +173,7 @@ pub fn parse(text: &str) -> Result<Spec> {
         script_vis,
         requires,
         lv_gate,
+        description,
     })
 }
 
@@ -202,6 +222,17 @@ File 0="functions_nfg.mnu"
         assert!(s.script_vis.is_empty(), "empty hooks must not be reported");
     }
 
+    #[test]
+    fn num_files_bounds_the_files_read_and_a_huge_one_does_not_spin() {
+        let group = |num: &str| {
+            format!("[Package]\nName=a\nVersion=1.0\n[File Group 0]\n{num}File 0=x\nFile 1=y\n")
+        };
+        let files = |num: &str| parse(&group(num)).unwrap().file_groups[0].files.clone();
+        assert_eq!(files("Num Files=1\n"), ["x"]);
+        assert_eq!(files(""), ["x", "y"]);
+        assert_eq!(files(&format!("Num Files={}\n", usize::MAX)), ["x", "y"]);
+    }
+
     // OpenG-era `.ogp`: different section name, unquoted values, and the
     // version split across Version/Release. Trimmed from
     // jki_rsc_toolkits_palette-1.1-1.ogp.
@@ -230,6 +261,37 @@ File 0="JKI Toolkits.mnu"
         assert_eq!(s.version, "1.1-1");
         assert_eq!(s.file_groups.len(), 1);
         assert!(s.script_vis.is_empty());
+    }
+
+    #[test]
+    fn reads_every_description_field() {
+        let text = format!(
+            "{SAMPLE}\n[Description]\nDescription=\"Edits trees.\"\nSummary=\"Tree API\"\n\
+             Vendor=\"NFG\"\nPackager=\"Ann\"\nLicense=\"BSD\"\nURL=\"http://nfg.example\"\n\
+             Release Notes=\"First.\"\n"
+        );
+        let d = parse(&text).unwrap().description;
+        assert_eq!(
+            d,
+            Description {
+                description: Some("Edits trees.".into()),
+                summary: Some("Tree API".into()),
+                vendor: Some("NFG".into()),
+                packager: Some("Ann".into()),
+                license: Some("BSD".into()),
+                url: Some("http://nfg.example".into()),
+                release_notes: Some("First.".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn a_missing_section_and_an_empty_value_are_both_absent() {
+        assert_eq!(parse(SAMPLE).unwrap().description, Description::default());
+        let text = format!("{SAMPLE}\n[Description]\nSummary=\"\"\nVendor=\"NFG\"\n");
+        let d = parse(&text).unwrap().description;
+        assert_eq!(d.summary, None);
+        assert_eq!(d.vendor.as_deref(), Some("NFG"));
     }
 
     #[test]

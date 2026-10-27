@@ -20,6 +20,7 @@ use lvpm_core::config::Config;
 use lvpm_core::ops::{Destination, DestinationFlags, OpEnv};
 use lvpm_core::target::{self, LvTarget};
 use std::collections::HashSet;
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -88,8 +89,9 @@ static FOREIGN_LISTENERS: LazyLock<HashSet<u16>> = LazyLock::new(|| {
         .map(|out| venv::listening_ports(&String::from_utf8_lossy(&out.stdout)))
         .unwrap_or_default()
 });
-/// A sandbox directory whose venv port is none of those: any one path has a
-/// small chance of colliding, so this is a handful of tries at most.
+/// A sandbox directory whose venv port is none of those and can be opened:
+/// with Windows' reserved ranges most of 3400–3999 may be out, so this can
+/// take dozens of tries, still far below the limit.
 const MAX_DIR_ATTEMPTS: usize = 1_000;
 
 fn create_dir_avoiding(taken: &HashSet<u16>) -> TempDir {
@@ -99,7 +101,9 @@ fn create_dir_avoiding(taken: &HashSet<u16>) -> TempDir {
             .tempdir()
             .expect("create the sandbox directory");
         let port = venv::predicted_port(&dir.path().join(WORK_DIR).join(VENV_DIR));
-        if !taken.contains(&port) {
+        // A port Windows has reserved has no listener but cannot be opened
+        // either; `venv create` would step past it, away from `predicted_port`.
+        if !taken.contains(&port) && TcpListener::bind(("127.0.0.1", port)).is_ok() {
             return dir;
         }
     }
@@ -449,9 +453,14 @@ impl Sandbox {
     /// Run the built `lvpm` with `args` in this sandbox; `input` is what its
     /// stdin carries, for commands that ask a question.
     pub fn run_lvpm(&self, args: &[&str], input: Option<&str>) -> Output {
-        self.refuse_a_real_installation(args, &MACHINE_TARGETS);
+        self.run_lvpm_in(&self.work_dir(), args, input)
+    }
+
+    /// [`Sandbox::run_lvpm`] in `cwd` instead of the working directory.
+    pub fn run_lvpm_in(&self, cwd: &Path, args: &[&str], input: Option<&str>) -> Output {
+        self.refuse_a_real_installation(args, cwd, &MACHINE_TARGETS);
         let mut command = Command::new(env!("CARGO_BIN_EXE_lvpm"));
-        command.args(args).current_dir(self.work_dir());
+        command.args(args).current_dir(cwd);
         self.apply_environment(&mut command);
         let output = process::run_within(command, input, RUN_TIMEOUT)
             .unwrap_or_else(|why| panic!("`lvpm {}` did not finish: {why}", args.join(" ")));
@@ -461,12 +470,10 @@ impl Sandbox {
 
     /// Panics rather than let `lvpm <args>` change a real LabVIEW installation
     /// (see `real_installation_risk`), whatever scenario asked for it.
-    fn refuse_a_real_installation(&self, args: &[&str], targets: &[LvTarget]) {
+    fn refuse_a_real_installation(&self, args: &[&str], cwd: &Path, targets: &[LvTarget]) {
         let fixture_armed = self.learned().global_fixture_armed;
         let headless = self.is_headless();
-        if let Some(why) =
-            real_installation_risk(args, &self.work_dir(), targets, fixture_armed, headless)
-        {
+        if let Some(why) = real_installation_risk(args, cwd, targets, fixture_armed, headless) {
             panic!("{why}");
         }
     }
@@ -1045,26 +1052,25 @@ mod tests {
     #[test]
     #[should_panic(expected = "refusing to run `lvpm sync --labview-version 2026`")]
     fn the_sandbox_will_not_run_a_sync_at_a_real_installation() {
-        Sandbox::new()
-            .refuse_a_real_installation(&["sync", "--labview-version", "2026"], &[labview_2026()]);
+        let sandbox = Sandbox::new();
+        let args = ["sync", "--labview-version", "2026"];
+        sandbox.refuse_a_real_installation(&args, &sandbox.work_dir(), &[labview_2026()]);
     }
 
     #[test]
     #[should_panic(expected = "refusing to run `lvpm add gamma --labview-version 2026`")]
     fn the_sandbox_will_not_run_an_add_at_a_real_installation() {
-        Sandbox::new().refuse_a_real_installation(
-            &["add", "gamma", "--labview-version", "2026"],
-            &[labview_2026()],
-        );
+        let sandbox = Sandbox::new();
+        let args = ["add", "gamma", "--labview-version", "2026"];
+        sandbox.refuse_a_real_installation(&args, &sandbox.work_dir(), &[labview_2026()]);
     }
 
     #[test]
     #[should_panic(expected = "refusing to run `lvpm remove gamma --labview-version 2026`")]
     fn the_sandbox_will_not_run_a_remove_at_a_real_installation() {
-        Sandbox::new().refuse_a_real_installation(
-            &["remove", "gamma", "--labview-version", "2026"],
-            &[labview_2026()],
-        );
+        let sandbox = Sandbox::new();
+        let args = ["remove", "gamma", "--labview-version", "2026"];
+        sandbox.refuse_a_real_installation(&args, &sandbox.work_dir(), &[labview_2026()]);
     }
 
     #[test]
@@ -1073,12 +1079,12 @@ mod tests {
         let sandbox = Sandbox::new();
         let args = ["install", "lvpm_test_fixture", "--labview-version", "2026"];
         let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            sandbox.refuse_a_real_installation(&args, &[labview_2026()]);
+            sandbox.refuse_a_real_installation(&args, &sandbox.work_dir(), &[labview_2026()]);
         }));
         assert!(refused.is_err(), "refused before it is armed");
 
         sandbox.learned().global_fixture_armed = true;
-        sandbox.refuse_a_real_installation(&args, &[labview_2026()]);
+        sandbox.refuse_a_real_installation(&args, &sandbox.work_dir(), &[labview_2026()]);
         // Nothing was armed on the installation, so there is nothing to restore.
         sandbox.learned().global_fixture_armed = false;
     }

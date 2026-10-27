@@ -58,6 +58,15 @@ impl Constraint {
             _ => Constraint::Exact(Version::parse(s)),
         })
     }
+
+    /// Whether `version` meets this constraint.
+    pub fn admits(&self, version: &Version) -> bool {
+        match self {
+            Constraint::Exact(v) => version == v,
+            Constraint::AtLeast(v) => version >= v,
+            Constraint::Any => true,
+        }
+    }
 }
 
 /// A package as a command names it: `name`, or `name@constraint`. The
@@ -66,6 +75,15 @@ impl Constraint {
 pub struct PackageArg {
     pub name: String,
     pub constraint: Option<String>,
+}
+
+impl PackageArg {
+    /// The constraint, read: [`Constraint::Any`] when none was written.
+    pub fn read_constraint(&self) -> Result<Constraint> {
+        self.constraint
+            .as_deref()
+            .map_or(Ok(Constraint::Any), Constraint::parse)
+    }
 }
 
 /// What is wrong with a [`PackageArg`].
@@ -372,6 +390,19 @@ ni-daqmx-labview-support = "26.0.0.49434-0+f282"
         );
         assert_eq!(p.dependencies[3].1, Constraint::Any);
         assert_eq!(p.nipm, ["ni-daqmx-labview-support"]);
+    }
+
+    #[test]
+    fn a_constraint_admits_its_own_bound() {
+        let v = |s: &str| Version::parse(s);
+        assert!(Constraint::AtLeast(v("2.0")).admits(&v("2.0")));
+        assert!(!Constraint::AtLeast(v("2.0")).admits(&v("1.9")));
+        assert!(Constraint::Exact(v("1.0")).admits(&v("1.0")));
+        assert!(!Constraint::Exact(v("1.0")).admits(&v("1.1")));
+        assert!(Constraint::Any.admits(&v("0.1")));
+        let arg = |s: &str| PackageArg::parse(s).unwrap().read_constraint();
+        assert_eq!(arg("a").unwrap(), Constraint::Any);
+        assert!(arg("a@<2").is_err());
     }
 
     #[test]

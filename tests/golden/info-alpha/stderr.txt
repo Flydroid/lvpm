@@ -1,0 +1,2 @@
+  downloading feed http://<FEED>/listed/index.vipr (first run) ... 0.0 MB in <DUR>
+  fetching alpha 2.0

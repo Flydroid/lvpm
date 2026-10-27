@@ -1,0 +1,7 @@
+#!/bin/sh
+# Fast checks before each commit: formatting and clippy. Tests stay in CI.
+# Turn on once per clone: git config core.hooksPath .githooks
+# Skip one commit: git commit --no-verify
+set -e
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --quiet -- -D warnings

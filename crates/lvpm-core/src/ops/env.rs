@@ -236,13 +236,24 @@ impl<'a> OpEnv<'a> {
     /// Every index the command should see: global local folders plus hosted
     /// manifest sources, on top of the public indexes unless disabled.
     pub fn load_index(&self, manifest: Option<&(PathBuf, Project)>) -> Result<Index> {
+        let loaded = self.load_index_each(manifest, |_, error| Err(error))?;
+        Ok(loaded.index)
+    }
+
+    /// [`Self::load_index`], handing a source that cannot be read to `on_fail`
+    /// as [`index::load_each`] does.
+    pub(super) fn load_index_each(
+        &self,
+        manifest: Option<&(PathBuf, Project)>,
+        on_fail: impl FnMut(&str, anyhow::Error) -> Result<()>,
+    ) -> Result<index::Loaded> {
         let mut repos: Vec<String> = Vec::new();
         let mut defaults = true;
         if let Some((_, proj)) = manifest {
             repos.extend(proj.resolved_sources()?);
             defaults = proj.default_sources;
         }
-        index::load(
+        index::load_each(
             &self.config.cache,
             self.refresh,
             &repos,
@@ -250,6 +261,7 @@ impl<'a> OpEnv<'a> {
             defaults,
             self.sink,
             &self.cancel,
+            on_fail,
         )
     }
 }

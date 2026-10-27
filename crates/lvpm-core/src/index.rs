@@ -18,6 +18,7 @@ use md5::{Digest, Md5};
 use reqwest::StatusCode;
 use reqwest::blocking::Client;
 use reqwest::header::{ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED};
+use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -33,7 +34,7 @@ pub(crate) const SOURCES: &[(&str, &str)] = &[
     ),
 ];
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Requirement {
     pub name: String,
     pub min: Option<Version>,
@@ -76,7 +77,7 @@ impl Floor {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Entry {
     pub name: String,
     pub version: Version,
@@ -86,6 +87,24 @@ pub struct Entry {
     pub requires: Vec<Requirement>,
     /// Minimum LabVIEW version, parsed out of e.g. `LabVIEW>=20.0`.
     pub lv_min: Option<f64>,
+    /// Where the entry was listed: a feed's index URL, a local folder, or
+    /// [`CACHE_SOURCE`] for an imported archive, which is not in
+    /// [`Loaded::sources`].
+    pub source: String,
+}
+
+/// The [`Entry::source`] of an archive imported with `lvpm cache add`.
+pub const CACHE_SOURCE: &str = "cache";
+
+impl Entry {
+    /// Whether the name or display name contains `query`, which is lowercase.
+    fn matches(&self, query: &str) -> bool {
+        self.name.to_lowercase().contains(query)
+            || self
+                .display_name
+                .as_deref()
+                .is_some_and(|d| d.to_lowercase().contains(query))
+    }
 }
 
 impl From<&Entry> for LocalEntry {
@@ -131,6 +150,7 @@ fn local_entry(entry: LocalEntry, url: String, md5: Option<String>) -> Entry {
             })
             .collect(),
         lv_min: entry.lv_min,
+        source: String::new(),
     }
 }
 
@@ -158,17 +178,15 @@ impl Index {
         })
     }
 
-    pub fn search(&self, query: &str) -> Vec<&Entry> {
+    /// Every entry whose name or display name contains `query`, in any case.
+    pub fn matching<'i>(&'i self, query: &str) -> impl Iterator<Item = &'i Entry> {
         let q = query.to_lowercase();
+        self.entries.iter().filter(move |e| e.matches(&q))
+    }
+
+    pub fn search(&self, query: &str) -> Vec<&Entry> {
         let mut seen: HashMap<&str, &Entry> = HashMap::new();
-        for e in &self.entries {
-            let hit = e.name.to_lowercase().contains(&q)
-                || e.display_name
-                    .as_deref()
-                    .is_some_and(|d| d.to_lowercase().contains(&q));
-            if !hit {
-                continue;
-            }
+        for e in self.matching(query) {
             seen.entry(&e.name)
                 .and_modify(|cur| {
                     if e.version > cur.version {
@@ -252,17 +270,8 @@ fn entry_from_vip(path: &Path) -> Result<Entry> {
 }
 
 fn entry_from_bytes(path: &Path, bytes: &[u8]) -> Result<Entry> {
-    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;
-    let idx = (0..zip.len())
-        .find(|i| {
-            zip.by_index(*i)
-                .map(|f| f.name().eq_ignore_ascii_case("spec"))
-                .unwrap_or(false)
-        })
-        .context("no `spec` member")?;
-    let mut buf = Vec::new();
-    std::io::Read::read_to_end(&mut zip.by_index(idx)?, &mut buf)?;
-    let spec = crate::spec::parse(&String::from_utf8_lossy(&buf))?;
+    let mut zip = crate::install::open_archive(bytes.to_vec())?;
+    let spec = crate::install::read_spec(&mut zip)?;
 
     Ok(Entry {
         name: spec.name,
@@ -276,10 +285,12 @@ fn entry_from_bytes(path: &Path, bytes: &[u8]) -> Result<Entry> {
             .map(parse_requires)
             .unwrap_or_default(),
         lv_min: spec.lv_gate.as_deref().and_then(parse_lv_gate),
+        source: String::new(),
     })
 }
 
 /// One file processed by cache add, including its content address and reuse status.
+#[derive(Serialize)]
 pub struct Import {
     pub path: PathBuf,
     pub sha256: String,
@@ -401,39 +412,105 @@ pub fn load(
     sink: &dyn EventSink,
     cancel: &CancelToken,
 ) -> Result<Index> {
+    let loaded = load_each(
+        cache_dir,
+        refresh,
+        extra,
+        local_sources,
+        defaults,
+        sink,
+        cancel,
+        |_, error| Err(error),
+    )?;
+    Ok(loaded.index)
+}
+
+/// What [`load_each`] read, and the name of every source it was asked to.
+pub struct Loaded {
+    pub index: Index,
+    /// Each local folder, then each feed's index URL.
+    pub sources: Vec<String>,
+}
+
+/// [`load`], handing a source that cannot be read to `on_fail` with its name:
+/// an `Err` back ends the load, an `Ok` skips that source. A cache error while
+/// reading a source counts as that source failing.
+#[allow(clippy::too_many_arguments)]
+pub fn load_each(
+    cache_dir: &Path,
+    refresh: bool,
+    extra: &[String],
+    local_sources: &[PathBuf],
+    defaults: bool,
+    sink: &dyn EventSink,
+    cancel: &CancelToken,
+    mut on_fail: impl FnMut(&str, anyhow::Error) -> Result<()>,
+) -> Result<Loaded> {
     let mut entries = Vec::new();
+    let mut sources = Vec::new();
     let cache = Cache::open(cache_dir)?;
     for package in cache.imported_packages()? {
-        entries.push(local_entry(
-            package.entry,
-            format!("cache:{}", package.sha256),
-            Some(package.md5),
-        ));
+        entries.push(Entry {
+            source: CACHE_SOURCE.to_string(),
+            ..local_entry(
+                package.entry,
+                format!("cache:{}", package.sha256),
+                Some(package.md5),
+            )
+        });
     }
 
     for dir in local_sources {
-        if !dir.is_dir() {
-            anyhow::bail!("local source {} is not a directory", dir.display());
+        let name = dir.to_string_lossy().into_owned();
+        let start = entries.len();
+        let scanned = match dir.is_dir() {
+            false => Err(anyhow::anyhow!(
+                "local source {} is not a directory",
+                dir.display()
+            )),
+            true => scan_local_repo(&cache, dir, refresh, &mut entries, sink),
+        };
+        match scanned {
+            Ok(()) => label(&mut entries[start..], &name),
+            Err(error) => {
+                entries.truncate(start);
+                on_fail(&name, error)?;
+            }
         }
-        scan_local_repo(&cache, dir, refresh, &mut entries, sink)?;
+        sources.push(name);
     }
 
-    let sources = feeds(extra, defaults);
-    if sources.is_empty() {
-        return Ok(Index { entries });
+    let feeds = feeds(extra, defaults);
+    if feeds.is_empty() {
+        let index = Index { entries };
+        return Ok(Loaded { index, sources });
     }
     let client = Client::builder()
         .user_agent(concat!("lvpm/", env!("CARGO_PKG_VERSION")))
         .build()?;
-    for (url, base) in &sources {
+    for (url, base) in &feeds {
         if cancel.is_cancelled() {
             return Err(Cancelled.into());
         }
-        let body = feed_body(&cache, &client, url, base, refresh, sink)?;
-        parse_into(&body, base, &mut entries);
+        sources.push(url.clone());
+        match feed_body(&cache, &client, url, base, refresh, sink) {
+            Ok(body) => {
+                let start = entries.len();
+                parse_into(&body, base, &mut entries);
+                label(&mut entries[start..], url);
+            }
+            Err(error) => on_fail(url, error)?,
+        }
     }
 
-    Ok(Index { entries })
+    let index = Index { entries };
+    Ok(Loaded { index, sources })
+}
+
+fn label(entries: &mut [Entry], source: &str) {
+    for entry in entries {
+        entry.source = source.to_string();
+    }
 }
 
 /// A feed's body, from the cache when the server says it has not changed.
@@ -560,6 +637,7 @@ fn parse_into(body: &str, base_url: &str, out: &mut Vec<Entry>) {
             lv_min: kv
                 .get("Platform.Exclusive_LabVIEW_Version")
                 .and_then(|s| parse_lv_gate(s)),
+            source: String::new(),
         });
     };
 
@@ -1075,6 +1153,7 @@ Package.Display Name=A Thing
             display_name: None,
             requires: parse_requires(requires),
             lv_min: None,
+            source: String::new(),
         }
     }
 
