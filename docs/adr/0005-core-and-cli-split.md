@@ -49,8 +49,11 @@ This records the split as built.
 - A slice that adds an operation touches `ops/`, `events.rs`,
   `src/render/mod.rs` and `src/main.rs`. The wave notes in build-slices.md
   count these as collisions.
-- AC-K1 also names an `lvpm-tui` crate. It is not built; AC-P3 of the TUI
-  spec gates it.
+- AC-K1 also names an `lvpm-tui` crate. AC-P3 of the TUI spec passed on
+  2026-10-26, and `crates/lvpm-tui` now exists. It depends on `lvpm-core`
+  only, which `tests/workspace.rs` checks. `crates/lvpm-testkit`
+  (`publish = false`) holds the shared test fixtures and is only ever a
+  dev-dependency.
 - **For the 2026-10-30 alignment:** upstream's `refactor-main.md` and this
   ADR agree that the library never parses arguments or prints. They differ in
   shape (a crate versus a `cmd/` folder) and in timing (events already built

@@ -74,7 +74,8 @@ jobs:
         run: |
           robocopy . C:\src\lvpm /E /XD target .git /NFL /NDL /NJH /NJS /NP | Out-Null
           if ($LASTEXITCODE -ge 8) { exit $LASTEXITCODE }
-          cargo test --manifest-path C:\src\lvpm\Cargo.toml --test acceptance --no-run --locked
+          # -p lvpm: lvpm-tui has an `acceptance` test too, and the e2e script runs the one binary.
+          cargo test --manifest-path C:\src\lvpm\Cargo.toml -p lvpm --test acceptance --no-run --locked
           exit $LASTEXITCODE
       - uses: actions/upload-artifact@v4
         if: inputs.acceptance && matrix.os == 'windows'

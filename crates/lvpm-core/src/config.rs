@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 pub(crate) const DEFAULT_VENV_DIR: &str = ".lv-venv";
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Config {
     /// Where downloaded indexes (and later, packages) are cached.
     pub cache: PathBuf,

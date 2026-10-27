@@ -16,17 +16,22 @@ Feature: Install with a preview, progress and a log
     Then the list shows "alpha" as "installed" and "alpha" is selected
 
   Scenario: the preview is computed with a cancel
-    Given the feed is paused
+    Given the feed holds archive downloads
     When "alpha" is selected and "i" is pressed
     Then the screen says the plan is being computed
     When Esc is pressed
     Then the list is shown with "alpha" selected and nothing is installed
 
   Scenario: a plan that cannot be made is shown
+    Given the archive of "alpha" 2.0 cannot be fetched
+    When "alpha" is selected and "i" is pressed
+    Then the screen shows core's error
+    And Esc returns to the list with "alpha" selected
+
+  Scenario: the preview names a dependency no source has
     Given "alpha" 2.0 instead requires "omega" 1.0, which no source has
     When "alpha" is selected and "i" is pressed
-    Then the screen shows core's error naming "omega"
-    And Esc returns to the list with "alpha" selected
+    Then the preview says no source has "omega"
 
   Scenario: Esc on the preview changes nothing
     When "alpha" is selected, "i" is pressed and Esc is pressed
@@ -121,8 +126,3 @@ Feature: Install with a preview, progress and a log
     When an install runs to the end
     Then the install succeeds
     And the footer says tui.log could not be written
-
-  Scenario: the release zip holds both binaries
-    When the Windows release zip is built
-    Then it contains lvpm.exe and lvpm-tui.exe with the same version string
-    And install.ps1 installs both and its output names lvpm-tui

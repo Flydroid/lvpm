@@ -2,9 +2,7 @@
 //! (the unit tests of this code). Each target uses a different subset.
 #![allow(dead_code, unused_imports)]
 
-pub mod events;
-pub mod feed;
-pub mod fixtures;
+pub use lvpm_testkit::{events, feed, fixtures};
 pub mod global;
 pub mod golden;
 pub mod normalise;

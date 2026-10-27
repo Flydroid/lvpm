@@ -106,9 +106,9 @@ Done:
 
 Planned:
 
-- **`lvpm-tui`** — a full-screen terminal UI over the same operations. It is
-  gated on a throwaway mock on fake data that the stakeholder approves first;
-  no TUI-specific code is written before that.
+- **`lvpm-tui`** — a full-screen terminal UI over the same operations, in
+  progress (`plans/lvpm-tui.md`): browse, details, reload and install in
+  global mode work; shipping it in the release zip and venv mode are next.
 - **`--json`** output for the new commands, package details and an uncapped
   catalog listing, which both front ends share.
 - Plans as data (not only as events) and a dry run for `lock --upgrade`, which

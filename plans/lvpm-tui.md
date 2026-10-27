@@ -113,9 +113,11 @@ first install a package.
 ### TUI
 
 - **The TUI drives core on one worker thread.** The UI thread owns the
-  terminal and the state. A worker runs one job at a time with a
-  `ChannelSink` (events into an `mpsc` channel) and the job's `CancelToken`.
-  The UI polls the channel every tick. A batch is a list of jobs; the batch
+  terminal and the state. A worker runs one job at a time and sends its
+  result over an `mpsc` channel; the UI polls the channel every tick.
+  Slice 5 runs the job with `destination::Quiet` (no progress); a sink that
+  sends core's events to the UI comes with the first job that shows
+  progress. A batch is a list of jobs; the batch
   runner gives each job its own token, and a cancel ends the batch (spec).
 - **`OpEnv` comes from one builder.** `destination.rs` has `EnvBuilder::new
   (config, targets, cwd)`, and `builder.env(&sink, token)` yields a per-job
@@ -715,19 +717,19 @@ Feature: Browse the catalog
 #### Step 5.1: Destination at start, the worker and the loading state
 
 **Complexity**: complex
-**IMPLEMENT**: `EnvBuilder` builds each job's `OpEnv` as the CLI does; `worker.rs` runs one job on a thread with a `ChannelSink` and returns its result; the catalog and the installed list load as one job; the total and partial failure states.
+**IMPLEMENT**: `EnvBuilder` builds each job's `OpEnv` as the CLI does; `worker.rs` runs one job on a thread with `destination::Quiet` and returns its result; the catalog and the installed list load as one job; the total and partial failure states.
 **TEST**: The destination, loading and failure scenarios, with the feed's pause as the latch.
 **REFACTOR**: A `Job` enum names every job the worker can run.
-**Files**: `crates/lvpm-tui/src/app.rs`, `crates/lvpm-tui/src/worker.rs`, `crates/lvpm-tui/src/destination.rs`, `crates/lvpm-tui/src/ui.rs`, `crates/lvpm-tui/tests/steps.rs`
+**Files**: `crates/lvpm-tui/src/app.rs`, `crates/lvpm-tui/src/worker.rs`, `crates/lvpm-tui/src/destination.rs`, `crates/lvpm-tui/src/ui.rs`, `crates/lvpm-tui/src/main.rs`, `crates/lvpm-tui/tests/steps.rs`, `crates/lvpm-tui/tests/acceptance.rs`, `crates/lvpm-tui/tests/browse_steps.rs`, `crates/lvpm-core/src/config.rs`, `crates/lvpm-core/src/ops/env.rs`, `crates/lvpm-testkit/src/feed.rs`
 **Commit**: `feat(tui): resolve the destination and load the catalog off the UI thread`
 
 #### Step 5.2: Rows, statuses, navigation, search and filter
 
 **Complexity**: standard
-**IMPLEMENT**: `ops::query::compatible` in core; the mock's package table with the four statuses, Up/Down/PgUp/PgDn/Home/End, `/` search, `f` filter, the count line, the incompatible footer; the keys in `keys.rs`. Run the manual checklist with the list on screen.
+**IMPLEMENT**: `ops::query::needs_newer_labview` and `ops::query::resolvable` in core; the mock's package table with the four statuses, Up/Down/PgUp/PgDn/Home/End, `/` search, `f` filter, the count line, the incompatible footer; the keys in `keys.rs`. Run the manual checklist with the list on screen.
 **TEST**: The remaining scenarios; status unit tests.
-**REFACTOR**: The status rule is one pure function in `browse.rs` over core's `compatible`.
-**Files**: `crates/lvpm-core/src/ops/query.rs`, `crates/lvpm-core/src/solve.rs`, `crates/lvpm-tui/src/browse.rs`, `crates/lvpm-tui/src/keys.rs`, `crates/lvpm-tui/src/ui.rs`, `crates/lvpm-tui/tests/steps.rs`, `docs/manual/tui-terminals.md`
+**REFACTOR**: The status rule is one pure function in `browse.rs` over core's `resolvable` and `needs_newer_labview`.
+**Files**: `crates/lvpm-core/src/ops/query.rs`, `crates/lvpm-core/src/index.rs`, `crates/lvpm-tui/src/browse.rs`, `crates/lvpm-tui/src/keys.rs`, `crates/lvpm-tui/src/ui.rs`, `crates/lvpm-tui/src/app.rs`, `crates/lvpm-tui/tests/steps.rs`, `crates/lvpm-tui/tests/browse_steps.rs`, `docs/manual/tui-terminals.md`
 **Commit**: `feat(tui): browse, search and filter the catalog`
 
 ### Slice 6: Package details and reloading the feeds
@@ -748,10 +750,10 @@ Feature: Package details and reloading the feeds
   Scenario: details show the versions, requirements and spec fields
     When "alpha" is selected and Enter is pressed
     Then the detail view lists 2.0 and 1.0
-    And, once loaded, it shows the description, vendor and license of 2.0 and its requirements
+    And once loaded, it shows the description, vendor and license of 2.0 and its requirements
 
   Scenario: the detail view accepts input while it loads
-    Given the feed is paused
+    Given the feed holds archive downloads
     When the detail view of "alpha" opens
     Then it shows a loading state
     And Down selects 1.0
@@ -799,7 +801,7 @@ Feature: Package details and reloading the feeds
 **Complexity**: standard
 **IMPLEMENT**: The mock's detail layout (versions left, fields right), a details job per selected version, the loading and error states, Tab focus and scrolling.
 **TEST**: The detail scenarios and the "qix" scenario.
-**REFACTOR**: Cache loaded details per name and version for the session.
+**REFACTOR**: Cache loaded details per name and version until a reload succeeds, as the feeds may list other details then.
 **Files**: `crates/lvpm-tui/src/detail.rs`, `crates/lvpm-tui/src/app.rs`, `crates/lvpm-tui/src/ui.rs`, `crates/lvpm-tui/src/keys.rs`, `crates/lvpm-tui/src/worker.rs`, `crates/lvpm-tui/tests/steps.rs`
 **Commit**: `feat(tui): package details`
 
@@ -839,17 +841,22 @@ Feature: Install with a preview, progress and a log
     Then the list shows "alpha" as "installed" and "alpha" is selected
 
   Scenario: the preview is computed with a cancel
-    Given the feed is paused
+    Given the feed holds archive downloads
     When "alpha" is selected and "i" is pressed
     Then the screen says the plan is being computed
     When Esc is pressed
     Then the list is shown with "alpha" selected and nothing is installed
 
   Scenario: a plan that cannot be made is shown
+    Given the archive of "alpha" 2.0 cannot be fetched
+    When "alpha" is selected and "i" is pressed
+    Then the screen shows core's error
+    And Esc returns to the list with "alpha" selected
+
+  Scenario: the preview names a dependency no source has
     Given "alpha" 2.0 instead requires "omega" 1.0, which no source has
     When "alpha" is selected and "i" is pressed
-    Then the screen shows core's error naming "omega"
-    And Esc returns to the list with "alpha" selected
+    Then the preview says no source has "omega"
 
   Scenario: Esc on the preview changes nothing
     When "alpha" is selected, "i" is pressed and Esc is pressed
@@ -944,11 +951,6 @@ Feature: Install with a preview, progress and a log
     When an install runs to the end
     Then the install succeeds
     And the footer says tui.log could not be written
-
-  Scenario: the release zip holds both binaries
-    When the Windows release zip is built
-    Then it contains lvpm.exe and lvpm-tui.exe with the same version string
-    And install.ps1 installs both and its output names lvpm-tui
 ```
 
 **Steps:**
@@ -984,7 +986,7 @@ Feature: Install with a preview, progress and a log
 
 **Complexity**: standard
 **IMPLEMENT**: `build.yml` builds the workspace and uploads both binaries; `package.sh` puts `lvpm-tui.exe` in the Windows zip; `install.ps1` installs it and names it in its output; the packaging job checks both versions; the README says how to start it. Run the manual checklist with an install on screen.
-**TEST**: `ci/package.test.sh` asserts both binaries and one version are in the zip; the zip scenario in the root harness.
+**TEST**: `ci/package.test.sh` asserts both binaries and one version are in the zip; a root-harness scenario: the Windows release zip holds `lvpm.exe` and `lvpm-tui.exe` with the same version string, and `install.ps1` installs both and its output names lvpm-tui. (It is not in the slice's feature: that feature's background starts the TUI.)
 **REFACTOR**: One list of shipped binaries in `package.sh`.
 **Files**: `.github/workflows/build.yml`, `.github/workflows/package.yml`, `ci/package.sh`, `ci/package.test.sh`, `scripts/install.ps1`, `README.md`, `tests/steps/workspace.rs`, `docs/manual/tui-terminals.md`
 **Commit**: `ci: ship lvpm-tui.exe in the release zip`
@@ -1601,26 +1603,26 @@ None.
 
 ### Wave 4
 - [ ] Slice 4: The `lvpm-tui` crate starts and quits
-  - [ ] Step 4.1: The dev-only test kit
-  - [ ] Step 4.2: Crate, terminal setup and the empty frame
+  - [x] Step 4.1: The dev-only test kit
+  - [x] Step 4.2: Crate, terminal setup and the empty frame
   - [ ] Step 4.3: The manual terminal checklist
 
 ### Wave 5
 - [ ] Slice 5: Browse the catalog
-  - [ ] Step 5.1: Destination at start, the worker and the loading state
-  - [ ] Step 5.2: Rows, statuses, navigation, search and filter
+  - [x] Step 5.1: Destination at start, the worker and the loading state
+  - [x] Step 5.2: Rows, statuses, navigation, search and filter (manual checklist not run yet)
 
 ### Wave 6
 - [ ] Slice 6: Package details and reloading the feeds
-  - [ ] Step 6.1: The detail view on `ops::query::info`
-  - [ ] Step 6.2: Reload feeds
+  - [x] Step 6.1: The detail view on `ops::query::info` (manual checklist not run yet)
+  - [x] Step 6.2: Reload feeds (manual checklist not run yet)
 
 ### Wave 7
 - [ ] Slice 7: Install in global mode: preview, progress, cancel, log; ship it
-  - [ ] Step 7.1: Preview from a dry run, confirm, run
-  - [ ] Step 7.2: Busy mode, progress and cancel
-  - [ ] Step 7.3: In-session log and `tui.log`
-  - [ ] Step 7.4: Build and ship `lvpm-tui.exe`
+  - [x] Step 7.1: Preview from a dry run, confirm, run
+  - [x] Step 7.2: Busy mode, progress and cancel
+  - [x] Step 7.3: In-session log and `tui.log`
+  - [ ] Step 7.4: Build and ship `lvpm-tui.exe` (deferred: PR #45 changes the CI workflows)
 
 ### Wave 8
 - [ ] Slice 8: Uninstall, multi-select and upgrade all in global mode

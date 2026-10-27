@@ -82,6 +82,14 @@ impl Destination {
             Destination::Venv(v) => v.store(),
         }
     }
+
+    /// The LabVIEW the destination is for, if any: a scratch prefix has none.
+    pub fn target(&self) -> Option<&LvTarget> {
+        match self {
+            Destination::Venv(v) => Some(&v.target),
+            Destination::Global(r) | Destination::Scratch(r) => r.target.as_ref(),
+        }
+    }
 }
 
 impl<'a> OpEnv<'a> {

@@ -1,8 +1,10 @@
 [workspace]
-members = ["crates/lvpm-core"]
+members = ["crates/lvpm-core", "crates/lvpm-testkit", "crates/lvpm-tui"]
+# Plain `cargo test` also runs the TUI's and the testkit's tests; core's run inside tests/workspace.rs.
+default-members = [".", "crates/lvpm-testkit", "crates/lvpm-tui"]
 
 [workspace.package]
-version = "0.10.0"
+version = "0.11.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/ThatsTheEnd/lvpm"
@@ -25,6 +27,7 @@ clap = { version = "4.6.6", features = ["derive"] }
 [dev-dependencies]
 cucumber = "0.23.0"
 futures = "0.3.34"
+lvpm-testkit = { path = "crates/lvpm-testkit" }
 md-5 = "0.11.0"
 regex = "1.13.1"
 sha2 = "0.11.0"

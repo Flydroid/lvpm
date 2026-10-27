@@ -1,5 +1,7 @@
 //! The workspace's shape, from
-//! `tests/features/lvpm-lockfile/slice-2-cargo-workspace-with-lvpm-core.feature`.
+//! `tests/features/lvpm-lockfile/slice-2-cargo-workspace-with-lvpm-core.feature`
+//! and the first two scenarios of
+//! `tests/features/lvpm-tui/slice-4-the-lvpm-tui-crate-starts-and-quits.feature`.
 //!
 //! These tests call `cargo` itself: they are about how the repository is
 //! built, not about what lvpm does.
@@ -20,6 +22,8 @@ const RECORDED_UNIT_TESTS: &str = include_str!("golden/unit-tests.txt");
 const CORE_CRATE: &str = "lvpm-core";
 /// The CLI crate, which builds on the core.
 const CLI_CRATE: &str = "lvpm";
+/// The terminal UI crate, which builds on the core and not on the CLI.
+const TUI_CRATE: &str = "lvpm-tui";
 
 fn cargo(args: &[&str]) -> Output {
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
@@ -186,4 +190,51 @@ fn both_crates_report_one_version() {
 
     // Then they are equal.
     assert_eq!(packages[CLI_CRATE].version, packages[CORE_CRATE].version);
+}
+
+#[test]
+fn the_tui_depends_on_core_only() {
+    // When the workspace's dependency graph is read.
+    let metadata = metadata();
+    let packages = workspace_packages(&metadata);
+    let tui = reachable_from(&metadata, &packages[TUI_CRATE].id);
+    let core = reachable_from(&metadata, &packages[CORE_CRATE].id);
+
+    // Then "lvpm-tui" depends on "lvpm-core" and not on "lvpm".
+    assert!(
+        tui.contains(&packages[CORE_CRATE].id),
+        "{TUI_CRATE} uses no core"
+    );
+    assert!(
+        !tui.contains(&packages[CLI_CRATE].id),
+        "{TUI_CRATE} depends on {CLI_CRATE}"
+    );
+
+    // And "lvpm-core" depends on neither binary crate.
+    for binary in [CLI_CRATE, TUI_CRATE] {
+        assert!(packages[binary].has_binary, "{binary} builds a binary");
+        assert!(
+            !core.contains(&packages[binary].id),
+            "{CORE_CRATE} depends on {binary}"
+        );
+    }
+}
+
+#[test]
+fn both_binaries_report_one_version() {
+    // When "lvpm --version" and "lvpm-tui --version" run.
+    let lvpm = Command::new(env!("CARGO_BIN_EXE_lvpm"))
+        .arg("--version")
+        .output()
+        .expect("lvpm can be run");
+    let tui = cargo(&["run", "-q", "--offline", "-p", TUI_CRATE, "--", "--version"]);
+
+    // Then both print the workspace version.
+    let version = env!("CARGO_PKG_VERSION");
+    assert_eq!(stdout_of(&lvpm).trim(), format!("{CLI_CRATE} {version}"));
+    assert_eq!(
+        stdout_of(&tui).trim(),
+        format!("{TUI_CRATE} {version}"),
+        "{tui:?}"
+    );
 }

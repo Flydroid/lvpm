@@ -1,0 +1,17 @@
+[package]
+name = "lvpm-testkit"
+version.workspace = true
+edition.workspace = true
+description = "Test-only helpers shared by the lvpm and lvpm-tui test suites: the fixture packages, the local feed, the recording event sink"
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+lvpm-core = { path = "../lvpm-core" }
+md-5 = "0.11.0"
+serde_json = "1.0.151"
+zip = "8.6.0"
+
+[dev-dependencies]
+sha2 = "0.11.0"

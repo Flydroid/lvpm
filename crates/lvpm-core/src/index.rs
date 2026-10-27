@@ -97,13 +97,19 @@ pub struct Entry {
 pub const CACHE_SOURCE: &str = "cache";
 
 impl Entry {
-    /// Whether the name or display name contains `query`, which is lowercase.
-    fn matches(&self, query: &str) -> bool {
-        self.name.to_lowercase().contains(query)
+    /// Whether the name or display name contains `query`, in any case.
+    pub fn matches(&self, query: &str) -> bool {
+        let query = query.to_lowercase();
+        self.name.to_lowercase().contains(&query)
             || self
                 .display_name
                 .as_deref()
-                .is_some_and(|d| d.to_lowercase().contains(query))
+                .is_some_and(|d| d.to_lowercase().contains(&query))
+    }
+
+    /// Whether a LabVIEW of internal version `lv` (25.0 is 2025) can take it.
+    pub fn fits_labview(&self, lv: f64) -> bool {
+        self.lv_min.is_none_or(|need| lv + 1e-9 >= need)
     }
 }
 
@@ -173,15 +179,13 @@ impl Index {
     /// Best entry for a requirement, honouring an optional LabVIEW gate.
     pub fn best(&self, name: &str, floor: Option<&Floor>, lv: Option<f64>) -> Option<&Entry> {
         self.versions_of(name).into_iter().find(|e| {
-            floor.is_none_or(|f| f.admits(&e.version))
-                && lv.is_none_or(|lv| e.lv_min.is_none_or(|need| lv + 1e-9 >= need))
+            floor.is_none_or(|f| f.admits(&e.version)) && lv.is_none_or(|lv| e.fits_labview(lv))
         })
     }
 
     /// Every entry whose name or display name contains `query`, in any case.
     pub fn matching<'i>(&'i self, query: &str) -> impl Iterator<Item = &'i Entry> {
-        let q = query.to_lowercase();
-        self.entries.iter().filter(move |e| e.matches(&q))
+        self.entries.iter().filter(move |e| e.matches(query))
     }
 
     pub fn search(&self, query: &str) -> Vec<&Entry> {

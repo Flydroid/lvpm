@@ -7,12 +7,12 @@
 //! public default feeds, and the package archives those feeds point at. Every
 //! response carries one fixed `ETag`; a request presenting it gets `304`.
 
-use super::fixtures::FixturePackage;
+use crate::fixtures::FixturePackage;
 use md5::{Digest, Md5};
 use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -32,6 +32,9 @@ const BROKEN_ARCHIVE_ID: &str = "broken_zip-1.0";
 pub const CATALOG_FEED_DIR: &str = "/catalog/";
 /// How many packages the catalog feed lists: more than search's cap of 40.
 pub const CATALOG_SIZE: usize = 45;
+/// A feed under this directory takes each request and closes the connection
+/// unanswered, as one that has hung up does.
+pub const SILENT_FEED_DIR: &str = "/silent/";
 const _: () = assert!(
     CATALOG_SIZE > 40,
     "the catalog must exceed search's cap of 40"
@@ -74,13 +77,16 @@ const FAULTY_ARCHIVES: &[FaultyArchive] = &[
 ];
 
 type Routes = HashMap<String, Vec<u8>>;
+/// The ETag of each path [`Feed::revise`] changed; every other path has
+/// [`FEED_ETAG`].
+type Etags = Arc<Mutex<HashMap<String, String>>>;
 type Hits = Arc<Mutex<BTreeMap<String, usize>>>;
 
 /// How long a held archive request waits for its release, and how long a test
 /// waits for a request to be held: a safety net, never what a test relies on.
 const HOLD_LIMIT: Duration = Duration::from_secs(10);
 
-/// Holds the answer to an archive request, once armed, until released. The
+/// Holds the answer to a request, once armed, until released. The
 /// feed answers one connection at a time, so one held request holds the feed.
 #[derive(Debug, Default)]
 struct Pause {
@@ -88,11 +94,18 @@ struct Pause {
     changed: Condvar,
 }
 
+/// What the feed holds: archive and listing requests, each on its own.
+#[derive(Debug, Default)]
+struct Pauses {
+    archive: Pause,
+    listing: Pause,
+}
+
 #[derive(Debug, Default)]
 struct PauseState {
-    /// Archive requests are held.
+    /// Requests are held.
     armed: bool,
-    /// An archive request is being held now.
+    /// A request is being held now.
     held: bool,
 }
 
@@ -128,7 +141,10 @@ impl Pause {
             .changed
             .wait_timeout_while(state, HOLD_LIMIT, |state| !state.held)
             .expect("the pause");
-        assert!(state.held, "no archive request was held");
+        // Unlocked first: a panic holding it would poison the pause for the feed thread.
+        let held = state.held;
+        drop(state);
+        assert!(held, "no archive request was held");
     }
 }
 
@@ -136,13 +152,14 @@ impl Pause {
 pub struct Feed {
     addr: SocketAddr,
     routes: Arc<Mutex<Routes>>,
+    etags: Etags,
     hits: Hits,
     stop: Arc<AtomicBool>,
     /// While set, every archive answers 503 and the listings still answer.
     archives_refused: Arc<AtomicBool>,
     /// Once set, nothing is answered: each connection is closed unread.
     down: Arc<AtomicBool>,
-    pause: Arc<Pause>,
+    pauses: Arc<Pauses>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -152,27 +169,37 @@ impl Feed {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind a loopback port");
         let addr = listener.local_addr().expect("bound address");
         let routes = Arc::new(Mutex::new(routes(packages)));
+        let etags = Etags::default();
         let hits = Hits::default();
         let stop = Arc::new(AtomicBool::new(false));
         let archives_refused = Arc::new(AtomicBool::new(false));
         let down = Arc::new(AtomicBool::new(false));
-        let pause = Arc::new(Pause::default());
+        let pauses = Arc::new(Pauses::default());
         let thread = {
             let (hits, stop) = (hits.clone(), stop.clone());
             let (refused, down) = (archives_refused.clone(), down.clone());
-            let (routes, pause) = (routes.clone(), pause.clone());
+            let (routes, etags, pauses) = (routes.clone(), etags.clone(), pauses.clone());
             std::thread::spawn(move || {
-                serve(listener, &routes, &hits, &stop, &refused, &down, &pause)
+                serve(
+                    listener,
+                    (&routes, &etags),
+                    &hits,
+                    &stop,
+                    &refused,
+                    &down,
+                    &pauses,
+                )
             })
         };
         Feed {
             addr,
             routes,
+            etags,
             hits,
             stop,
             archives_refused,
             down,
-            pause,
+            pauses,
             thread: Some(thread),
         }
     }
@@ -200,6 +227,16 @@ impl Feed {
         routes.insert(index_path(dir), listing.as_bytes().to_vec());
     }
 
+    /// [`Feed::publish`], with a new ETag, as a feed whose listing changed
+    /// answers: a client revalidating its cached listing gets this one.
+    pub fn revise(&self, dir: &str, listing: &str) {
+        self.publish(dir, listing);
+        static REVISIONS: AtomicUsize = AtomicUsize::new(1);
+        let revision = REVISIONS.fetch_add(1, Ordering::Relaxed);
+        let mut etags = self.etags.lock().expect("the ETags");
+        etags.insert(index_path(dir), format!("\"lvpm-fixture-feed-{revision}\""));
+    }
+
     /// From now on `path` answers `bytes`.
     pub fn serve(&self, path: &str, bytes: Vec<u8>) {
         let mut routes = self.routes.lock().expect("the routes");
@@ -217,6 +254,12 @@ impl Feed {
         self.archives_refused.store(true, Ordering::SeqCst);
     }
 
+    /// From now on the feed serves its archives again, after
+    /// [`Feed::refuse_archives`].
+    pub fn accept_archives(&self) {
+        self.archives_refused.store(false, Ordering::SeqCst);
+    }
+
     /// From now on the feed answers nothing, listings and archives alike, as
     /// one that has stopped does: every connection is closed unanswered, and
     /// none counts as a request.
@@ -224,20 +267,32 @@ impl Feed {
         self.down.store(true, Ordering::SeqCst);
     }
 
+    /// From now on the feed answers again, after [`Feed::go_down`].
+    pub fn come_up(&self) {
+        self.down.store(false, Ordering::SeqCst);
+    }
+
+    /// From now on the feed takes a listing request and holds its answer until
+    /// [`Feed::release`], as a feed that is slow to answer does.
+    pub fn pause_listings(&self) {
+        self.pauses.listing.arm();
+    }
+
     /// From now on the feed takes an archive request and holds its answer, as
     /// a slow download does, until [`Feed::release`]. Listings are not held.
     pub fn pause_archives(&self) {
-        self.pause.arm();
+        self.pauses.archive.arm();
     }
 
     /// Block until an archive request is being held.
     pub fn wait_for_held_archive(&self) {
-        self.pause.wait_until_held();
+        self.pauses.archive.wait_until_held();
     }
 
-    /// Answer what is held, and every archive request after it.
+    /// Answer what is held, and every request after it.
     pub fn release(&self) {
-        self.pause.release();
+        self.pauses.archive.release();
+        self.pauses.listing.release();
     }
 
     /// How many requests this path has received, including `304`s.
@@ -254,7 +309,7 @@ impl Feed {
 impl Drop for Feed {
     fn drop(&mut self) {
         // A request still held would keep the thread from seeing `stop`.
-        self.pause.release();
+        self.release();
         self.stop.store(true, Ordering::SeqCst);
         // `accept` is blocking; a connection wakes it so it can see the flag.
         TcpStream::connect(self.addr).ok();
@@ -377,12 +432,12 @@ pub fn md5_hex(bytes: &[u8]) -> String {
 
 fn serve(
     listener: TcpListener,
-    routes: &Mutex<Routes>,
+    served: (&Mutex<Routes>, &Etags),
     hits: &Hits,
     stop: &AtomicBool,
     archives_refused: &AtomicBool,
     down: &AtomicBool,
-    pause: &Pause,
+    pauses: &Pauses,
 ) {
     for stream in listener.incoming() {
         if stop.load(Ordering::SeqCst) {
@@ -393,7 +448,7 @@ fn serve(
         }
         if let Ok(stream) = stream {
             // One bad connection must not take the server down for the rest.
-            handle(stream, routes, hits, archives_refused, pause).ok();
+            handle(stream, served, hits, archives_refused, pauses).ok();
         }
     }
 }
@@ -406,10 +461,10 @@ struct Request {
 
 fn handle(
     mut stream: TcpStream,
-    routes: &Mutex<Routes>,
+    (routes, etags): (&Mutex<Routes>, &Etags),
     hits: &Hits,
     archives_refused: &AtomicBool,
-    pause: &Pause,
+    pauses: &Pauses,
 ) -> std::io::Result<()> {
     stream.set_read_timeout(Some(SOCKET_TIMEOUT))?;
     stream.set_write_timeout(Some(SOCKET_TIMEOUT))?;
@@ -419,13 +474,21 @@ fn handle(
         .expect("hit counter")
         .entry(request.path.clone())
         .or_default() += 1;
-    if request.path.ends_with(".vip") {
-        pause.hold();
+    if request.path.starts_with(SILENT_FEED_DIR) {
+        return Ok(());
+    }
+    match request.path.ends_with(".vip") {
+        true => pauses.archive.hold(),
+        false => pauses.listing.hold(),
     }
     let refused = archives_refused.load(Ordering::SeqCst) && request.path.ends_with(".vip");
     let response = match refused {
         true => response("503 Service Unavailable", &[], b""),
-        false => respond(&request, &routes.lock().expect("the routes")),
+        false => {
+            let etag = etags.lock().expect("the ETags").get(&request.path).cloned();
+            let etag = etag.as_deref().unwrap_or(FEED_ETAG);
+            respond(&request, &routes.lock().expect("the routes"), etag)
+        }
     };
     stream.write_all(&response)
 }
@@ -467,15 +530,16 @@ fn path_of(target: &str) -> String {
     }
 }
 
-fn respond(request: &Request, routes: &Routes) -> Vec<u8> {
+fn respond(request: &Request, routes: &Routes, etag: &str) -> Vec<u8> {
     if request.method != "GET" {
         return response("405 Method Not Allowed", &[], b"");
     }
     let Some(body) = routes.get(&request.path) else {
         return response("404 Not Found", &[], b"");
     };
-    let etag = ("ETag", FEED_ETAG);
-    if request.if_none_match.as_deref() == Some(FEED_ETAG) {
+    let matched = request.if_none_match.as_deref() == Some(etag);
+    let etag = ("ETag", etag);
+    if matched {
         return response("304 Not Modified", &[etag], b"");
     }
     response(
@@ -503,7 +567,7 @@ fn response(status: &str, headers: &[(&str, &str)], body: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::support::fixtures::PACKAGES;
+    use crate::fixtures::PACKAGES;
 
     struct Reply {
         status_line: String,
@@ -653,6 +717,29 @@ mod tests {
         let feed = Feed::start(PACKAGES);
         let reply = get(&feed, "/feed/packages/beta-1.0.vip", "");
         assert_eq!(reply.body, beta().build_vip());
+    }
+
+    #[test]
+    fn a_revised_listing_gets_a_new_etag_so_a_cached_one_is_refetched() {
+        let feed = Feed::start(PACKAGES);
+        let since = |etag: &str| format!("If-None-Match: {etag}\r\n");
+        feed.revise(PROJECT_FEED_DIR, "[Package new-1.0]\n");
+        let reply = get(&feed, "/feed/index.vipr", &since(FEED_ETAG));
+        assert_eq!(reply.status_line, "HTTP/1.1 200 OK");
+        assert_eq!(reply.body, b"[Package new-1.0]\n");
+        let head = reply.head.lines();
+        let etag = head
+            .into_iter()
+            .find_map(|l| l.strip_prefix("ETag: "))
+            .unwrap();
+        let revalidated = get(&feed, "/feed/index.vipr", &since(etag));
+        assert_eq!(revalidated.status_line, "HTTP/1.1 304 Not Modified");
+        feed.revise(PROJECT_FEED_DIR, "[Package new-2.0]\n");
+        let again = get(&feed, "/feed/index.vipr", &since(etag));
+        assert_eq!(
+            again.status_line, "HTTP/1.1 200 OK",
+            "every revision is new"
+        );
     }
 
     #[test]
