@@ -46,9 +46,13 @@ Feature: The pilot loop: build, publish, install, mass compile
     Then the venv holds both pilots and the packages OpenSerializer needs
     And mass compiling the venv's packages in a LabVIEW on the venv succeeds
 
-  @labview @pending-s2
+  @labview @interactive-labview @pilot-source
   Scenario: lvpm publish puts pilot A's .vip in a folder feed project B installs from
-    Given pilot A built with lvpm build
-    When lvpm publish puts it in a folder feed
-    And project B is installed from that feed
-    Then mass compiling the venv's packages in a LabVIEW on the venv succeeds
+    Given a LabVIEW 2026 installation without the pilots
+    And pilot A built with lvpm build
+    And lvpm publish has put it in an empty folder feed
+    And project B depending on both pilots, with that feed and the other pilot archives as its sources
+    And a venv for project B
+    When project B is installed
+    Then the venv holds both pilots and the packages OpenSerializer needs
+    And mass compiling the venv's packages in a LabVIEW on the venv succeeds

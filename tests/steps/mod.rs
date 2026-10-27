@@ -16,6 +16,7 @@ pub mod json;
 pub mod lock;
 pub mod manifest;
 pub mod pilots;
+pub mod publish;
 pub mod query;
 pub mod recording;
 pub mod run;

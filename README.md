@@ -81,6 +81,7 @@ To package your own library, add a `[distribution]` table to `lvpm.toml`
 
 ```console
 $ lvpm build                                # dist/<name>-<version>.vip, no LabVIEW needed
+$ lvpm publish --to D:/feeds/packages        # copy it into a folder feed, never replacing
 ```
 
 ## Why

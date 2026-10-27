@@ -32,6 +32,8 @@ const PROJECT_B_PACKAGES: [&str; 4] = [
 const PILOT_SOURCE_DIR: &str = "pilots";
 const COPIES_DIR: &str = "pilot-copies";
 const PILOT_A_DIR: &str = "pilot-a";
+/// The folder feed `lvpm publish` puts pilot A in.
+const PUBLISHED_FEED_DIR: &str = "published";
 /// Pilot A's `lvpm.toml`: its repository has none, and this is what it would hold.
 const PILOT_A_MANIFEST: &str = r#"[project]
 name = "hse_lib_hse_logger"
@@ -300,6 +302,38 @@ async fn pilot_a_files(world: &mut CliWorld, published: String, step: &cucumber:
 )]
 async fn project_b_with_built_pilot_a(world: &mut CliWorld) {
     let built = world.pilots.pilot_a.clone().expect("pilot A was built");
+    let source = project_b_without_pilot_a_archive(world);
+    std::fs::copy(&built, source.join(PILOT_A_ARCHIVE)).expect("copy the built pilot A");
+}
+
+#[given("lvpm publish has put it in an empty folder feed")]
+async fn pilot_a_published(world: &mut CliWorld) {
+    let feed = world.sandbox.add_local_source_folder(PUBLISHED_FEED_DIR);
+    let to = feed.display().to_string();
+    let dir = world.sandbox.root().join(PILOT_A_DIR);
+    let output = world
+        .sandbox
+        .run_lvpm_in(&dir, &["publish", "--to", &to], None);
+    assert_eq!(
+        output.exit_code, 0,
+        "lvpm publish failed in pilot A: {output:?}"
+    );
+    assert!(
+        feed.join(PILOT_A_ARCHIVE).is_file(),
+        "lvpm publish wrote no {PILOT_A_ARCHIVE}"
+    );
+}
+
+#[given(
+    "project B depending on both pilots, with that feed and the other pilot archives as its sources"
+)]
+async fn project_b_with_published_pilot_a(world: &mut CliWorld) {
+    project_b_without_pilot_a_archive(world);
+}
+
+/// Project B with a folder feed of every pilot archive but pilot A's, so pilot
+/// A can only come from what the scenario built; returns that folder.
+fn project_b_without_pilot_a_archive(world: &mut CliWorld) -> PathBuf {
     if let Err(why) = check_checksums(&pilots_dir()) {
         panic!("{why}");
     }
@@ -310,8 +344,8 @@ async fn project_b_with_built_pilot_a(world: &mut CliWorld) {
             std::fs::copy(&archive, source.join(name)).expect("copy a pilot archive");
         }
     }
-    std::fs::copy(&built, source.join(PILOT_A_ARCHIVE)).expect("copy the built pilot A");
     write_project_b_manifest(world);
+    source
 }
 
 /// The checkout `LVPM_TEST_PILOT_A` names, once its HEAD is the pinned commit.

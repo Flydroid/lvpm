@@ -17,6 +17,7 @@ mod install;
 pub mod json;
 pub mod launch;
 pub mod lock;
+pub mod publish;
 pub mod query;
 mod refresh;
 mod relink;

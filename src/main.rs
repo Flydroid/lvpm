@@ -344,6 +344,16 @@ enum Cmd {
     /// zips the members; LabVIEW is not needed. Building the same files twice
     /// gives the same bytes.
     Build,
+    /// Copy dist/<name>-<version>.vip into a folder feed.
+    ///
+    /// Publishes the package lvpm build wrote for the current manifest. A
+    /// published file is never replaced: publishing a version the folder
+    /// already holds fails and changes nothing.
+    Publish {
+        /// The folder feed to copy the package into. It must exist.
+        #[arg(long)]
+        to: PathBuf,
+    },
     /// Start LabVIEW on the project's venv, optionally opening a project file.
     ///
     /// LabVIEW reads the venv's contents when it starts, so a LabVIEW that
@@ -662,6 +672,10 @@ fn run(cli: &Cli) -> Result<Report> {
         Cmd::Build => Ok(Report::said(
             render::build::built(&ops::build::build(&env)?),
             "build",
+        )),
+        Cmd::Publish { to } => Ok(Report::said(
+            render::publish::published(&ops::publish::publish(&env, to)?),
+            "publish",
         )),
         Cmd::Launch { lvproj } => {
             let launched = ops::launch_cmd::launch(&env, lvproj.as_deref())?;

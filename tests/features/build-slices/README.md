@@ -74,8 +74,7 @@ It installs without relinking, starts a LabVIEW on the venv, waits for its VI
 Server port, and only then runs `LabVIEWCLI -OperationName MassCompile` on
 the venv's packages, so LabVIEWCLI never starts a LabVIEW of its own. The
 venv is a scratch copy, so the compile works in place. A failed compile names
-the VIs the log calls bad. The publish scenario is tagged `@pending-s2` until
-that slice lands.
+the VIs the log calls bad.
 
 Scenarios that use the installation's own LabVIEW first claim it with a file
 in `%TEMP%`, so two test runs never share one. If another run holds the

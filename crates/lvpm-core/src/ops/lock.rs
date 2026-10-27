@@ -16,14 +16,13 @@ use crate::events::{Event, LockChange};
 use crate::index::{self, Entry, Index};
 use crate::lockfile::{self, Inputs, LockedPackage, LockedUnresolved, Lockfile};
 use crate::manifest_edit::{self, DependencyTable};
+use crate::paths;
 use crate::project::{Constraint, PackageArg, Project, name_key, same_name};
 use crate::solve::{self, Conflict, Fact, Resolution, SolveError};
 use crate::version::Version;
 use anyhow::Context;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Resolve the project's manifest and write `lvpm.lock` beside it. The lock
 /// comes back as it was written. A lock that still represents the manifest is
@@ -771,7 +770,7 @@ fn write_atomically(path: &Path, text: &str) -> anyhow::Result<()> {
     if tests::write_is_made_to_fail(path) {
         anyhow::bail!("writing {} failed, as a test asked", path.display());
     }
-    let staged = staging_path(path);
+    let staged = paths::staging_path(path);
     let replaced = std::fs::write(&staged, text)
         .with_context(|| format!("writing {}", staged.display()))
         .and_then(|()| {
@@ -781,22 +780,6 @@ fn write_atomically(path: &Path, text: &str) -> anyhow::Result<()> {
         std::fs::remove_file(&staged).ok();
     }
     replaced
-}
-
-/// A name beside `path` that no other write has: the process, the clock and a
-/// count, as the cache names its staging files.
-fn staging_path(path: &Path) -> PathBuf {
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| since.as_nanos());
-    let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(format!(
-        ".{}-{nanos}-{}.tmp",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    path.with_file_name(name)
 }
 
 #[cfg(test)]
@@ -1350,7 +1333,10 @@ mod tests {
     #[test]
     fn every_write_stages_to_a_file_of_its_own_beside_the_lock() {
         let lock = Path::new("project").join(lockfile::FILE_NAME);
-        let (first, second) = (staging_path(&lock), staging_path(&lock));
+        let (first, second) = (
+            crate::paths::staging_path(&lock),
+            crate::paths::staging_path(&lock),
+        );
         assert_ne!(first, second);
         for staged in [first, second] {
             assert_eq!(staged.parent(), lock.parent());

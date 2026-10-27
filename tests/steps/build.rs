@@ -22,7 +22,7 @@ const DIST: &str = "dist";
 /// What a build scenario has set up and seen.
 #[derive(Debug, Default)]
 pub struct BuildState {
-    manifest: toml::Table,
+    pub(super) manifest: toml::Table,
     /// Build in-process with no LabVIEW detected, instead of running `lvpm`.
     no_labview: bool,
     /// Every member's path below the work directory, for the timestamp change.
@@ -33,11 +33,11 @@ pub struct BuildState {
 }
 
 impl CliWorld {
-    fn work(&self, rel: &str) -> PathBuf {
+    pub(super) fn work(&self, rel: &str) -> PathBuf {
         self.sandbox.work_dir().join(rel)
     }
 
-    fn put(&self, rel: &str, text: &str) {
+    pub(super) fn put(&self, rel: &str, text: &str) {
         let path = self.work(rel);
         std::fs::create_dir_all(path.parent().expect("a parent")).expect("create a folder");
         std::fs::write(path, text).expect("write a file");
@@ -61,13 +61,18 @@ impl CliWorld {
         t
     }
 
-    fn set(&mut self, path: &[&str], key: &str, value: impl Into<toml::Value>) {
+    pub(super) fn set(&mut self, path: &[&str], key: &str, value: impl Into<toml::Value>) {
         self.table(path).insert(key.into(), value.into());
     }
 
-    fn lvpm_build(&mut self) {
+    /// The manifest table, as `lvpm.toml` in the work directory.
+    pub(super) fn write_build_manifest(&self) {
         let text = toml::to_string(&self.build.manifest).expect("a manifest");
         std::fs::write(self.work(MANIFEST_FILE), text).expect("write the manifest");
+    }
+
+    pub(super) fn lvpm_build(&mut self) {
+        self.write_build_manifest();
         let output = match self.build.no_labview {
             false => self.sandbox.run_lvpm(&["build"], None),
             true => {
@@ -98,7 +103,7 @@ impl CliWorld {
         self.build.output.as_ref().expect("lvpm build ran")
     }
 
-    fn succeeded(&self) {
+    pub(super) fn succeeded(&self) {
         let out = self.built();
         assert_eq!(out.exit_code, 0, "lvpm build failed: {out:?}");
     }
@@ -146,7 +151,7 @@ impl CliWorld {
     }
 
     /// No package, and no staged file left behind either.
-    fn no_vip_in_dist(&self) {
+    pub(super) fn no_vip_in_dist(&self) {
         let vips: Vec<_> = std::fs::read_dir(self.work(DIST))
             .into_iter()
             .flatten()
@@ -486,16 +491,22 @@ async fn spec_requires(world: &mut CliWorld, requires: String) {
 )]
 async fn fails_naming_key(world: &mut CliWorld, key: String) {
     let message = world.failed();
-    // The key itself, not a longer one it begins: `distribution` must not be
-    // found only inside `distribution.vip`.
-    let whole = message.match_indices(&key).any(|(at, _)| {
+    assert!(
+        names_key(&message, &key),
+        "the message does not name {key}: {message}"
+    );
+    world.no_vip_in_dist();
+}
+
+/// `message` names `key` itself, not a longer one it begins: `distribution`
+/// must not be found only inside `distribution.vip`.
+pub(super) fn names_key(message: &str, key: &str) -> bool {
+    message.match_indices(key).any(|(at, _)| {
         message[at + key.len()..]
             .chars()
             .next()
             .is_none_or(|c| !(c.is_alphanumeric() || "-_.".contains(c)))
-    });
-    assert!(whole, "the message does not name {key}: {message}");
-    world.no_vip_in_dist();
+    })
 }
 
 #[then(regex = r#"^it fails naming "([^"]+)" and dist holds no \.vip$"#)]

@@ -269,3 +269,45 @@ async fn readme_shows_build(_: &mut CliWorld) {
         "README.md does not show lvpm build"
     );
 }
+
+#[then("docs/usage.md has a command-table line for lvpm publish")]
+async fn usage_lists_publish(_: &mut CliWorld) {
+    assert!(
+        usage_guide().contains("| `lvpm publish --to <folder>` |"),
+        "no command-table line for lvpm publish"
+    );
+}
+
+#[then(
+    regex = r#"^docs/usage\.md's section "([^"]+)" follows "([^"]+)" and holds "([^"]+)" and "([^"]+)"$"#
+)]
+async fn usage_section_follows(
+    _: &mut CliWorld,
+    section: String,
+    after: String,
+    a: String,
+    b: String,
+) {
+    let guide = usage_guide();
+    let (before, rest) = guide
+        .split_once(&format!("## {section}"))
+        .unwrap_or_else(|| panic!("usage.md has no {section} section"));
+    assert!(
+        before.contains(&format!("## {after}")),
+        "{section} does not follow {after}"
+    );
+    let body = rest.split(" ## ").next().unwrap_or(rest);
+    for want in [a, b] {
+        assert!(body.contains(&want), "{section} does not say {want}");
+    }
+}
+
+#[then("README.md shows lvpm publish")]
+async fn readme_shows_publish(_: &mut CliWorld) {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("README.md");
+    let text = std::fs::read_to_string(&path).expect("read README.md");
+    assert!(
+        text.contains("$ lvpm publish --to"),
+        "README.md does not show lvpm publish"
+    );
+}

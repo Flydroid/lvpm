@@ -22,6 +22,7 @@
 | `lvpm venv create` / `status` / `remove`             | Manage the project's venv (see [Per-project dependencies](#per-project-dependencies-venvs))                                                  |
 | `lvpm launch [<lvproj>]`                             | Start a LabVIEW on the project's venv                                                                                                        |
 | `lvpm build`                                         | Package the project's library as `dist/<name>-<version>.vip`, from `[distribution]` ([Building a package](#building-a-package))              |
+| `lvpm publish --to <folder>`                         | Copy the built package into a folder feed; a published file is never replaced ([Publishing a package](#publishing-a-package))                |
 | `lvpm vi-probe` / `lvpm vi-run` / `lvpm vi-save` / `lvpm app-probe` | VI Server primitives, for diagnosis (see [VI Server](labview-integration.md#vi-server))                                                                            |
 
 Flags that apply to every command:
@@ -280,6 +281,33 @@ install-dir  = "vi.lib/Hampel Software Engineering/HSE Logger"  # optional; this
 - The package name takes letters, digits, `_`, `-` and `.`. A quote or line
   break in `vendor`, `display-name` or a dependency name is refused, since
   it would end up in the package's spec.
+
+## Publishing a package
+
+`lvpm publish --to <folder>` copies the package `lvpm build` wrote for the
+current manifest, `dist/<name>-<version>.vip`, into a folder feed. Another
+project that lists that folder in `sources.local` then locks and installs
+it.
+
+```console
+$ lvpm build
+$ lvpm publish --to D:/feeds/packages
+published D:\feeds\packages\demo_lib-1.2.3.0.vip
+```
+
+- `--to` is required. The folder must exist; a relative path is read from
+  where the command runs, not from the project.
+- A published file is never replaced. If the folder already holds a file of
+  that name, publish fails, names it, and leaves it as it was: give the
+  project a new version and build again.
+- Only the current version is published. Older packages in `dist/` stay
+  where they are.
+- Publish does not build. With no package in `dist/` for the current
+  manifest it fails and says to run `lvpm build`.
+- The copy is written beside its final name and linked into place, so a
+  reader of the folder never sees half a package. That needs a file system
+  with hard links (NTFS and ext4 have them); on one without them, publish
+  fails and names the folder.
 
 ## Package sources
 
