@@ -1537,7 +1537,13 @@ fn cmd_venv(cli: &Cli, sub: &VenvCmd) -> Result<()> {
                 );
                 println!(
                     "  LabVIEW        {}",
-                    if launch::is_listening(v.port) { "running on this venv" } else { "not running on this venv" }
+                    if launch::is_listening(v.port) {
+                        "running on this venv"
+                    } else if launch::is_running(&v) {
+                        "starting on this venv"
+                    } else {
+                        "not running on this venv"
+                    }
                 );
                 Ok(())
             }
@@ -1561,10 +1567,10 @@ fn cmd_launch(cli: &Cli, lvproj: Option<&Path>) -> Result<()> {
     let Destination::Venv(v) = destination(cli)? else {
         bail!("launch needs a venv: run it inside a project that has one, or pass --project <DIR>");
     };
-    if launch::is_listening(v.port) {
+    if launch::is_running(&v) {
         bail!(
-            "a LabVIEW is already running on this venv (VI Server port {}) — open the project from \
-             that window, or close it and launch again",
+            "a LabVIEW is already running or starting on this venv (VI Server port {}) — open the \
+             project from that window, or close it and launch again",
             v.port
         );
     }
