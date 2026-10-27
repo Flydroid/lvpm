@@ -90,7 +90,8 @@ struct ApplyArgs {
     /// Show what would be written, then stop.
     #[arg(long)]
     dry_run: bool,
-    /// Copy the files but skip the relink pass.
+    /// Copy the files but skip the relink pass. A venv install still
+    /// resaves each package in the venv's LabVIEW.
     #[arg(long)]
     no_relink: bool,
     /// Relink even where LabVIEW runs headless (LV_RTE_HEADLESS is set),

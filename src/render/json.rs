@@ -129,4 +129,32 @@ mod tests {
             })
         );
     }
+
+    #[test]
+    fn the_install_summary_carries_the_failed_resaves_only_when_there_are_any() {
+        let done = |resave_failed: Vec<String>| {
+            serde_json::json!(Event::InstallDone {
+                files: 2,
+                dry_run: false,
+                resave_failed,
+            })
+        };
+        assert_eq!(
+            done(vec!["alpha".into()]),
+            serde_json::json!({"event": "install_done", "data":
+                {"files": 2, "dry_run": false, "resave_failed": ["alpha"]}})
+        );
+        assert_eq!(
+            done(Vec::new()),
+            serde_json::json!({"event": "install_done", "data": {"files": 2, "dry_run": false}})
+        );
+        let failed = serde_json::json!(Event::ResaveFailed {
+            package: "alpha".into(),
+            error: "error 1003".into(),
+            folder: "venv/alpha".into(),
+        });
+        assert_eq!(failed["event"], "resave_failed");
+        assert_eq!(failed["data"]["package"], "alpha");
+        assert_eq!(failed["data"]["error"], "error 1003");
+    }
 }

@@ -75,6 +75,15 @@ impl Venv {
         Roots::project_store(&self.dir, &self.target)
     }
 
+    /// Where an install stages a package before it moves in: the venv folder's
+    /// sibling (`.lv-venv.staging`). LabVIEW loads every folder under the venv
+    /// as an addon, and a sibling is on the same volume, so the move is a rename.
+    pub fn staging_dir(&self) -> PathBuf {
+        let mut name = self.dir.file_name().unwrap_or_default().to_os_string();
+        name.push(".staging");
+        self.dir.with_file_name(name)
+    }
+
     /// The ini a LabVIEW on this venv is started with.
     pub(crate) fn ini_path(&self) -> PathBuf {
         self.dir.join(".lvpm").join("labview.ini")

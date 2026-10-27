@@ -152,3 +152,66 @@ pub(crate) fn venv_in(repo: &Path) -> Venv {
     )
     .unwrap()
 }
+
+/// A package archive `<name>-<version>.vip` in `dir`: `files` under
+/// `<application>`, each holding its own name, and `requires` as the spec's
+/// `Requires=` line. `corrupt` spoils the first file, so its unpack fails.
+pub(crate) fn vip_in(
+    dir: &Path,
+    name: &str,
+    version: &str,
+    requires: &str,
+    files: &[&str],
+    corrupt: bool,
+) -> PathBuf {
+    let members: Vec<(&str, Vec<u8>)> = files
+        .iter()
+        .map(|f| (*f, format!("PAYLOAD {f}").into_bytes()))
+        .collect();
+    let archive = vip_of(dir, name, version, requires, &members);
+    if corrupt {
+        let mut bytes = std::fs::read(&archive).unwrap();
+        let at = bytes.windows(7).position(|w| w == b"PAYLOAD").unwrap();
+        bytes[at] = b'X';
+        std::fs::write(&archive, bytes).unwrap();
+    }
+    archive
+}
+
+/// As [`vip_in`], each member with the bytes given.
+pub(crate) fn vip_of(
+    dir: &Path,
+    name: &str,
+    version: &str,
+    requires: &str,
+    members: &[(&str, Vec<u8>)],
+) -> PathBuf {
+    use std::io::Write;
+    let mut spec = format!("[Package]\nName=\"{name}\"\nVersion=\"{version}\"\n\n");
+    if !requires.is_empty() {
+        spec.push_str(&format!("[Dependencies]\nRequires=\"{requires}\"\n\n"));
+    }
+    spec.push_str(&format!(
+        "[Files]\nNum File Groups=\"1\"\n\n[File Group 0]\nTarget Dir=\"<application>\"\n\
+         Replace Mode=\"Always\"\nNum Files={}\n",
+        members.len()
+    ));
+    for (i, (f, _)) in members.iter().enumerate() {
+        spec.push_str(&format!("File {i}=\"{f}\"\n"));
+    }
+    let stored =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    writer.start_file("spec", stored).unwrap();
+    writer.write_all(spec.as_bytes()).unwrap();
+    for (f, bytes) in members {
+        writer
+            .start_file(format!("File Group 0/{f}"), stored)
+            .unwrap();
+        writer.write_all(bytes).unwrap();
+    }
+    let bytes = writer.finish().unwrap().into_inner();
+    let archive = dir.join(format!("{name}-{version}.vip"));
+    std::fs::write(&archive, bytes).unwrap();
+    archive
+}

@@ -231,6 +231,37 @@ Two things follow from LabVIEW reading an addon's contents at launch:
   both globally and in the venv loads from the global copy, whatever its
   version. Keep the target installation clean of what the venv provides.
 
+### The resave
+
+A venv install opens and saves each package's VIs in the venv's LabVIEW
+before the package reaches `.lv-venv`. A VI saved in an older LabVIEW can
+otherwise load broken from an add-on folder. The package is unpacked into
+`.lv-venv.staging/` beside the venv, resaved there, then moved into place.
+
+```console
+starting the venv's LabVIEW for the resave (about a minute per package)
+resave (1/2) oglib_error ... 12 saved (48s)
+resave (2/2) oglib_string ... already saved in LabVIEW 2026, skipped
+```
+
+- It costs one LabVIEW start per run and about 40 to 85 seconds per package,
+  mostly the cold load of its VIs. A package whose VIs are all saved in the
+  venv's LabVIEW version already is skipped, and starts no LabVIEW.
+- `--no-relink` and headless installs skip only the relink. The resave
+  still runs, and the relink line says so. `--dry-run` lists the packages with
+  VIs it may resave, including ones the version check will skip, and starts
+  no LabVIEW.
+- A failed resave is a warning, not an error: the package is still
+  installed and the exit code stays 0. The warning names the package and its
+  folder. Reinstall the package; if it fails again, run `lvpm launch` and
+  mass compile that folder. A recap at the end lists every package that
+  failed. If the venv's LabVIEW cannot start at all, one warning lists the
+  packages installed without a resave.
+- Scripts read the failures from `--json`: the install summary carries a
+  `resave_failed` list, present only when a package failed.
+- A venv installed before this release has packages that were never
+  resaved. Delete `.lv-venv` and run `lvpm sync` to reinstall them.
+
 ## Building a package
 
 `lvpm build` packages one LabVIEW library as a `.vip` that `lvpm install`

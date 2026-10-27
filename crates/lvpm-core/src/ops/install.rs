@@ -10,7 +10,9 @@ use super::env::{Destination, OpEnv};
 use super::hooks::{HOOK_TIMEOUT_SECS, HookCall, PostInstallHook, hook_action_info};
 use super::refresh::refresh_palettes_and_menus;
 use super::relink::{RelinkOptions, relink_in_destination};
+use super::resave;
 use super::session::InstallSession;
+use super::staging::{self, Staging};
 use super::uninstall::uninstall_one;
 use crate::cache::sha256_hex;
 use crate::events::{Event, HookKind, PackageFolders, PackageRef, Phase, PlannedFile, SkipReason};
@@ -21,7 +23,7 @@ use crate::target::Roots;
 use crate::version::Version;
 use crate::{install, relink};
 use anyhow::{Result, bail, ensure};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 type Zip = zip::ZipArchive<std::io::Cursor<Vec<u8>>>;
@@ -33,7 +35,8 @@ pub struct InstallOptions {
     pub dry_run: bool,
     /// Do not install dependencies.
     pub no_deps: bool,
-    /// Copy the files but skip the relink pass.
+    /// Copy the files but skip the relink pass. Not the resave: a venv
+    /// install resaves each package whatever this says.
     pub no_relink: bool,
     /// Relink even where LabVIEW runs headless, where the pass is otherwise
     /// off: nothing there opens the IDE, and a compile or build resolves the
@@ -76,6 +79,41 @@ impl PlannedPackage {
             expected_sha256: None,
         }
     }
+}
+
+/// `items` with each one after the items it requires, by `key`; otherwise in
+/// their own order. A requirement that names no item is ignored.
+pub(super) fn order_dependencies_first<T>(
+    items: Vec<T>,
+    key: impl Fn(&T) -> String,
+    requires: impl Fn(&T) -> Vec<String>,
+) -> Vec<T> {
+    fn visit<T>(
+        i: usize,
+        items: &[T],
+        at: &HashMap<String, usize>,
+        requires: &dyn Fn(&T) -> Vec<String>,
+        seen: &mut [bool],
+        order: &mut Vec<usize>,
+    ) {
+        if std::mem::replace(&mut seen[i], true) {
+            return;
+        }
+        for r in requires(&items[i]) {
+            if let Some(&j) = at.get(&r) {
+                visit(j, items, at, requires, seen, order);
+            }
+        }
+        order.push(i);
+    }
+    let at: HashMap<String, usize> = items.iter().enumerate().map(|(i, t)| (key(t), i)).collect();
+    let mut seen = vec![false; items.len()];
+    let mut order = Vec::with_capacity(items.len());
+    for i in 0..items.len() {
+        visit(i, &items, &at, &requires, &mut seen, &mut order);
+    }
+    let mut slots: Vec<Option<T>> = items.into_iter().map(Some).collect();
+    order.into_iter().filter_map(|i| slots[i].take()).collect()
 }
 
 /// What [`apply`] did, as [`finish`] needs to know it.
@@ -274,7 +312,19 @@ pub fn resolve_greedy(
         );
     }
 
-    entries.reverse(); // dependencies before dependents
+    // The worklist's reversed pre-order is not topological: top -> [b, c]
+    // with b -> c would put b first.
+    let entries = order_dependencies_first(
+        entries,
+        |p| project::name_key(&p.entry.name),
+        |p| {
+            p.entry
+                .requires
+                .iter()
+                .map(|r| project::name_key(&r.name))
+                .collect()
+        },
+    );
 
     env.sink.emit(Event::Resolved {
         packages: entries
@@ -326,17 +376,31 @@ pub fn apply(
     plan: &InstallPlan,
     opts: &InstallOptions,
 ) -> Result<Applied> {
+    if !opts.dry_run
+        && let Some(v) = session.venv()
+    {
+        staging::clear_leftover(env, v)?;
+    }
     let hooks = HookPolicy::new(env, session, opts);
     let mut files = 0usize;
     // How many packages declared a hook this install did not run — decides
     // whether the headless note below is owed. Each package already said which.
     let mut hooks_unrun = 0usize;
-    for planned in &plan.entries {
-        if let Some(done) = install_one(env, session, planned, opts, hooks)? {
-            files += done.files;
-            hooks_unrun += usize::from(done.hooks_unrun);
+    let total = plan.entries.len();
+    let mut each = || -> Result<()> {
+        for (i, planned) in plan.entries.iter().enumerate() {
+            session.resaver.position = (i + 1, total);
+            if let Some(done) = install_one(env, session, planned, opts, hooks)? {
+                files += done.files;
+                hooks_unrun += usize::from(done.hooks_unrun);
+            }
         }
-    }
+        Ok(())
+    };
+    let outcome = each();
+    // On the error path too: the LabVIEW closes and the failures are told.
+    let resave_failed = session.resaver.finish(env.sink);
+    outcome?;
     if hooks.off_headless && hooks_unrun > 0 {
         env.sink.emit(Event::PhaseSkipped {
             phase: Phase::Hooks,
@@ -347,6 +411,7 @@ pub fn apply(
     env.sink.emit(Event::InstallDone {
         files,
         dry_run: opts.dry_run,
+        resave_failed,
     });
     Ok(Applied {
         files,
@@ -480,7 +545,9 @@ fn settle_installed(
         old_files: old.files.len(),
         dry_run: opts.dry_run,
     });
-    if !opts.dry_run {
+    // A venv removes the old version only once the new one is staged
+    // (`staging::land`).
+    if !opts.dry_run && session.venv().is_none() {
         // Taking out the old version is the first file write of a replacement.
         env.cancel.begin_unpack()?;
         uninstall_one(env, session, &entry.name)?;
@@ -510,6 +577,11 @@ fn preview(env: &OpEnv, session: &mut InstallSession, pkg: &Unpacking) -> Result
         pkg.entry.name.clone(),
         relink::folders_for_spec(&pkg.roots, &pkg.spec)?,
     ));
+    // shortcut: lists packages the version skip may pass over, since a dry run
+    // unpacks nothing to read; read the archive members if that misleads.
+    if session.venv().is_some() && pkg.plan.writes.iter().any(|w| resave::is_lv_file(&w.dest)) {
+        session.resaver.planned.push(pkg.entry.name.clone());
+    }
     Ok(())
 }
 
@@ -567,14 +639,37 @@ fn unpack(
         );
     }
 
-    let m = install::apply(
-        &pkg.roots,
-        &pkg.spec,
-        &mut pkg.zip,
-        &pkg.plan,
-        pre.as_deref(),
-        &pkg.archive_sha256,
-    )?;
+    let m = match session.venv().map(|v| Staging::for_package(v, name)) {
+        None => install::apply(
+            &pkg.roots,
+            &pkg.spec,
+            &mut pkg.zip,
+            &pkg.plan,
+            pre.as_deref(),
+            &pkg.archive_sha256,
+        )?,
+        Some(staging) => {
+            if staging::clear_unrecorded(env, session, &staging, name)? {
+                // The plan took that folder's files for ones to overwrite or keep.
+                pkg.plan = install::plan(&pkg.roots, &pkg.spec, &mut pkg.zip)?;
+            }
+            let staged = staging.create().and_then(|()| {
+                install::unpack_to(
+                    &pkg.roots,
+                    &pkg.spec,
+                    &mut pkg.zip,
+                    &pkg.plan,
+                    pre.as_deref(),
+                    &pkg.archive_sha256,
+                    Some(&staging),
+                )
+            });
+            let m = staged.inspect_err(|_| staging.discard())?;
+            session.resave(env, &staging, name);
+            staging::land(env, session, &staging, &m)?;
+            m
+        }
+    };
     env.sink.emit(Event::PackageDone {
         files: m.files.len(),
         dry_run: false,
@@ -821,6 +916,39 @@ mod tests {
     use crate::errors::Cancelled;
     use crate::events::NullSink;
     use std::io::Write;
+
+    #[test]
+    fn dependencies_come_before_dependents_for_a_chain_a_diamond_and_a_shortcut() {
+        let order = |graph: &[(&'static str, &[&'static str])]| {
+            let items: Vec<(&str, &[&str])> = graph.to_vec();
+            order_dependencies_first(
+                items,
+                |(n, _)| n.to_string(),
+                |(_, r)| r.iter().map(|s| s.to_string()).collect(),
+            )
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            order(&[("top", &["mid"]), ("mid", &["base"]), ("base", &[])]),
+            ["base", "mid", "top"]
+        );
+        assert_eq!(
+            order(&[
+                ("top", &["left", "right"]),
+                ("left", &["base"]),
+                ("right", &["base"]),
+                ("base", &[])
+            ]),
+            ["base", "left", "right", "top"]
+        );
+        // The order resolve_greedy's worklist produced before: b, c, top.
+        assert_eq!(
+            order(&[("b", &["c"]), ("c", &[]), ("top", &["b", "c"])]),
+            ["c", "b", "top"]
+        );
+    }
 
     #[test]
     fn a_named_package_with_no_name_or_an_empty_constraint_is_refused_not_read_as_any_version() {

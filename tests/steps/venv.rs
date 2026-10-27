@@ -84,3 +84,27 @@ async fn venv_still_exists(world: &mut CliWorld) {
     let dir = world.sandbox.venv_dir();
     assert!(dir.is_dir(), "{} is gone", dir.display());
 }
+
+/// The count only: the duration differs every run.
+#[then(expr = "the output has a resave line for {word}")]
+async fn has_resave_line(world: &mut CliWorld, package: String) {
+    let (out, err) = (&world.output().stdout, &world.output().stderr);
+    assert!(
+        out.lines().any(|line| line.starts_with("resave (1/1) ")
+            && line.contains(&format!(" {package} ... "))
+            && line.contains(" saved (")),
+        "no resave line for {package} in:
+{out}
+stderr:
+{err}"
+    );
+}
+
+#[then(expr = "the venv holds {word} in its add-on folder and no staging folder")]
+async fn landed_without_staging(world: &mut CliWorld, package: String) {
+    let venv = world.sandbox.venv_dir();
+    let folder = venv.join(&package);
+    assert!(folder.is_dir(), "{} is missing", folder.display());
+    let staging = venv.with_file_name(".lv-venv.staging");
+    assert!(!staging.exists(), "{} is left behind", staging.display());
+}

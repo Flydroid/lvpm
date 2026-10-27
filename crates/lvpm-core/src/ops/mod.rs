@@ -13,9 +13,11 @@ pub mod publish;
 pub mod query;
 pub mod refresh;
 pub mod relink;
+pub mod resave;
 pub mod route;
 pub mod session;
 pub mod snapshot;
+pub mod staging;
 pub mod start;
 pub mod sync;
 #[cfg(test)]

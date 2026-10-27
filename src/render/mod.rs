@@ -42,6 +42,11 @@ pub struct Renderer {
     err: Box<dyn Write + Send>,
     /// The stream a begun line is waiting to be ended on.
     open: Option<Stream>,
+    /// A resave began in this run, so a skipped relink says the resave ran.
+    resaved: bool,
+    /// The begun line of the package being installed, written again in full
+    /// when a resave's lines came between it and its end.
+    package_line: String,
 }
 
 impl Renderer {
@@ -50,6 +55,8 @@ impl Renderer {
             out,
             err,
             open: None,
+            resaved: false,
+            package_line: String::new(),
         }
     }
 
@@ -91,7 +98,17 @@ impl Renderer {
             | Event::HooksNotRun { .. }
             | Event::InstallDone { .. }
             | Event::PhaseSkipped { .. }
-            | Event::LaunchHint => install::render(self, event),
+            | Event::LaunchHint
+            | Event::StagingLeftoverRemoved { .. }
+            | Event::UnrecordedFolderReplaced { .. }
+            | Event::ResaveStarting
+            | Event::ResaveStarted { .. }
+            | Event::ResaveDone { .. }
+            | Event::ResaveFailed { .. }
+            | Event::ResaveStartFailed { .. }
+            | Event::ResaveRecap { .. }
+            | Event::ResavePlanned { .. }
+            | Event::ResaveSkipped { .. } => install::render(self, event),
             Event::HookStarting { .. }
             | Event::HookRan { .. }
             | Event::HookFailed { .. }

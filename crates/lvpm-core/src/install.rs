@@ -5,6 +5,7 @@
 //! involved. An install manifest records absolute paths so uninstall can
 //! remove exactly what was added and nothing else.
 
+use crate::ops::staging::Staging;
 use crate::spec::Spec;
 use crate::target::{LvTarget, Roots, TokenClass};
 use anyhow::{Context, Result, bail};
@@ -264,6 +265,27 @@ pub fn apply(
     pre_install_vi: Option<&Path>,
     archive_sha256: &str,
 ) -> Result<Manifest> {
+    let manifest = unpack_to(roots, spec, zip, plan, pre_install_vi, archive_sha256, None)?;
+    write_manifest(roots, &manifest)?;
+    Ok(manifest)
+}
+
+/// Write a plan's files and build its manifest, without recording it. With a
+/// `stage`, each file is written to its staged path; the manifest still names
+/// the final ones, where landing the stage moves them.
+pub(crate) fn unpack_to(
+    roots: &Roots,
+    spec: &Spec,
+    zip: &mut Archive,
+    plan: &Plan,
+    pre_install_vi: Option<&Path>,
+    archive_sha256: &str,
+    stage: Option<&Staging>,
+) -> Result<Manifest> {
+    let place = |p: &Path| match stage {
+        Some(s) => s.to_stage(p),
+        None => Ok(p.to_path_buf()),
+    };
     let mut written = Vec::new();
 
     // A declared PostInstall hook ships as `PostInstall.vi` at the archive
@@ -284,19 +306,27 @@ pub fn apply(
     let post_uninstall_vi = hook("PostUninstall", "PostUninstall.vi")?;
 
     for w in &plan.writes {
-        if let Some(parent) = w.dest.parent() {
+        let dest = place(&w.dest)?;
+        if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating {}", parent.display()))?;
         }
         let mut src = zip.by_index(w.zip_index)?;
         let mut buf = Vec::with_capacity(src.size() as usize);
         src.read_to_end(&mut buf)?;
-        std::fs::write(&w.dest, &buf).with_context(|| format!("writing {}", w.dest.display()))?;
+        std::fs::write(&dest, &buf).with_context(|| format!("writing {}", dest.display()))?;
         written.push(w.dest.to_string_lossy().replace('\\', "/"));
     }
     // The footprint is what the package ships, not what this run happened to
     // copy — a file left alone today is still gone when the package goes.
     for k in &plan.kept {
+        // A staged package replaces its whole folder, so a kept file is
+        // carried over into the stage.
+        if stage.is_some() {
+            let dest = place(k)?;
+            std::fs::create_dir_all(dest.parent().expect("a staged file has a folder"))?;
+            std::fs::copy(k, &dest).with_context(|| format!("copying {}", k.display()))?;
+        }
         written.push(k.to_string_lossy().replace('\\', "/"));
     }
 
@@ -309,9 +339,10 @@ pub fn apply(
         && !written.is_empty()
     {
         let info = roots.application.join("lvaddoninfo.json");
-        std::fs::create_dir_all(&roots.application)?;
-        std::fs::write(&info, addon_info(&spec.name, t))
-            .with_context(|| format!("writing {}", info.display()))?;
+        let dest = place(&info)?;
+        std::fs::create_dir_all(dest.parent().expect("the info file has a folder"))?;
+        std::fs::write(&dest, addon_info(&spec.name, t))
+            .with_context(|| format!("writing {}", dest.display()))?;
         written.push(info.to_string_lossy().replace('\\', "/"));
     }
 
@@ -355,8 +386,6 @@ pub fn apply(
             .collect(),
         archive_sha256: Some(archive_sha256.to_string()),
     };
-
-    write_manifest(roots, &manifest)?;
     Ok(manifest)
 }
 
@@ -381,7 +410,7 @@ pub fn extract_hook(
     Ok(Some(dest))
 }
 
-fn write_manifest(roots: &Roots, m: &Manifest) -> Result<()> {
+pub(crate) fn write_manifest(roots: &Roots, m: &Manifest) -> Result<()> {
     let mp = manifest_path(roots, &m.name);
     std::fs::create_dir_all(mp.parent().unwrap())?;
     std::fs::write(&mp, serde_json::to_string_pretty(m)?)?;

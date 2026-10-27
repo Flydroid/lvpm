@@ -58,6 +58,7 @@ const FEATURE_FILES: &[&str] = &[
     "tests/features/build-slices/s1-lvpm-build.feature",
     "tests/features/build-slices/s2-lvpm-publish.feature",
     "tests/features/build-slices/s1b-vip-in-vipm.feature",
+    "tests/features/lvpm-venv-resave/slice-2-staged-install-with-resave.feature",
 ];
 const TEST_LABVIEW_ENV_VAR: &str = "LVPM_TEST_LABVIEW";
 const ONLY_LABVIEW_ENV_VAR: &str = "LVPM_TEST_ONLY_LABVIEW";

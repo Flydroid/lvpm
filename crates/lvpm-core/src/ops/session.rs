@@ -10,6 +10,8 @@
 
 use super::env::{Destination, OpEnv};
 use super::hooks::{HookCall, PostInstallHook, run_reported_hook};
+use super::resave::Resaver;
+use super::staging::Staging;
 use crate::cache::{Cache, Stored};
 use crate::cancel::CancelToken;
 use crate::fetch;
@@ -73,6 +75,8 @@ pub struct InstallSession {
     /// PostInstall hooks extracted so far, executed only after the relink
     /// pass has made them runnable.
     pub(super) post_install_hooks: Vec<PostInstallHook>,
+    /// The LabVIEW a venv install resaves its staged packages in.
+    pub(super) resaver: Resaver,
 }
 
 impl InstallSession {
@@ -84,6 +88,7 @@ impl InstallSession {
             hook_connection: None,
             relink_work: Vec::new(),
             post_install_hooks: Vec::new(),
+            resaver: Resaver::default(),
         }
     }
 
@@ -131,6 +136,14 @@ impl InstallSession {
     /// hook has yet, and report how it went. Whether it ran to the end.
     pub fn run_hook(&mut self, env: &OpEnv, target: &LvTarget, call: &HookCall) -> bool {
         run_reported_hook(env, &mut self.hook_connection, target, call)
+    }
+
+    /// Resave a staged venv package; anywhere else there is nothing to do.
+    pub(super) fn resave(&mut self, env: &OpEnv, staging: &Staging, package: &str) {
+        if let Destination::Venv(v) = &self.dest {
+            self.resaver
+                .resave(v, env.headless, env.sink, staging, package);
+        }
     }
 
     /// Let go of the hook connection: the hooks that follow open their own.
