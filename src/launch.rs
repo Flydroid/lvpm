@@ -2,7 +2,8 @@
 //!
 //! LabVIEW reads its LVAddons locations once, at launch, from the ini file it
 //! was started with. So a venv is "activated" by starting a LabVIEW of its
-//! own on an ini of its own — copied from the target's `LabVIEW.ini` by
+//! own on an ini of its own — copied from the target's `LabVIEW.ini`
+//! (`labview.conf` on Linux, where `-pref` works the same way) by
 //! `venv create` and kept from then on — with the venv added as an
 //! `LVAddons.AdditionalLocations` entry, VI Server moved to the venv's port,
 //! and the compiled-object cache and `LabVIEW Data` moved into the venv,
@@ -25,6 +26,18 @@ use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
+
+/// Where a headless LabVIEW writes what would have been a dialog.
+#[cfg(windows)]
+const HEADLESS_LOG: &str = "%TEMP%\\LabVIEW_*_headless_*_cur.txt";
+#[cfg(target_os = "linux")]
+const HEADLESS_LOG: &str = "/tmp/labview_*_headless_*_cur.txt";
+
+/// Line ending for the ini lvpm writes: LabVIEW's own on each platform.
+#[cfg(windows)]
+const EOL: &str = "\r\n";
+#[cfg(not(windows))]
+const EOL: &str = "\n";
 
 /// Set `key=value` lines in an ini text: replace in place where the key exists
 /// (however it was spaced), append where it does not, and never write a key
@@ -49,14 +62,14 @@ pub fn override_keys(text: &str, keys: &[(&str, &str)]) -> String {
             Some(_) => continue,
             None => out.push_str(line),
         }
-        out.push_str("\r\n");
+        out.push_str(EOL);
     }
     for (i, (k, v)) in keys.iter().enumerate() {
         if !seen[i] {
             out.push_str(k);
             out.push('=');
             out.push_str(v);
-            out.push_str("\r\n");
+            out.push_str(EOL);
         }
     }
     out
@@ -74,7 +87,7 @@ fn drop_keys(text: &str, keys: &[&str]) -> String {
     let mut out = String::with_capacity(text.len());
     for line in text.lines().filter(|l| !keys.iter().any(|k| is_key(l, k))) {
         out.push_str(line);
-        out.push_str("\r\n");
+        out.push_str(EOL);
     }
     out
 }
@@ -90,7 +103,9 @@ const RECENT_KEYS: &[&str] = &["RecentFiles.pathList", "RecentFiles.projectPathL
 /// `DefaultDataFileLocation` with spaces in the path: LabVIEW strips the
 /// quotes and uses the path as given.
 fn ini_path(p: &Path) -> String {
-    let raw = p.to_string_lossy().replace('/', "\\");
+    let raw = p.to_string_lossy().into_owned();
+    #[cfg(windows)]
+    let raw = raw.replace('/', "\\");
     if raw.contains(' ') { format!("\"{raw}\"") } else { raw }
 }
 
@@ -111,9 +126,18 @@ pub fn write_ini(v: &Venv) -> Result<PathBuf> {
     let own = dest.is_file();
     let src = match own {
         true => dest.clone(),
-        false => v.target.path.join("LabVIEW.ini"),
+        false => v.target.ini(),
     };
-    let mut text = std::fs::read_to_string(&src).with_context(|| format!("reading {}", src.display()))?;
+    let mut text = match std::fs::read_to_string(&src) {
+        Ok(text) => text,
+        // On Linux the target's file is per user and only exists once this
+        // user has started LabVIEW; until then the defaults are all there is
+        // to inherit.
+        Err(e) if !own && e.kind() == std::io::ErrorKind::NotFound && cfg!(target_os = "linux") => {
+            format!("[LabVIEW]{EOL}")
+        }
+        Err(e) => return Err(e).with_context(|| format!("reading {}", src.display())),
+    };
     if !own {
         text = drop_keys(&text, RECENT_KEYS);
     }
@@ -154,10 +178,11 @@ pub fn write_ini(v: &Venv) -> Result<PathBuf> {
 /// log, `LVStatus.txt` and temp files follow `TEMP`/`TMP`, and nothing lands
 /// in the user's `%TEMP%`. Detached: LabVIEW outlives lvpm by design.
 pub fn spawn(v: &Venv, ini: &Path, lvproj: Option<&Path>) -> Result<Child> {
-    let exe = v.target.path.join("LabVIEW.exe");
-    ensure!(exe.is_file(), "no LabVIEW.exe in {}", v.target.path.display());
+    let exe = v.target.exe();
+    ensure!(exe.is_file(), "no {} in {}", exe.display(), v.target.path.display());
     let temp = v.temp_dir();
     std::fs::create_dir_all(&temp).with_context(|| format!("creating {}", temp.display()))?;
+    wait_port_released(v.port);
     let mut cmd = Command::new(&exe);
     cmd.arg("-pref").arg(ini).env("TEMP", &temp).env("TMP", &temp);
     if let Some(p) = lvproj {
@@ -202,12 +227,55 @@ fn is_live_labview(_pid: u32) -> bool {
 /// our stdout. An IDE that inherits that pipe holds it open for as long as it
 /// runs, and `lvpm launch | tail` never returns. So our std handles are made
 /// non-inheritable for the duration of the spawn, and restored afterwards.
+///
+/// On Linux `Stdio::null()` is enough — the child's 0–2 are replaced, and Rust
+/// opens its own descriptors close-on-exec — but the terminal's process group
+/// is not: a child left in ours gets the SIGINT of a Ctrl+C meant for lvpm. So
+/// there LabVIEW gets a group of its own.
 pub fn spawn_detached(cmd: &mut Command) -> std::io::Result<Child> {
     cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     #[cfg(windows)]
     let _keep_our_pipes = win::NoInherit::new();
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(cmd, 0);
     cmd.spawn()
 }
+
+/// Hold off starting a LabVIEW on `port` while a closed connection still
+/// holds that port in TIME_WAIT, up to the kernel's fixed 60 s.
+///
+/// LabVIEW on Linux binds its VI Server listener once, at startup, and
+/// without `SO_REUSEADDR`: started while the previous instance's connections
+/// are in TIME_WAIT, it runs without VI Server for the rest of its life and
+/// never says so. Measured on 2026 Q3 — `lvpm launch` straight after an
+/// install in a venv had closed its relink instance got a LabVIEW that never
+/// listened. Linux-only, which is where it was measured.
+#[cfg(target_os = "linux")]
+pub fn wait_port_released(port: u16) {
+    const TIME_WAIT: &str = "06";
+    let held = || {
+        ["/proc/net/tcp", "/proc/net/tcp6"].iter().any(|f| {
+            std::fs::read_to_string(f).unwrap_or_default().lines().skip(1).any(|l| {
+                let cols: Vec<&str> = l.split_whitespace().collect();
+                cols.len() > 3
+                    && cols[3] == TIME_WAIT
+                    && cols[1].rsplit(':').next().and_then(|p| u16::from_str_radix(p, 16).ok())
+                        == Some(port)
+            })
+        })
+    };
+    if !held() {
+        return;
+    }
+    eprintln!("waiting for port {port} to leave TIME_WAIT, or LabVIEW would start without VI Server...");
+    let started = Instant::now();
+    while held() && started.elapsed() < Duration::from_secs(65) {
+        std::thread::sleep(Duration::from_secs(1));
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn wait_port_released(_port: u16) {}
 
 #[cfg(windows)]
 mod win {
@@ -312,9 +380,9 @@ pub fn wait_ready(port: u16, budget: Duration) -> Result<()> {
     // A headless LabVIEW shows no dialogs; what would have been one is in
     // its log instead.
     let hint = if std::env::var_os("LV_RTE_HEADLESS").is_some() {
-        "(headless LabVIEW: see %TEMP%\\LabVIEW_*_headless_*_cur.txt for what went wrong)"
+        format!("(headless LabVIEW: see {HEADLESS_LOG} for what went wrong)")
     } else {
-        "(a dialog may be holding the IDE up — check its window)"
+        "(a dialog may be holding the IDE up — check its window)".to_string()
     };
     bail!(
         "LabVIEW never answered VI Server on port {port} within {}s (last: {last})\n{hint}",
@@ -385,15 +453,17 @@ mod tests {
         );
         assert_eq!(
             out,
-            "[LabVIEW]\r\nserver.tcp.port=3400\r\nserver.tcp.acl=\"+*\"\r\n\
-             LVAddons.AdditionalLocations=C:\\r\\.lv-venv\r\n"
+            format!(
+                "[LabVIEW]{EOL}server.tcp.port=3400{EOL}server.tcp.acl=\"+*\"{EOL}\
+                 LVAddons.AdditionalLocations=C:\\r\\.lv-venv{EOL}"
+            )
         );
     }
 
     #[test]
     fn override_does_not_mistake_a_longer_key_for_a_shorter_one() {
         let out = override_keys("server.tcp.portfoo=1\n", &[("server.tcp.port", "2")]);
-        assert_eq!(out, "server.tcp.portfoo=1\r\nserver.tcp.port=2\r\n");
+        assert_eq!(out, format!("server.tcp.portfoo=1{EOL}server.tcp.port=2{EOL}"));
     }
 
     #[test]
@@ -402,12 +472,14 @@ mod tests {
         // venv IDE wrote stays, lvpm's keys are refreshed in place.
         let keys = [("server.tcp.port", "3412"), ("CompiledObjCacheRoot", "C:\\v\\.lvpm\\objcache")];
         let first = override_keys("[LabVIEW]\r\nserver.tcp.port=3364\r\n", &keys);
-        let edited = format!("{first}useLocaleDecimalPt=False\r\n");
+        let edited = format!("{first}useLocaleDecimalPt=False{EOL}");
         let moved = [("server.tcp.port", "3500"), keys[1]];
         assert_eq!(
             override_keys(&edited, &moved),
-            "[LabVIEW]\r\nserver.tcp.port=3500\r\nCompiledObjCacheRoot=C:\\v\\.lvpm\\objcache\r\n\
-             useLocaleDecimalPt=False\r\n"
+            format!(
+                "[LabVIEW]{EOL}server.tcp.port=3500{EOL}CompiledObjCacheRoot=C:\\v\\.lvpm\\objcache{EOL}\
+                 useLocaleDecimalPt=False{EOL}"
+            )
         );
     }
 
@@ -417,13 +489,13 @@ mod tests {
                    RecentFiles.maxNum=10\r\nLLBMgr_RecentPath=\"C:\\x.llb\"\r\nserver.tcp.port=3364\r\n";
         assert_eq!(
             drop_keys(ini, RECENT_KEYS),
-            "[LabVIEW]\r\nRecentFiles.maxNum=10\r\nserver.tcp.port=3364\r\n"
+            format!("[LabVIEW]{EOL}RecentFiles.maxNum=10{EOL}server.tcp.port=3364{EOL}")
         );
     }
 
     #[test]
     fn override_of_an_empty_ini_is_just_the_keys() {
-        assert_eq!(override_keys("", &[("a", "1")]), "a=1\r\n");
+        assert_eq!(override_keys("", &[("a", "1")]), format!("a=1{EOL}"));
     }
 
     #[test]
