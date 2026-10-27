@@ -185,33 +185,10 @@ started for a venv relink running.
 
 ## The project manifest
 
-`lvpm.toml` at the repo root says what a project depends on and which hosted
-indexes to use. Local package folders are configured globally instead. Any
-`lvpm` command run at or below it picks it up; hosted `[sources]` apply to
-`search` and to a single-package `install` as much as to a full one.
-
-```toml
-[project]
-name = "NovaXC"
-version = "0.1.0"
-labview = "2025"                  # the oldest LabVIEW the project is meant for
-
-[sources]                         # repositories beyond the public indexes
-mirror = "http://host:8090/files" # a hosted index.vipr folder
-defaults = true                   # false: only the sources listed here
-
-[dependencies]
-delacor_lib_qmh = "7.1.2.1547"    # exactly this version
-oglib_error = ">=6.0.1"           # the newest version satisfying the floor
-jki_lib_caraya = "*"              # the newest version
-
-[nipm.dependencies]               # NI Package Manager packages: reported, not installed
-ni-daqmx-labview-support = "26.0"
-```
-
-`labview` is a minimum, not a pin: a venv binds to that version or a newer
-one. Dependencies a package carries are always floors, so what a project pins
-exactly stays exact and the rest resolves to the newest version that fits.
+`lvpm.toml` at the repo root says what a project depends on, the minimum
+LabVIEW it targets, and which hosted indexes to use. See
+[docs/manifest.md](docs/manifest.md) for the format, how it is found and
+resolved, and compatibility with VIPM's `vipm.toml`.
 
 ## Per-project dependencies (venvs)
 

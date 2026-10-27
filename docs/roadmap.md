@@ -70,19 +70,38 @@ wins over the overlay; `LVAddons.AdditionalLocations` needs LabVIEW 2024 Q1.
 `lvpm.toml` (done: exact pins, `>=` floors, `*`, hosted `[sources]` and
 `defaults = false`, `labview` minimum, `[nipm.dependencies]`). Local package
 directories are user-level `sources.local` settings, not manifest sources.
+Reference and `vipm.toml` comparison: [manifest.md](manifest.md).
 
 - **`lvpm.lock`** — the resolved closure (name, version, source URL, MD5) so
   `lvpm install` restores the identical venv on another machine and only
   `lvpm update` re-resolves. The thing a venv without a lock only pretends to
   be.
+- **`lvpm sync`** — after `lvpm.lock`: make the venv match the lock
+  exactly, installing what is missing and uninstalling what the lock does not
+  list. `install` stays additive. `--dry-run` shows both lists. Waits for the
+  lock because today's resolver does not follow already-installed
+  dependencies, so it cannot say what is still needed; notes in
+  [manifest.md](manifest.md#to-do).
 - **`lvpm add <pkg>[@constraint]` / `lvpm remove <pkg>`** — edit the manifest
   and install/uninstall in one step (the `toml` crate can write; the lockfile
   wants this too).
-- **`[dev-dependencies]`** — test and CI tooling (Caraya, VI Analyzer tests,
-  DQMH validation) installed by default, skipped with `--no-dev`.
+- **Constraint grammar (Cargo)** — bare and `^` caret, `~` tilde, `=`
+  exact, `>=` floor, `*` newest, in every dependency table; `name@x` stays
+  CLI-only. Breaking: a bare version is exact today. `vipm.toml` bare
+  versions are read as `=x`.
+- **`[dependencies.<name>]`** — done: named group tables shaped like
+  `[dependencies]` with a reserved `include-groups = [...]` key, selected
+  with `--with`, `--without`, `--only`; only `main` installs by default.
+  Open: whether `dev` should install by default. Reference in
+  [manifest.md](manifest.md#named-dependency-groups).
 - Per-dependency tables: `{ version = "...", hooks = "run", source = "local" }`.
 - `[venv]` overrides: `dir`, `vi-server-port`, `bitness`.
-- Constraints beyond `>=`: `~` / `^` if they turn out to be wanted.
+- **`vipm.toml` conversion** — done for `--manifest vipm.toml`
+  (`src/vipm_interop.rs`: `labview-version`, exact `[dependencies]`,
+  `[dev-dependencies]` as group `dev`, `[nipm.dependencies]`, a note naming
+  what was not used). Not discovered; whether it should be is an open
+  decision in [manifest.md](manifest.md#to-do). Mapping in
+  [manifest.md](manifest.md#reading-a-vipmtoml-with-lvpm).
 
 ## Configuration
 

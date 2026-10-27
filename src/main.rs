@@ -13,6 +13,7 @@ mod spec;
 mod target;
 mod venv;
 mod version;
+mod vipm_interop;
 mod viserver;
 
 use anyhow::{Context, Result, bail, ensure};
@@ -70,6 +71,21 @@ struct RelinkArgs {
     keep_open: bool,
 }
 
+/// Which named dependency groups a manifest install takes. `main` names
+/// `[dependencies]`, the only group installed by default.
+#[derive(clap::Args, Clone)]
+struct GroupArgs {
+    /// Also install these dependency groups (comma-separated).
+    #[arg(long, value_name = "GROUP", value_delimiter = ',', conflicts_with_all = ["only", "package"])]
+    with: Vec<String>,
+    /// Leave these groups out, `main` included (comma-separated).
+    #[arg(long, value_name = "GROUP", value_delimiter = ',', conflicts_with_all = ["only", "package"])]
+    without: Vec<String>,
+    /// Install only these groups (comma-separated); add `main` to keep [dependencies].
+    #[arg(long, value_name = "GROUP", value_delimiter = ',', conflicts_with = "package")]
+    only: Vec<String>,
+}
+
 #[derive(Subcommand)]
 enum Cmd {
     /// List detected LabVIEW installations.
@@ -115,6 +131,8 @@ enum Cmd {
         /// resolving to something older than what is installed is refused.
         #[arg(long)]
         allow_downgrade: bool,
+        #[command(flatten)]
+        groups: GroupArgs,
         #[command(flatten)]
         relink: RelinkArgs,
     },
@@ -242,8 +260,14 @@ enum Cmd {
 #[derive(Subcommand)]
 enum VenvCmd {
     /// Create `.lv-venv/` for the project here by default and bind it to a LabVIEW:
-    /// `--labview-version`, else the manifest's `labview-version`.
-    Create,
+    /// `--labview-version`, else the manifest's `labview`.
+    Create {
+        /// Use this manifest (an `lvpm.toml` or a `vipm.toml`) instead of
+        /// looking for an `lvpm.toml`; the venv goes beside it and no
+        /// skeleton is written.
+        #[arg(long, value_name = "FILE")]
+        manifest: Option<PathBuf>,
+    },
     /// Which venv commands run here would use, and what it is bound to.
     Status,
     /// Delete the venv and everything installed in it.
@@ -282,6 +306,7 @@ fn main() -> Result<()> {
             force_relink,
             run_hooks,
             allow_downgrade,
+            groups,
             relink,
         } => cmd_install(
             &cli,
@@ -293,6 +318,7 @@ fn main() -> Result<()> {
             *force_relink,
             *run_hooks,
             *allow_downgrade,
+            groups,
             relink,
         ),
         Cmd::Relink { package, all, relink } => cmd_relink(&cli, package.as_deref(), *all, relink),
@@ -505,13 +531,23 @@ fn manifest_for(
 ) -> Result<Option<(PathBuf, project::Project)>> {
     let path = match (explicit, repo, &cli.project) {
         (Some(p), _, _) => Some(p.to_path_buf()),
-        (None, Some(r), _) => Some(r.join(project::FILE_NAME)),
+        // A venv created with `--manifest` may have no `lvpm.toml` beside it.
+        (None, Some(r), _) => Some(r.join(project::FILE_NAME)).filter(|p| p.is_file()),
         (None, None, Some(dir)) => Some(dir.join(project::FILE_NAME)).filter(|p| p.is_file()),
         (None, None, None) => project::find_manifest(&std::env::current_dir()?),
     };
     match path {
-        Some(p) => Ok(Some((std::path::absolute(&p)?, project::read(&p)?))),
+        Some(p) => Ok(Some((std::path::absolute(&p)?, read_manifest(&p)?))),
         None => Ok(None),
+    }
+}
+
+/// Read a manifest file. A `vipm.toml` goes through the VIPM conversion; it
+/// is only ever reached through `--manifest`, never discovered.
+fn read_manifest(path: &Path) -> Result<project::Project> {
+    match vipm_interop::is_toml(path) {
+        true => vipm_interop::read_toml(path),
+        false => project::read(path),
     }
 }
 
@@ -751,6 +787,7 @@ fn cmd_install(
     force_relink: bool,
     run_hooks: bool,
     allow_downgrade: bool,
+    groups: &GroupArgs,
     relink_args: &RelinkArgs,
 ) -> Result<()> {
     // Headless (containers, CI): nothing opens the IDE, and whatever the job
@@ -782,7 +819,7 @@ fn cmd_install(
     // when a single package is named. Inside a project a bare `lvpm install`
     // means the manifest's dependencies — the way `npm install` does.
     let found = manifest_for(cli, manifest, venv.as_ref().map(|v| v.repo.as_path()))?;
-    let (wanted, from_manifest): (Vec<(String, project::Constraint)>, _) = match (package, &found) {
+    let (wanted, from_manifest) = match (package, &found) {
         (Some(p), _) => {
             let w = match p.split_once('@') {
                 Some((n, v)) => vec![(n.to_string(), project::Constraint::parse(v)?)],
@@ -790,19 +827,32 @@ fn cmd_install(
             };
             (w, None)
         }
-        (None, Some((path, proj))) => (proj.dependencies.clone(), Some((path, proj))),
+        (None, Some((path, proj))) => {
+            let s = proj.select(&groups.with, &groups.without, &groups.only)?;
+            (s.dependencies, Some((path, proj, s.groups)))
+        }
         (None, None) => bail!("give a package name, or --manifest <FILE>"),
     };
-    ensure!(!wanted.is_empty(), "the manifest lists no [dependencies]");
 
-    if let Some((path, proj)) = &from_manifest {
+    if let Some((path, proj, selected)) = &from_manifest {
+        ensure!(!wanted.is_empty(), "nothing to install: the selected groups ({}) are empty", selected.join(", "));
         eprintln!(
-            "manifest: {}{} — {} dependenc{}",
+            "manifest: {}{} — {} dependenc{} ({})",
             path.display(),
             proj.name.as_deref().map(|n| format!(" ({n})")).unwrap_or_default(),
             wanted.len(),
-            if wanted.len() == 1 { "y" } else { "ies" }
+            if wanted.len() == 1 { "y" } else { "ies" },
+            selected.join(", ")
         );
+        let skipped: Vec<&str> = proj
+            .groups
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .filter(|n| !selected.iter().any(|s| s == n))
+            .collect();
+        if !skipped.is_empty() {
+            eprintln!("      groups not selected: {} (--with <GROUP> adds one)", skipped.join(", "));
+        }
         if let Some(v) = &proj.labview {
             eprintln!("      manifest says labview = {v:?} (minimum)");
         }
@@ -888,7 +938,7 @@ fn cmd_install(
     }
     println!();
 
-    if let Some((_, proj)) = &from_manifest
+    if let Some((_, proj, _)) = &from_manifest
         && !proj.nipm.is_empty()
     {
         println!(
@@ -1456,16 +1506,21 @@ fn cmd_relink(cli: &Cli, package: Option<&str>, all: bool, args: &RelinkArgs) ->
 fn cmd_venv(cli: &Cli, sub: &VenvCmd) -> Result<()> {
     let cwd = std::env::current_dir()?;
     match sub {
-        VenvCmd::Create => {
+        VenvCmd::Create { manifest } => {
             let start = cli.project.clone().unwrap_or(cwd);
-            let v = venv::create(&start, cli.labview_version.as_deref())?;
+            let explicit = match manifest {
+                Some(p) => Some((std::path::absolute(p)?, read_manifest(p)?)),
+                None => None,
+            };
+            let install_hint = match &explicit {
+                Some((p, _)) => format!("`lvpm install --manifest {}`", p.display()),
+                None => format!("`lvpm install` puts {}'s [dependencies]", project::FILE_NAME),
+            };
+            let v = venv::create(&start, cli.labview_version.as_deref(), explicit)?;
             println!("created {}", v.dir.display());
             println!("  bound to       {}  ({})", v.target.label(), v.target.path.display());
             println!("  VI Server port {}", v.port);
-            println!(
-                "\nnext: `lvpm install` puts {}'s [dependencies] into it, `lvpm launch` starts LabVIEW on it",
-                project::FILE_NAME
-            );
+            println!("\nnext: {install_hint} into it, `lvpm launch` starts LabVIEW on it");
             Ok(())
         }
         VenvCmd::Status => match venv::find(cli.project.as_deref(), &cwd)? {
@@ -1853,4 +1908,49 @@ fn read_spec(zip: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>) -> Result<Stri
     std::io::Read::read_to_end(&mut f, &mut buf)?;
     // spec files are latin-1-ish; lossy is fine for the fields we read.
     Ok(String::from_utf8_lossy(&buf).into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn install(args: &[&str]) -> Result<GroupArgs, clap::Error> {
+        let cli = Cli::try_parse_from(["lvpm", "install"].iter().chain(args))?;
+        match cli.cmd {
+            Cmd::Install { groups, .. } => Ok(groups),
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn group_flags_split_on_commas_and_accumulate() {
+        let g = install(&["--with", "test,ci"]).unwrap();
+        assert_eq!(g.with, ["test", "ci"]);
+        let g = install(&["--with", "test", "--with", "ci"]).unwrap();
+        assert_eq!(g.with, ["test", "ci"]);
+        let g = install(&["--with", "a,b", "--with", "c", "--without", "b,d"]).unwrap();
+        assert_eq!(g.with, ["a", "b", "c"]);
+        assert_eq!(g.without, ["b", "d"]);
+        let g = install(&["--only", "main,build"]).unwrap();
+        assert_eq!(g.only, ["main", "build"]);
+        assert!(g.with.is_empty() && g.without.is_empty());
+    }
+
+    #[test]
+    fn group_flags_keep_spaces_for_select_to_trim() {
+        let g = install(&["--with", "test, ci", "--without", "x,"]).unwrap();
+        assert_eq!(g.with, ["test", " ci"]);
+        assert_eq!(g.without, ["x", ""]);
+    }
+
+    #[test]
+    fn group_flags_refuse_contradictory_combinations() {
+        assert!(install(&["--only", "a", "--with", "b"]).is_err());
+        assert!(install(&["--only", "a", "--without", "b"]).is_err());
+        assert!(install(&["oglib_error", "--with", "a"]).is_err());
+        assert!(install(&["oglib_error", "--without", "a"]).is_err());
+        assert!(install(&["oglib_error", "--only", "a"]).is_err());
+        assert!(install(&["--manifest", "vipm.toml", "--with", "dev"]).is_ok());
+        assert!(install(&["--with", "a", "--without", "b"]).is_ok());
+    }
 }
