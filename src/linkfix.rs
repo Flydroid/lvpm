@@ -1031,6 +1031,28 @@ impl Tree {
         lower(p).ends_with(".lvclass") && self.exists(p).is_some()
     }
 
+    /// The one file in the tree with this path's file name, if there is exactly one.
+    fn only_one_named(&self, p: &Pth) -> Option<String> {
+        let name = String::from_utf8_lossy(p.comps.last()?);
+        match self.by_name.get(&lower(&name)) {
+            Some(v) if v.len() == 1 => Some(v[0].clone()),
+            _ => None,
+        }
+    }
+
+    /// Does `qual`, a link's qualified name, fit `logical` as far as it names
+    /// libraries at all? A qualifier leaves out the owners caller and target
+    /// share, so only its innermost libraries have to match.
+    fn qualified_as(&self, logical: &str, qual: &[Vec<u8>], api: bool) -> bool {
+        let Some((_, libs)) = qual.split_last() else { return true };
+        let mut names: Vec<String> = self.chain(logical).into_iter().rev().map(|l| basename(&l).to_string()).collect();
+        if api {
+            names.push(basename(logical).to_string());
+        }
+        libs.len() <= names.len()
+            && libs.iter().rev().zip(names.iter().rev()).all(|(q, n)| String::from_utf8_lossy(q).eq_ignore_ascii_case(n))
+    }
+
     /// Do both files come from the same package?
     fn same_root(&self, a: &str, b: &str) -> bool {
         matches!((self.exists(a), self.exists(b)), (Some(x), Some(y)) if x.root == y.root)
@@ -1419,13 +1441,16 @@ pub fn fix_vi(bytes: &[u8], vi_logical: &str, tree: &Tree, m: Methods) -> Result
                 let s: Vec<String> = o.path.comps.iter().map(|c| String::from_utf8_lossy(c).into_owned()).collect();
                 token_to_logical(&s.join("/")).filter(|l| tree.resolvable(l))
             } else if o.path.is_relative() {
-                resolve_relative(&vi_dir, &o.path.comps).filter(|l| tree.resolvable(l))
+                // A relative path can come from the build machine's layout
+                // too (h5labview2's XNode links climb into the developer's
+                // checkout); LabVIEW then finds the file by its qualified
+                // name, and so do we. A same-named file in another library is
+                // not it (opengds' proxies name an older DQMH's libraries).
+                resolve_relative(&vi_dir, &o.path.comps).filter(|l| tree.resolvable(l)).or_else(|| {
+                    tree.only_one_named(&o.path).filter(|t| tree.qualified_as(t, &o.qual, is_api_kind(&o.ident)))
+                })
             } else if o.path.is_drive() {
-                let name = String::from_utf8_lossy(o.path.comps.last().map(|c| c.as_slice()).unwrap_or(b"")).into_owned();
-                match tree.by_name.get(&lower(&name)) {
-                    Some(v) if v.len() == 1 => Some(v[0].clone()),
-                    _ => None,
-                }
+                tree.only_one_named(&o.path)
             } else {
                 None
             };
@@ -1455,13 +1480,15 @@ pub fn fix_vi(bytes: &[u8], vi_logical: &str, tree: &Tree, m: Methods) -> Result
 
             let Some(target) = target else { continue };
 
-            // Relative and build-machine absolute paths become token paths in
-            // the link roots; elsewhere a build-machine path becomes relative,
-            // within its own package.
+            // Relative and build-machine paths become token paths in the link
+            // roots; elsewhere a build-machine path becomes relative, within
+            // its own package.
             if m.paths && (o.path.is_relative() || o.path.is_drive()) {
+                let from_build_machine = o.path.is_drive()
+                    || resolve_relative(&vi_dir, &o.path.comps).is_none_or(|l| !l.eq_ignore_ascii_case(&target));
                 let new = match link_token(&target) {
                     Some(tok) => Some(Pth::token(tok)),
-                    None if o.path.is_drive() && tree.same_root(vi_logical, &target) => {
+                    None if from_build_machine && tree.same_root(vi_logical, &target) => {
                         Some(Pth { tp: 1, comps: relative_comps(&vi_dir, &target), zero: false })
                     }
                     None => None,
@@ -2010,9 +2037,27 @@ mod tests {
             files.insert(lower(l), Entry { logical: l.to_string(), physical: PathBuf::from(l), root: 0 });
         }
         let owner = HashMap::from([(lower(class), lib.to_string())]);
-        let tree =
-            Tree { files, owner, by_name: HashMap::new() };
+        let tree = Tree { files, owner, by_name: HashMap::new() };
         assert_eq!(tree.chain("vi.lib/P/C/C.lvclass/C.ctl"), vec![class.to_string(), lib.to_string()]);
+    }
+
+    #[test]
+    fn a_name_match_must_fit_the_qualifier() {
+        let lib = "vi.lib/New/New.lvlib";
+        let vi = "vi.lib/New/Global.vi";
+        let class = "vi.lib/New/C.lvclass";
+        let mut files = HashMap::new();
+        for l in [lib, vi, class] {
+            files.insert(lower(l), Entry { logical: l.to_string(), physical: PathBuf::from(l), root: 0 });
+        }
+        let owner = HashMap::from([(lower(vi), lib.to_string()), (lower(class), lib.to_string())]);
+        let tree = Tree { files, owner, by_name: HashMap::new() };
+        let q = |s: &[&str]| s.iter().map(|e| e.as_bytes().to_vec()).collect::<Vec<_>>();
+        assert!(tree.qualified_as(vi, &q(&["New.lvlib", "Global.vi"]), false));
+        assert!(tree.qualified_as(vi, &q(&["Global.vi"]), false), "a caller in the same library leaves it out");
+        assert!(!tree.qualified_as(vi, &q(&["Old.lvlib", "Global.vi"]), false));
+        assert!(tree.qualified_as(class, &q(&["C.lvclass", "\x07\x00"]), true));
+        assert!(!tree.qualified_as(class, &q(&["D.lvclass", "\x07\x00"]), true));
     }
 
     #[test]
