@@ -75,6 +75,34 @@ impl Venv {
         self.dir.join(".lvpm").join("labview.ini")
     }
 
+    /// The compiled-object cache of a LabVIEW on this venv. Its own, because
+    /// the shared one is a single SQLite file: a second instance on it gets
+    /// SQLITE_BUSY on every insert, and the venv's compiled code would mix
+    /// with the primary IDE's.
+    pub fn objcache_dir(&self) -> PathBuf {
+        self.dir.join(".lvpm").join("objcache")
+    }
+
+    /// The `LabVIEW Data` folder of a LabVIEW on this venv — autosave,
+    /// `ExtraVILib`, probes, crash reports — so one instance never offers to
+    /// recover another's files. Fresh: the user's own customisations there
+    /// (icon templates, right-click plugins) are not carried over.
+    pub fn data_dir(&self) -> PathBuf {
+        self.dir.join(".lvpm").join("data")
+    }
+
+    /// `TEMP`/`TMP` of a LabVIEW on this venv. LabVIEW names its log after
+    /// version and user only (`LabVIEW_64_<ver>_<user>_cur.txt`), so two
+    /// instances on the shared `%TEMP%` would write into the same file.
+    pub fn temp_dir(&self) -> PathBuf {
+        self.dir.join(".lvpm").join("temp")
+    }
+
+    /// The process id of the LabVIEW lvpm last started on this venv.
+    pub fn pid_path(&self) -> PathBuf {
+        self.dir.join(".lvpm").join("labview.pid")
+    }
+
     /// The one line every venv-mode command prints first, so an implicit
     /// lookup is never silent about what it found.
     pub fn banner(&self) -> String {
@@ -169,12 +197,31 @@ pub fn load(repo: &Path) -> Result<Venv> {
 /// itself, with a manifest skeleton, when there is none) and bind it to a
 /// LabVIEW: `--labview-version` if given, else the manifest's own — which is
 /// the project's *minimum*, so a newer IDE may be chosen over it, never an
-/// older one. Installs nothing; that is `lvpm install`.
-pub fn create(start: &Path, labview_version: Option<&str>) -> Result<Venv> {
+/// older one. Installs nothing; that is `lvpm install`. An explicit
+/// `manifest` (already read) places the venv beside it instead.
+pub fn create(
+    start: &Path,
+    labview_version: Option<&str>,
+    manifest: Option<(PathBuf, project::Project)>,
+) -> Result<Venv> {
     let start = std::path::absolute(start)?;
-    let repo = match project::find_manifest(&start) {
-        Some(m) => m.parent().map(Path::to_path_buf).unwrap_or(start),
-        None => start,
+    let (repo, manifest_path, proj) = match manifest {
+        Some((path, proj)) => {
+            let repo = path.parent().map(Path::to_path_buf).unwrap_or(start);
+            (repo, path, Some(proj))
+        }
+        None => {
+            let repo = match project::find_manifest(&start) {
+                Some(m) => m.parent().map(Path::to_path_buf).unwrap_or(start),
+                None => start,
+            };
+            let path = repo.join(project::FILE_NAME);
+            let proj = match path.is_file() {
+                true => Some(project::read(&path)?),
+                false => None,
+            };
+            (repo, path, proj)
+        }
     };
     let dir = repo.join(config::load()?.venv_dir);
     if binding_path(&dir).is_file() {
@@ -184,11 +231,6 @@ pub fn create(start: &Path, labview_version: Option<&str>) -> Result<Venv> {
         );
     }
 
-    let manifest_path = repo.join(project::FILE_NAME);
-    let proj = match manifest_path.is_file() {
-        true => Some(project::read(&manifest_path)?),
-        false => None,
-    };
     let min_lv = proj.as_ref().and_then(|p| p.labview.as_deref());
 
     let targets = target::detect()?;
@@ -247,8 +289,14 @@ pub fn create(start: &Path, labview_version: Option<&str>) -> Result<Venv> {
             .map(|d| d.as_secs())
             .unwrap_or(0),
     };
-    std::fs::write(binding_path(&dir), serde_json::to_string_pretty(&b)?)?;
-    Ok(Venv { repo, dir, target, port })
+    let v = Venv { repo, dir, target, port };
+    // The venv's own ini starts here, as a snapshot of the user's settings
+    // for this LabVIEW; from now on it is the venv's, and what is set in the
+    // venv IDE stays in it. Written before the binding: the binding is what
+    // makes a venv exist, so a failure here leaves nothing a retry trips on.
+    crate::launch::write_ini(&v)?;
+    std::fs::write(binding_path(&v.dir), serde_json::to_string_pretty(&b)?)?;
+    Ok(v)
 }
 
 /// Delete the venv — payload, store, binding, all of it.

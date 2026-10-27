@@ -41,8 +41,20 @@
 .PARAMETER Repo
     GitHub repository as owner/name. Default: Flydroid/lvpm
 
+.PARAMETER BuildLocal
+    Build this checkout with cargo build --release --locked, package it,
+    and install using the same verification and extraction as a release.
+    Requires Rust and the Windows C++ build tools. Does not publish anything.
+
+.PARAMETER Archive
+    Install a local release zip instead of downloading from GitHub.
+    Requires -Sha256. Cannot be combined with -BuildLocal or release selection.
+
 .EXAMPLE
     .\install.ps1
+
+.EXAMPLE
+    .\install.ps1 -BuildLocal
 
 .EXAMPLE
     .\install.ps1 -Version v0.2.0 -InstallDir C:\tools\lvpm -NoPath
@@ -59,12 +71,57 @@ param(
     [string]$Sha256,
     [switch]$NoPath,
     [ValidatePattern('^[\w.-]+/[\w.-]+$')]
-    [string]$Repo = 'Flydroid/lvpm'
+    [string]$Repo = 'Flydroid/lvpm',
+    [switch]$BuildLocal,
+    [string]$Archive
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+
+if (($BuildLocal -or $Archive) -and ($Version -or $Stable -or $PSBoundParameters.ContainsKey('Repo'))) {
+    throw 'Local installation cannot be combined with -Version, -Stable, or -Repo.'
+}
+if ($BuildLocal -and ($Archive -or $Sha256)) {
+    throw '-BuildLocal cannot be combined with -Archive or -Sha256.'
+}
+if ($Archive -and -not $Sha256) {
+    throw '-Archive requires -Sha256.'
+}
+
+if ($BuildLocal) {
+    $manifest = Join-Path (Split-Path $PSScriptRoot -Parent) 'Cargo.toml'
+    & cargo build --release --locked --manifest-path $manifest
+    if ($LASTEXITCODE -ne 0) { throw "cargo build failed with exit code $LASTEXITCODE" }
+    $metadataJson = & cargo metadata --no-deps --format-version 1 --locked --manifest-path $manifest
+    if ($LASTEXITCODE -ne 0) { throw "cargo metadata failed with exit code $LASTEXITCODE" }
+    $metadata = ($metadataJson -join "`n") | ConvertFrom-Json
+    $package = $metadata.packages | Where-Object { $_.name -eq 'lvpm' } | Select-Object -First 1
+    if (-not $package) { throw 'cargo metadata contains no lvpm package' }
+    $binary = Join-Path $metadata.target_directory 'release\lvpm.exe'
+    if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) {
+        throw "No Windows release executable at $binary. Build with the default Windows host target."
+    }
+    $bundle = Join-Path ([IO.Path]::GetTempPath()) ("lvpm-local-" + [guid]::NewGuid().ToString('n'))
+    New-Item -ItemType Directory -Path $bundle | Out-Null
+    try {
+        $payload = Join-Path $bundle 'payload'
+        New-Item -ItemType Directory -Path $payload | Out-Null
+        Copy-Item -LiteralPath $binary -Destination $payload
+        foreach ($name in @('README.md', 'LICENSE-MIT', 'LICENSE-APACHE')) {
+            Copy-Item -LiteralPath (Join-Path (Split-Path $manifest -Parent) $name) -Destination $payload
+        }
+        $localZip = Join-Path $bundle "lvpm-$($package.version)-windows-local.zip"
+        Compress-Archive -Path (Join-Path $payload '*') -DestinationPath $localZip
+        $localHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $localZip).Hash
+        & $PSCommandPath -Archive $localZip -Sha256 $localHash -InstallDir $InstallDir -NoPath:$NoPath
+    }
+    finally {
+        Remove-Item -LiteralPath $bundle -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    return
+}
 
 # Windows PowerShell 5.1 negotiates TLS 1.0 by default; insist on 1.2 or better.
 try {
@@ -86,7 +143,12 @@ function Invoke-GitHubApi([string]$Path) {
 
 # ------------------------------------------------------ resolve release ----
 
-if ($Version) {
+if ($Archive) {
+    $archiveFile = Get-Item -LiteralPath $Archive
+    if ($archiveFile.PSIsContainer) { throw '-Archive must name a zip file.' }
+    $asset = [pscustomobject]@{ name = $archiveFile.Name; size = $archiveFile.Length }
+    $release = [pscustomobject]@{ tag_name = 'local'; prerelease = $false; assets = @() }
+} elseif ($Version) {
     $release = Invoke-GitHubApi "releases/tags/$Version"
 } else {
     # Invoke-RestMethod hands a JSON array back as one object rather than as a
@@ -102,9 +164,11 @@ if ($Version) {
     }
 }
 
-$asset = $release.assets | Where-Object { $_.name -like $assetPattern } | Select-Object -First 1
-if (-not $asset) {
-    throw "release $($release.tag_name) has no asset matching $assetPattern"
+if (-not $Archive) {
+    $asset = $release.assets | Where-Object { $_.name -like $assetPattern } | Select-Object -First 1
+    if (-not $asset) {
+        throw "release $($release.tag_name) has no asset matching $assetPattern"
+    }
 }
 Write-Host "release: $($release.tag_name)$(if ($release.prerelease) { ' (pre-release)' })"
 Write-Host "asset:   $($asset.name) ($([math]::Round($asset.size / 1MB, 1)) MB)"
@@ -120,7 +184,11 @@ try {
     # signed download URL.
     $dl = $headers.Clone()
     $dl['Accept'] = 'application/octet-stream'
-    Invoke-WebRequest -Uri $asset.url -Headers $dl -OutFile $zip -MaximumRedirection 5
+    if ($Archive) {
+        Copy-Item -LiteralPath $archiveFile.FullName -Destination $zip
+    } else {
+        Invoke-WebRequest -Uri $asset.url -Headers $dl -OutFile $zip -MaximumRedirection 5
+    }
 
     # -------------------------------------------------------- verify ----
 
@@ -185,6 +253,7 @@ try {
 
     Write-Host ''
     $installed = (& (Join-Path $InstallDir 'lvpm.exe') --version) -join ' '
+    if ($LASTEXITCODE -ne 0) { throw "Installed lvpm --version failed with exit code $LASTEXITCODE" }
     Write-Host "$installed installed"
 }
 finally {

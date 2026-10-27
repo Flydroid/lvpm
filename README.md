@@ -80,6 +80,33 @@ cargo test
 
 Toolchain setup is in [CONTRIBUTING.md](CONTRIBUTING.md).
 
+### Test a local release installation
+
+From a Windows checkout with the build tools installed:
+
+```powershell
+.\scripts\install.ps1 -BuildLocal
+```
+
+This runs `cargo build --release --locked`, packages the executable,
+README and licenses into a temporary zip, verifies its SHA-256, and uses
+the normal release installation path. It replaces any existing per-user
+lvpm in `%LOCALAPPDATA%\lvpm\bin` and adds that directory to your user
+`PATH`. No GitHub release or cargo-dist setup is required. The version
+remains the one declared in Cargo.toml; temporary packaging files are removed.
+The local checksum checks the packaged bytes, not publisher authenticity.
+
+For an isolated test without changing your installed lvpm or user PATH:
+
+```powershell
+.\scripts\install.ps1 -BuildLocal -InstallDir "$PWD\sandbox\local-installer\bin" -NoPath
+.\sandbox\local-installer\bin\lvpm.exe --version
+```
+
+An existing release zip can also be installed with `-Archive <FILE>` and
+`-Sha256 <EXPECTED-HASH>` instead of building it. Local modes cannot be
+combined with GitHub release selection options.
+
 ## Quick start
 
 ```console
@@ -160,33 +187,10 @@ started for a venv relink running.
 
 ## The project manifest
 
-`lvpm.toml` at the repo root says what a project depends on and which hosted
-indexes to use. Local package folders are configured globally instead. Any
-`lvpm` command run at or below it picks it up; hosted `[sources]` apply to
-`search` and to a single-package `install` as much as to a full one.
-
-```toml
-[project]
-name = "NovaXC"
-version = "0.1.0"
-labview = "2025"                  # the oldest LabVIEW the project is meant for
-
-[sources]                         # repositories beyond the public indexes
-mirror = "http://host:8090/files" # a hosted index.vipr folder
-defaults = true                   # false: only the sources listed here
-
-[dependencies]
-delacor_lib_qmh = "7.1.2.1547"    # exactly this version
-oglib_error = ">=6.0.1"           # the newest version satisfying the floor
-jki_lib_caraya = "*"              # the newest version
-
-[nipm.dependencies]               # NI Package Manager packages: reported, not installed
-ni-daqmx-labview-support = "26.0"
-```
-
-`labview` is a minimum, not a pin: a venv binds to that version or a newer
-one. Dependencies a package carries are always floors, so what a project pins
-exactly stays exact and the rest resolves to the newest version that fits.
+`lvpm.toml` at the repo root says what a project depends on, the minimum
+LabVIEW it targets, and which hosted indexes to use. See
+[docs/manifest.md](docs/manifest.md) for the format, how it is found and
+resolved, and compatibility with VIPM's `vipm.toml`.
 
 ## Per-project dependencies (venvs)
 
@@ -218,9 +222,20 @@ $ lvpm launch MyProject.lvproj    # a LabVIEW that sees the venv
   with no venv beside it is an error, never a silent global install, except
   on a headless machine (see [CI in a container](#ci-in-a-container-docker)).
   Every venv-mode command prints which venv it resolved to.
-- `lvpm launch [<lvproj>]` starts a LabVIEW on the venv: a copy of the
-  target's `LabVIEW.ini` with the venv mounted and VI Server on a port of its
-  own, handed over with `-pref`. Your primary LabVIEW, if open, is untouched.
+- `lvpm launch [<lvproj>]` starts a LabVIEW on the venv: an ini of the
+  venv's own (`.lvpm/labview.ini`, copied from the target's `LabVIEW.ini` by
+  `lvpm venv create` without its recent-files lists, so the venv IDE never
+  offers projects from outside the venv; options you set in the venv IDE
+  persist; delete it
+  to inherit your global settings again at the next launch) with the venv
+  mounted, VI Server on a port of its
+  own, and its own compiled-object cache, `LabVIEW Data` folder and temp
+  directory under `.lvpm/`, handed over with `-pref`. Your primary LabVIEW,
+  if open, is untouched, and its autosave files, cache and log
+  (`LabVIEW_*_cur.txt`) are never shared with the venv's — look for the
+  venv's log in `.lvpm/temp`. The venv starts with an empty `LabVIEW Data`, so personal
+  customisations kept there (icon templates, right-click plugins) are not
+  available in it.
 
 How it works: the venv directory is an [LVAddons](https://labviewwiki.org/wiki/LVAddons)
 location, one addon per package, each mirroring the LabVIEW install dir
@@ -391,12 +406,38 @@ your own, named in the manifest's `[sources]`. A `[sources]` entry is an
 `http://` or `https://` folder holding an `index.vipr`. Local directories of
 `.vip` files are configured globally with `lvpm config set sources.local`
 instead; lvpm reads their specs and package files directly. These local
-packages are not stored in the cache yet.
+directories reuse cached spec metadata when file size and modification time
+match; installation still reads their original archives unless imported.
 
-Every source lvpm knows is recorded in `%LOCALAPPDATA%\lvpm\cache`, in a
+Use `lvpm cache add` to import a `.vip` or `.ogp`, or all such files directly
+inside a directory, into the shared content-addressed cache:
+
+```powershell
+lvpm cache add D:\LabVIEW\Packages\some_lib-1.2.3.vip
+lvpm cache add D:\LabVIEW\Packages
+lvpm --refresh cache add D:\LabVIEW\Packages
+```
+
+Imports record SHA-256, MD5, package metadata, and the original path. Repeated
+imports skip unchanged files when their cached blob still exists; `--refresh`
+reads and hashes them again. Imported packages are available to search and
+installation even after the originals are deleted. Cache reads verify the
+SHA-256 and installation also checks MD5. Local index files and cache
+list/remove/prune commands are not implemented yet.
+
+Remote package installs check the cache by name, version, and the feed's MD5
+before downloading. A single distinct SHA-256 match is verified and reused,
+including archives imported from disk. Missing, corrupt, or ambiguous matches
+are downloaded and verified, then stored with SHA-256 and MD5 for future runs.
+Packages without a feed MD5 are stored but downloaded again on later installs:
+name/version alone does not identify their bytes. `--refresh` refreshes feeds,
+not already verified package blobs. Dry runs may populate the cache without
+writing package files into the target.
+
+Remote feeds, downloads, and imported packages are recorded in `%LOCALAPPDATA%\lvpm\cache`, in a
 SQLite index (`lvpm-cache.db`) over a content-addressed store of the bodies
-themselves. Without `--refresh` the stored body is used and nothing goes out
-to the network. With it, the `ETag` and `Last-Modified` the server last gave
+themselves. For feed bodies, without `--refresh` the stored body is used and
+no feed request goes out. With it, the `ETag` and `Last-Modified` the server last gave
 are sent back as a conditional request: only a feed that actually changed is
 downloaded again, and an unchanged one answers `304` and costs no bytes. See
 [Configuration](#configuration) to move the cache.
@@ -415,7 +456,7 @@ empty value counts as unset. Precedence, highest first:
 
 | Variable | Default | What it sets |
 | --- | --- | --- |
-| `LVPM_CONFIG_CACHE` | `%LOCALAPPDATA%\lvpm\cache` (Linux: `$XDG_CACHE_HOME/lvpm/cache`, else `~/.cache/lvpm/cache`) | Where the cache DB and downloaded feed bodies live |
+| `LVPM_CONFIG_CACHE` | `%LOCALAPPDATA%\lvpm\cache` (Linux: `$XDG_CACHE_HOME/lvpm/cache`, else `~/.cache/lvpm/cache`) | Where the cache DB, feed bodies, and imported package archives live |
 | `LVPM_CONFIG_SOURCES_LOCAL` | Empty | Local `.vip` directories; separate paths with `;` on Windows or `:` on Linux |
 | `LVPM_CONFIG_VENV_DIR` | `.lv-venv` | Project-relative venv directory (or an absolute path) |
 
@@ -464,6 +505,7 @@ runs.
 | ------------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
 | `main.rs`                      | The CLI: commands, target and venv selection, the install plan                                                          |
 | `index.rs`                     | Fetch and parse package directories (`.ogpd` / `index.vipr`), resolve names to versions                                |
+| `fetch.rs`                     | Acquire package bytes: cache lookup, downloads, integrity verification, and cache population                            |
 | `cache.rs`                     | The cache: the SQLite index of known sources and the content-addressed store of what they served                        |
 | `spec.rs`                      | The `spec` manifest inside a package (the OGPT `.ogp` format and VIPM's `.vip` dialect)                                 |
 | `project.rs`                   | The project manifest `lvpm.toml`: dependencies and their constraints, sources, minimum LabVIEW, lookup from a directory |
