@@ -47,14 +47,39 @@ git -C hse-logger checkout f7cc16a391faa1e982b54ae22d2f43c9df1ef581
 LVPM_TEST_PILOT_A=<path to hse-logger> cargo test --test acceptance
 ```
 
-The scenario checks that the checkout's HEAD is the pinned commit. Without
-`LVPM_TEST_PILOT_A`, the harness does not run these scenarios and says how
-many it left out.
+Pilot B's `@pilot-b-source` scenario works the same way with its own variable:
+
+```console
+git clone https://github.com/LabVIEW-Open-Source/Serializer
+git -C Serializer checkout 723d7a672b5f0eafa9f98ea63629ba5855d50227
+LVPM_TEST_PILOT_B=<path to Serializer> cargo test --test acceptance
+```
+
+Each scenario checks that its HEAD is the pinned commit and that the folder
+the build copies (`Source` or `source`) has no modified, untracked or ignored
+files; changes elsewhere in the checkout are accepted. Without the variable, the harness does not run that pilot's scenarios
+and says how many it left out.
 
 | Pilot | Repository | Tag | Commit |
 |---|---|---|---|
 | A: HSE Logger 2.2.2.114 | https://code.hampel-soft.com/open-source/hse-logger | `v2.2.2` | `f7cc16a391faa1e982b54ae22d2f43c9df1ef581` |
 | B: OpenSerializer 1.2.1.16 | https://github.com/LabVIEW-Open-Source/Serializer | `1.2.1` | `723d7a672b5f0eafa9f98ea63629ba5855d50227` |
+
+## The VIPM probe (S1b)
+
+The probe installs lvpm's build of pilot A and its variants through VIPM
+into the LabVIEW 2026 installation and records which ones VIPM accepts. It is
+an `#[ignore]` test, so plain `cargo test` never runs it. It needs `vipm.exe`
+and pilot A's checkout (as above), no LabVIEW running, and none of the pilots
+installed:
+
+```console
+LVPM_TEST_VIPM=<path to vipm.exe> LVPM_TEST_PILOT_A=<path to hse-logger> cargo test --test vipm_probe -- --ignored --nocapture
+```
+
+The findings table and VIPM's output for each variant go to
+`target/vipm-probes/<timestamp>/`, which is never committed. If a run is
+interrupted, the next one names the packages it left installed.
 
 ## Running them
 

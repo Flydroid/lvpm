@@ -1,8 +1,10 @@
 //! The pilot libraries of the build slices: their archives, each with a SHA-256 checksum
 //! in `tests/fixtures/pilots/SHA256SUMS`, and what a mass compile of them says.
 
+use super::snapshot::hex;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 /// The checksum file in the pilot folder: one SHA-256 per archive.
 pub const CHECKSUMS_FILE: &str = "SHA256SUMS";
@@ -58,10 +60,6 @@ pub fn check_checksums(dir: &Path) -> Result<(), String> {
         }
     }
     Ok(())
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 /// The `.lvlib` file names inside a `.vip`: what would show that its package
@@ -136,6 +134,127 @@ pub fn labviewcli() -> PathBuf {
 pub const PILOT_A_COMMIT: &str = "f7cc16a391faa1e982b54ae22d2f43c9df1ef581";
 /// Pilot A as its vendor published it.
 pub const PILOT_A_ARCHIVE: &str = "hse_lib_hse_logger-2.2.2.114.vip";
+/// The folder of pilot A's checkout that its build copies.
+pub const PILOT_A_SUBTREE: &str = "Source";
+/// Pilot A's `lvpm.toml`: its repository has none, and this is what it would hold.
+pub const PILOT_A_MANIFEST: &str = r#"[project]
+name = "hse_lib_hse_logger"
+version = "2.2.2.114"
+labview = ">=2016"
+
+[distribution]
+top-level-library = "Source/HSE-Logger/hse-logger.lvlib"
+
+[distribution.vip]
+vendor = "Hampel Software Engineering"
+display-name = "HSE Logger"
+"#;
+
+/// Pilot B's pinned commit; README.md beside the build-slice features names it.
+pub const PILOT_B_COMMIT: &str = "723d7a672b5f0eafa9f98ea63629ba5855d50227";
+/// Pilot B as its vendor published it.
+pub const PILOT_B_ARCHIVE: &str = "labview_open_source_lib_serializer-1.2.1.16.vip";
+
+/// The checkout the variable `env_var` names, once its HEAD is `commit` and
+/// nothing in its `subtree` (the folder a build copies) is modified or
+/// untracked; otherwise what is wrong with it.
+pub fn pilot_checkout(env_var: &str, commit: &str, subtree: &str) -> Result<PathBuf, String> {
+    let path = std::env::var_os(env_var).ok_or_else(|| format!("{env_var} names no checkout"))?;
+    checkout_at(env_var, path, commit, subtree)
+}
+
+/// `git -C path`, with no repository chosen by the caller's environment.
+pub(crate) fn git_command(path: &Path) -> Command {
+    let mut git = Command::new("git");
+    git.arg("-C").arg(path);
+    for var in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"] {
+        git.env_remove(var);
+    }
+    // git's untranslated messages, so errors and tests read the same on any locale
+    git.env("LC_ALL", "C").env("LANGUAGE", "C");
+    git
+}
+
+fn checkout_at(
+    env_var: &str,
+    path: std::ffi::OsString,
+    commit: &str,
+    subtree: &str,
+) -> Result<PathBuf, String> {
+    let path = PathBuf::from(path);
+    let shown = path.display();
+    let at = format!("{env_var}={shown}");
+    if !path.is_dir() {
+        return Err(format!("{at} does not exist or is not a folder"));
+    }
+    // The checkout itself must be the repository, not a folder inside one.
+    // git ignores a relative ceiling, so the path is made absolute first.
+    let path = std::path::absolute(&path).map_err(|e| format!("{at}: its full path: {e}"))?;
+    let ceiling = path.parent().unwrap_or(&path);
+    let git = |args: &[&str]| {
+        let output = git_command(&path)
+            .env("GIT_CEILING_DIRECTORIES", ceiling)
+            .args(args)
+            .output()
+            .map_err(|e| format!("{at}: running git: {e}"))?;
+        match output.status.success() {
+            true => Ok(String::from_utf8_lossy(&output.stdout).trim().to_string()),
+            false => Err(format!(
+                "{at}: `git {}` failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr).trim()
+            )),
+        }
+    };
+    let head = git(&["rev-parse", "HEAD"])?;
+    if head != commit {
+        return Err(format!(
+            "{at} is at {head}, not the pinned commit {commit}; run `git -C \"{shown}\" checkout {commit}`"
+        ));
+    }
+    let status = [
+        "--no-optional-locks",
+        "status",
+        "--porcelain",
+        "--untracked-files=all",
+        // a git-ignored file in the subtree is copied by the build too
+        "--ignored",
+        "--",
+        subtree,
+    ];
+    if !git(&status)?.is_empty() {
+        return Err(format!(
+            "{at} has uncommitted changes in {subtree} (`git -C \"{shown}\" status -- {subtree}` lists them); build from a clean checkout"
+        ));
+    }
+    Ok(path)
+}
+
+/// The package names of a `Requires` value (`a>=1.0,b`), without their bounds.
+pub fn requires_names(requires: &str) -> Vec<String> {
+    requires
+        .split(',')
+        .map(|part| part.trim().split(['<', '>', '=', ' ']).next().unwrap_or(""))
+        .filter(|name| !name.is_empty())
+        .map(String::from)
+        .collect()
+}
+
+/// The package names `archive`'s spec requires, sorted.
+pub fn requires_of(archive: &Path) -> Vec<String> {
+    let bytes =
+        std::fs::read(archive).unwrap_or_else(|e| panic!("reading {}: {e}", archive.display()));
+    let spec = lvpm_core::install::open_archive(bytes)
+        .and_then(|mut zip| lvpm_core::install::read_spec(&mut zip))
+        .unwrap_or_else(|e| panic!("lvpm cannot read {}'s spec: {e:#}", archive.display()));
+    let mut names = spec
+        .requires
+        .as_deref()
+        .map(requires_names)
+        .unwrap_or_default();
+    names.sort();
+    names
+}
 
 /// The file entries of a package below `File Group 0/<under>`, relative to
 /// `File Group 0/`, sorted.
@@ -240,8 +359,257 @@ mod tests {
 
     #[test]
     fn pilot_a_ships_its_library() {
-        let archive = pilots_dir().join("hse_lib_hse_logger-2.2.2.114.vip");
+        let archive = pilots_dir().join(PILOT_A_ARCHIVE);
         assert!(library_names(&archive).contains(&"hse-logger.lvlib".to_string()));
+    }
+
+    const VAR: &str = "LVPM_TEST_PILOT_X";
+    /// The folder of the repositories below that a build would copy.
+    const SUBTREE: &str = "Source";
+
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let null_device = if cfg!(windows) { "NUL" } else { "/dev/null" };
+        let output = git_command(dir)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", null_device)
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .output()
+            .expect("run git");
+        assert!(output.status.success(), "git {args:?}: {output:?}");
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    /// A repository with one commit, and that commit's id.
+    fn repo_with_a_commit() -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().unwrap();
+        git(dir.path(), &["init", "-q"]);
+        std::fs::create_dir(dir.path().join(SUBTREE)).unwrap();
+        std::fs::write(dir.path().join(SUBTREE).join("a.txt"), "a").unwrap();
+        std::fs::write(dir.path().join("outside.txt"), "o").unwrap();
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-q", "-m", "a"]);
+        let head = git(dir.path(), &["rev-parse", "HEAD"]);
+        (dir, head)
+    }
+
+    #[test]
+    fn a_clean_checkout_at_the_pinned_commit_is_accepted() {
+        let (dir, head) = repo_with_a_commit();
+        assert_eq!(
+            checkout_at(VAR, dir.path().as_os_str().to_owned(), &head, SUBTREE),
+            Ok(dir.path().to_path_buf())
+        );
+    }
+
+    #[test]
+    fn a_checkout_at_another_commit_names_both_and_the_fix() {
+        let (dir, first) = repo_with_a_commit();
+        std::fs::write(dir.path().join("b.txt"), "b").unwrap();
+        git(dir.path(), &["add", "b.txt"]);
+        git(dir.path(), &["commit", "-q", "-m", "b"]);
+        let second = git(dir.path(), &["rev-parse", "HEAD"]);
+        let why = checkout_at(VAR, dir.path().as_os_str().to_owned(), &first, SUBTREE).unwrap_err();
+        let fix = format!("git -C \"{}\" checkout {first}", dir.path().display());
+        for wanted in [VAR, &first, &second, &fix] {
+            assert!(why.contains(wanted), "{wanted} is not in: {why}");
+        }
+    }
+
+    fn refusal(path: &Path, commit: &str) -> String {
+        checkout_at(VAR, path.as_os_str().to_owned(), commit, SUBTREE).unwrap_err()
+    }
+
+    #[test]
+    fn a_variable_nothing_sets_names_no_checkout() {
+        assert_eq!(
+            pilot_checkout("LVPM_TEST_PILOT_NOTHING_SETS_THIS", "abc", SUBTREE),
+            Err("LVPM_TEST_PILOT_NOTHING_SETS_THIS names no checkout".to_string())
+        );
+    }
+
+    #[test]
+    fn a_missing_path_is_refused() {
+        let (repo, head) = repo_with_a_commit();
+        let missing = repo.path().join("nowhere");
+        let why = refusal(&missing, &head);
+        for wanted in [VAR, &missing.display().to_string(), "does not exist"] {
+            assert!(why.contains(wanted), "{wanted} is not in: {why}");
+        }
+    }
+
+    #[test]
+    fn a_folder_that_is_not_a_repository_is_refused() {
+        let (repo, head) = repo_with_a_commit();
+        let inside_a_repository = repo.path().join("sub");
+        std::fs::create_dir(&inside_a_repository).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        for path in [outside.path(), inside_a_repository.as_path()] {
+            let why = refusal(path, &head);
+            for wanted in [VAR, &path.display().to_string(), "not a git repository"] {
+                assert!(why.contains(wanted), "{wanted} is not in: {why}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_modified_file_is_refused() {
+        let (repo, head) = repo_with_a_commit();
+        std::fs::write(repo.path().join(SUBTREE).join("a.txt"), "changed").unwrap();
+        let why = refusal(repo.path(), &head);
+        for wanted in [
+            VAR,
+            &repo.path().display().to_string(),
+            "uncommitted changes",
+        ] {
+            assert!(why.contains(wanted), "{wanted} is not in: {why}");
+        }
+    }
+
+    #[test]
+    fn an_untracked_file_is_refused() {
+        let (repo, head) = repo_with_a_commit();
+        let nested = repo.path().join(SUBTREE).join("new");
+        std::fs::create_dir(&nested).unwrap();
+        std::fs::write(nested.join("b.txt"), "b").unwrap();
+        let why = refusal(repo.path(), &head);
+        assert!(why.contains("uncommitted changes"), "{why}");
+    }
+
+    #[test]
+    fn a_git_ignored_file_is_refused() {
+        let (repo, head) = repo_with_a_commit();
+        std::fs::write(
+            repo.path().join(".git/info/exclude"),
+            "*.log
+",
+        )
+        .unwrap();
+        std::fs::write(repo.path().join(SUBTREE).join("run.log"), "l").unwrap();
+        let why = refusal(repo.path(), &head);
+        assert!(why.contains("uncommitted changes"), "{why}");
+    }
+
+    #[test]
+    fn changes_outside_the_copied_folder_are_accepted() {
+        let (repo, head) = repo_with_a_commit();
+        std::fs::write(repo.path().join("outside.txt"), "changed").unwrap();
+        std::fs::write(repo.path().join("noise.txt"), "n").unwrap();
+        assert_eq!(
+            checkout_at(VAR, repo.path().as_os_str().to_owned(), &head, SUBTREE),
+            Ok(repo.path().to_path_buf())
+        );
+    }
+
+    #[test]
+    fn a_checkout_git_cannot_read_is_refused_not_accepted() {
+        let (repo, head) = repo_with_a_commit();
+        std::fs::write(repo.path().join(".git/index"), "not an index").unwrap();
+        let why = refusal(repo.path(), &head);
+        for wanted in [
+            VAR,
+            &repo.path().display().to_string(),
+            "status",
+            "index file",
+        ] {
+            assert!(why.contains(wanted), "{wanted} is not in: {why}");
+        }
+    }
+
+    #[test]
+    fn pilot_b_requires_data_manipulation_and_nothing_else() {
+        let archive = pilots_dir().join(PILOT_B_ARCHIVE);
+        assert_eq!(
+            requires_of(&archive),
+            ["labview_open_source_lib_data_manipulation"]
+        );
+    }
+
+    /// A `.vip` holding only a spec with `body` after its `[Package]` section.
+    fn archive_with_spec(body: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a-1.0.vip");
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+        zip.start_file("spec", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        std::io::Write::write_all(
+            &mut zip,
+            format!(
+                "[Package]
+Name=a
+{body}"
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        zip.finish().unwrap();
+        (dir, path)
+    }
+
+    #[test]
+    fn a_spec_with_no_requires_requires_nothing() {
+        let (_dir, archive) = archive_with_spec("");
+        assert!(requires_of(&archive).is_empty());
+    }
+
+    #[test]
+    fn requires_are_sorted_by_name() {
+        let (_dir, archive) = archive_with_spec(
+            "[Dependencies]
+Requires=b>=1.0,a
+",
+        );
+        assert_eq!(requires_of(&archive), ["a", "b"]);
+    }
+
+    #[test]
+    #[should_panic(expected = "no-such.vip")]
+    fn a_missing_archive_panics_naming_it() {
+        requires_of(Path::new("no-such.vip"));
+    }
+
+    #[test]
+    #[should_panic(expected = "a-1.0.vip")]
+    fn an_archive_without_a_spec_panics_naming_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a-1.0.vip");
+        zip::ZipWriter::new(std::fs::File::create(&path).unwrap())
+            .finish()
+            .unwrap();
+        requires_of(&path);
+    }
+
+    #[test]
+    fn requires_names_drop_the_version_bounds() {
+        assert_eq!(
+            requires_names("a>=1.0,b,  c<2.0 , d==3"),
+            ["a", "b", "c", "d"]
+        );
+        assert!(requires_names("").is_empty());
+    }
+
+    #[test]
+    fn a_space_before_a_version_bound_ends_the_name() {
+        assert_eq!(requires_names("a >= 1.0, b == 2"), ["a", "b"]);
+    }
+
+    #[test]
+    fn a_copied_tree_has_the_files_and_folders_of_the_original() {
+        let from = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(from.path().join("a/b")).unwrap();
+        std::fs::create_dir_all(from.path().join("a/empty")).unwrap();
+        std::fs::write(from.path().join("top.txt"), "t").unwrap();
+        std::fs::write(from.path().join("a/b/deep.txt"), "deep").unwrap();
+        let to = tempfile::tempdir().unwrap();
+        let copy = to.path().join("copy");
+        copy_tree(from.path(), &copy);
+        let shape = |root: &Path| -> Vec<(PathBuf, Option<u64>)> {
+            let found = super::super::snapshot::scan(root, None, &[]).unwrap();
+            found.into_iter().map(|(path, e)| (path, e.size)).collect()
+        };
+        assert_eq!(shape(&copy), shape(from.path()));
+        assert!(copy.join("a/empty").is_dir(), "an empty folder is copied");
     }
 
     #[test]
