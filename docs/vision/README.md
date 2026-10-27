@@ -49,10 +49,12 @@ Each one is usable on its own. Ticks mean done.
 **M1 — reproducible projects**
 - [x] `lvpm.lock` with SHA-256, `lock --check`, `sync` (also removes extras)
 - [x] `add`, `remove` (`--dev`)
-- [ ] `init` (incl. `--from project.vipc`), `info`, `update`
+- [x] `info`
+- [ ] `init` (incl. `--from project.vipc`), `update`
 - [ ] The first source that lists a name wins (no merging across sources)
 - [ ] Pinning a dependency to one source (`index = "<name>"`)
-- [ ] `--json`, documented exit codes, `--yes`, `--labview-bitness`
+- [x] `--json`, documented exit codes
+- [ ] `--yes`, `--labview-bitness`
 - [ ] Dependency groups (`--group`)
 - [ ] Install hooks off by default, with a warning and an allowlist
 

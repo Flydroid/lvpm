@@ -19,14 +19,27 @@ split, and S10 is split into S10a–d with only what is left.
 
 ## How to run a slice
 
-1. Create the issues once: `/issues-from-plan docs/vision/build-slices.md`.
-   It makes a parent issue from the spec and one child issue per slice,
-   linked by the `Depends-on` lines below.
+Progress lives on GitHub, not in this file. Each slice has its own issue
+under [#57](https://github.com/ThatsTheEnd/lvpm/issues/57), and its
+`Depends-on` line became "blocked by" links. All of them are on the
+[lvpm mission](https://github.com/users/ThatsTheEnd/projects/2) board. A slice
+that was built differently from what is written here has the `deviation`
+label, and its closing comment says how. `scripts/status.ps1` shows which
+worktree is working on what, and which slices can be built next.
+
+1. The issues were created on 2026-10-27 with `/issues-from-plan`. A slice
+   added here later gets its own sub-issue of #57, with the same "blocked by"
+   links.
 2. Ship one slice at a time: `/ship <issue URL>`. `/specs` turns the slice
    into intent, architecture notes and acceptance criteria and asks the
-   questions listed under "Decide in `/specs`".
+   questions listed under "Decide in `/specs`". The PR says `Closes #<issue>`.
 3. After each merge, run the slice's demo by hand and adjust the next
    slices here if something you learned changes them.
+
+Which slices shipped is on the board. Two of S1's changes matter to later
+slices: `[project] labview` is now a minimum such
+as `">=2025"`, and `lvpm build` reports no event (its op returns
+`Built { path, files }`).
 
 ## Rules for every slice
 
@@ -520,6 +533,8 @@ Decide in `/specs`: `.dragon` as well; pinned (exact) or floor (`>=`) constraint
 
 ### Slice S10b: `lvpm info`
 
+**Shipped** in #47 (lvpm-tui plan), not from this slice.
+
 **Depends-on:** none
 **Files:** `src/main.rs`, `src/render/query.rs`, `crates/lvpm-core/src/events.rs`, `src/render/mod.rs`, `crates/lvpm-core/src/ops/query.rs`
 
@@ -532,6 +547,8 @@ Acceptance criteria:
 Demo: `lvpm info hse_lib_hse_logger`.
 
 ### Slice S10c: `--json` and documented exit codes
+
+**Shipped** in #48 (lvpm-tui plan), not from this slice.
 
 **Depends-on:** none
 **Files:** `src/main.rs`, `src/render/`, `crates/lvpm-core/src/errors.rs`
