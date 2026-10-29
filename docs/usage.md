@@ -265,8 +265,9 @@ resave (2/2) oglib_string ... already saved in LabVIEW 2026, skipped
 ## Building a package
 
 `lvpm build` packages one LabVIEW library as a `.vip` that `lvpm install`
-installs. It follows the published packages' layout; installing it with
-VIPM itself is not tested yet. It needs no LabVIEW. Describe the package in
+installs. It needs no LabVIEW. VIPM refuses this `.vip`, so it is for lvpm
+only; a later release writes lvpm's own `.lvpkg` instead and drops `formats`
+and `[distribution.vip]` ([ADR 6](adr/0006-lvpkg-only-vip-read-only.md)). Describe the package in
 `lvpm.toml`:
 
 ```toml

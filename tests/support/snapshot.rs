@@ -20,8 +20,10 @@ pub struct Entry {
 /// Files and directories by path relative to the root they were read from.
 pub type Snapshot = BTreeMap<PathBuf, Entry>;
 
-/// The files LabVIEW and VIPM rewrite on their own: settings, alias lists and caches.
-pub const LABVIEW_NOISE: [&str; 4] = ["ini", "aliases", "cache", "lvlps"];
+/// The files LabVIEW and VIPM rewrite on their own: settings, alias lists and
+/// caches. `vidb` is the compiled-object cache, `VIObjCache/<version>/objFileDB.vidb`,
+/// which an install's compile rewrites and an uninstall does not restore.
+pub const LABVIEW_NOISE: [&str; 5] = ["ini", "aliases", "cache", "lvlps", "vidb"];
 
 fn name_in(name: &std::ffi::OsStr, list: &[&str]) -> bool {
     list.iter().any(|item| name.eq_ignore_ascii_case(item))

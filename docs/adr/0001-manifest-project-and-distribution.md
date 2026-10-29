@@ -8,6 +8,10 @@ Accepted 2026-10-26, ahead of the upstream alignment meeting on 2026-10-30, so
 the slices can be built now. If the meeting changes it, a new ADR supersedes
 this one.
 
+Amended by [ADR 6](0006-lvpkg-only-vip-read-only.md) on 2026-10-29: `formats`
+and `[distribution.vip]` (decisions 2 and 4, and the example) go away when S7a
+lands; lvpm writes `.lvpkg` only.
+
 ## Context
 
 S1 adds `lvpm build`, so `lvpm.toml` needs keys that describe a package. The

@@ -81,6 +81,13 @@ The findings table and VIPM's output for each variant go to
 `target/vipm-probes/<timestamp>/`, which is never committed. If a run is
 interrupted, the next one names the packages it left installed.
 
+Its "accepted" proves nothing for a name and version VIPM already has: VIPM
+then installs its cached copy. Every variant keeps pilot A's published
+version, so a run only tells whether VIPM's cache works. VIPM refuses lvpm's
+`.vip` at a new version, and lvpm no longer aims to write one VIPM accepts
+([ADR 6](../../../docs/adr/0006-lvpkg-only-vip-read-only.md)). The round-trip
+scenarios were removed for that reason.
+
 ## Running them
 
 ```console

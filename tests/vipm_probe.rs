@@ -6,6 +6,9 @@
 //! `cargo test --test vipm_probe -- --ignored --nocapture`, with
 //! `LVPM_TEST_VIPM` (vipm.exe) and `LVPM_TEST_PILOT_A` (pilot A's checkout).
 //! The findings go to `target/vipm-probes/<date>T<time>-vipm-<version>/`.
+//!
+//! "accepted" proves nothing at a version VIPM already has: VIPM then installs
+//! its cached copy, whatever the file holds (ADR 6). S1b closed on that.
 
 // Test code reads the test process's environment; the workspace-wide
 // `clippy.toml` bars that from `lvpm-core` only.
@@ -59,6 +62,8 @@ fn probe() -> Result<String, String> {
 
     let runner = vipm::real_runner(vipm_exe);
     let vipm = Vipm::new(&runner, Timeouts::REAL);
+    // Before the guard, so no `info` or `uninstall` runs against the wrong exe.
+    let vipm_version = vipm.version()?;
     let me = std::process::id();
     let start = global::process_start(me).ok_or("this run's own start time cannot be read")?;
     let ini = std::fs::read_to_string(labview.join("LabVIEW.ini")).unwrap_or_default();
@@ -76,7 +81,6 @@ fn probe() -> Result<String, String> {
     )?;
 
     let inputs = load_inputs(&pilot_a)?;
-    let vipm_version = vipm.version()?;
     let header = table::Header {
         vipm: vipm_version.clone(),
         labview: labview_file_version(&labview)?,

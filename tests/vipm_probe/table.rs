@@ -47,6 +47,7 @@ fn list(title: &str, items: &[String]) -> String {
 pub fn render(header: &Header, rows: &[Row], diff: &RefDiff, not_varied: &[String]) -> String {
     let mut out = format!(
         "# VIPM probe\n\nVIPM: {}\nLabVIEW: {}\n\n\
+         \"accepted\" at a version VIPM already has is its cached copy, not this file (ADR 6).\n\n\
          | variant | verdict | exit | first line of VIPM's output | same files as reference |\n\
          |---|---|---|---|---|\n",
         escape(&header.vipm),
@@ -93,11 +94,11 @@ pub fn render(header: &Header, rows: &[Row], diff: &RefDiff, not_varied: &[Strin
     out
 }
 
-/// `<n> variants: <a> accepted, <r> rejected; table: <path>`
+/// `<n> variants: <a> accepted (...), <r> rejected; table: <path>`
 pub fn summary_line(rows: &[Row], table: &std::path::Path) -> String {
     let accepted = rows.iter().filter(|row| row.accepted).count();
     format!(
-        "{} variants: {accepted} accepted, {} rejected; table: {}",
+        "{} variants: {accepted} accepted (a cached copy if VIPM knew the version), {} rejected; table: {}",
         rows.len(),
         rows.len() - accepted,
         table.display()
@@ -164,7 +165,7 @@ mod tests {
         let line = summary_line(&rows, std::path::Path::new("t/table.md"));
         assert_eq!(
             line,
-            "3 variants: 2 accepted, 1 rejected; table: t/table.md"
+            "3 variants: 2 accepted (a cached copy if VIPM knew the version), 1 rejected; table: t/table.md"
         );
     }
 

@@ -159,7 +159,14 @@ impl Drop for Guard<'_> {
 }
 
 pub fn scan_scope(labview: &Path) -> Result<Snapshot, String> {
-    snapshot::scan(labview, Some(&SCOPE), &LABVIEW_NOISE)
+    let mut found = snapshot::scan(labview, Some(&SCOPE), &LABVIEW_NOISE)?;
+    found.remove(&vipm_own());
+    Ok(found)
+}
+
+/// VIPM's own Tools-menu VI, which VIPM rewrites during a run whatever it installs.
+fn vipm_own() -> PathBuf {
+    Path::new("project").join("VI Package Manager.vi")
 }
 
 fn describe(changes: &[Change]) -> String {
@@ -466,7 +473,8 @@ pub fn run(
 ) -> Result<Vec<Row>, String> {
     let total = variants.len();
     let full_before = snapshot::scan(probe.labview, None, &LABVIEW_NOISE)?;
-    let baseline = snapshot::restrict(&full_before, &SCOPE);
+    let mut baseline = snapshot::restrict(&full_before, &SCOPE);
+    baseline.remove(&vipm_own());
     eprintln!("{}", progress(0, total, "reference", "installing"));
     let reference = reference_install(probe, reference, &full_before, &baseline)?;
     variants
@@ -546,8 +554,8 @@ mod tests {
                         Listing::Hangs => unreachable!("answered above"),
                     };
                     match listed {
-                        true => exited(0, &format!("{} 1.0.0.1", args[1])),
-                        false => exited(1, ""),
+                        true => exited(0, "Installed Version: 1.0.0.1"),
+                        false => exited(0, "Installed Version: (not installed)"),
                     }
                 }
                 _ => exited(0, "vipm synthetic"),

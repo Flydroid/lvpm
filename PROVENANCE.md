@@ -62,6 +62,20 @@ package installs and diffing the two states. lvpm's installer was then
 verified by comparing the filesystem state it produces against the state a
 reference VIPM install produces: identical files, identical places.
 
+## .vip writing
+
+lvpm does not write `.vip` for VIPM; S1's `.vip` is for lvpm only until S7a removes the writer ([ADR 6](docs/adr/0006-lvpkg-only-vip-read-only.md)).
+Whether VIPM installs the `.vip` that S1's `lvpm build` writes was tested only
+through documented `vipm` commands (`install -y`, `uninstall`, `info`,
+`--version`) and VIPM's own package builder, against VIPM 26.3.0. lvpm's builds,
+re-versioned published archives and one VIPM build were installed into our own
+licensed LabVIEW installation, and the installed files were compared. VIPM
+refuses lvpm's file because it checks a package `ID` whose computation is not
+published. No VIPM code, cache or configuration was read, decompiled or
+disassembled to find it, and none will be. The conclusions are in the
+[S1b spec](docs/specs/lvpm-vip-roundtrip-s1b.md#outcome); the per-variant
+table stays outside the repository, under `target/`.
+
 ## LabVIEW VI Server wire protocol
 
 The TCP protocol spoken by [crates/lvpm-core/src/viserver.rs](crates/lvpm-core/src/viserver.rs) belongs to NI's

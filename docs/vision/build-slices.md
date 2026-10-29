@@ -77,9 +77,10 @@ These are hard to undo, so settle them as ADRs (`/adr-tools`) before S1 starts:
    [ADR 1](../adr/0001-manifest-project-and-distribution.md): one `[project]`
    identity, `labview = ">=2021"` as a constraint, packaging in
    `[distribution]`, and LabVIEW build specs stay in the `.lvproj`.
-2. **`.vip` first, `.lvpkg` later.** Decided in
-   [ADR 2](../adr/0002-vip-first-lvpkg-later.md). `.vip` stays first-class
-   for good. `lvpm build` writes no install hooks for now (ADR 2, decision 6).
+2. **`.lvpkg` only; `.vip` is read, never written.** Decided in
+   [ADR 6](../adr/0006-lvpkg-only-vip-read-only.md), which supersedes ADR 2 after S1b: VIPM refuses lvpm's `.vip`. lvpm
+   keeps installing `.vip` from every feed. `lvpm build` writes no install
+   hooks (ADR 6, decision 4).
 3. **The upstream relationship.** The goal is to contribute back to
    [Flydroid/lvpm](https://github.com/Flydroid/lvpm), whose authors focus on
    venvs and the core. This fork works on what they don't: build, publish,
@@ -108,7 +109,7 @@ These are hard to undo, so settle them as ADRs (`/adr-tools`) before S1 starts:
 6. **Install hooks.** Decided in
    [ADR 3](../adr/0003-install-hooks-off-by-default.md): off by default
    everywhere, a warning with instructions when one is skipped, and an
-   allowlist by package name. `lvpm build` writes none (ADR 2).
+   allowlist by package name. `lvpm build` writes none (ADR 6).
 
 ## Pilot libraries
 
@@ -136,23 +137,23 @@ link. Checked 2026-10-26 from each repository's `.vipb`.
 |---|---|---|
 | 1 | S0 acceptance scenarios, S5 `lvpm check`, S10a–d project commands, S11 dependency groups, S12 hooks off by default, S13 first source wins | yes (S5, S10a–d, S11 and S12 touch `src/main.rs`; S5, S10a, S10b and S12 also touch `events.rs`; S5, S10a, S10b and S12 touch `src/render/mod.rs`; S10a, S11 and S12 touch `manifest_edit.rs`; S11 and S12 touch `ops/sync.rs`, `ops/uninstall.rs` and `project.rs`, so build them one after the other: merge one first, rebase the others; S11 and S13 touch `lockfile.rs`) |
 | 2 | S1 `lvpm build`, S7c pinned sources | yes (both touch `project.rs` and `src/main.rs`) |
-| 3 | S1b VIPM round trip, S2 publish to folder, S4 GitHub Releases, S5b build gate, S9 app builds + SBOM | yes (S2, S5b and S9 touch `src/main.rs`; S1b, S5b and S9 touch `ops/build.rs`; S1b and S2 touch `tests/features/build-slices/`: merge one first, rebase the others) |
-| 4 | S6 attestations and policy, S7a `.lvpkg` | yes (no shared files) |
+| 3 | S7a `.lvpkg`, S4 GitHub Releases, S5b build gate, S9 app builds + SBOM | yes (S7a, S5b and S9 touch `ops/build.rs`; S7a and S4 touch `index.rs` and `project.rs`; S5b and S9 touch `src/main.rs`: merge one first, rebase the others) |
+| 4 | S6 attestations and policy | yes |
 | 5 | S7b OCI feeds, S8 community index | yes (both touch `project.rs`) |
 
 Almost every slice also appends a line to `tests/acceptance.rs` (`FEATURE_FILES`)
 and to the command table in docs/usage.md; those are one-line conflicts, not
 collisions, and the notes above leave them out.
 
-S1b is the merge gate for the risky unknown: if VIPM rejects an lvpm-built
-`.vip`, re-plan S2, S4 and S7a here before any of them merges.
+S1b closed on 2026-10-29 without its round trips: VIPM refuses lvpm's `.vip`, so S7a moved up to wave 3 and
+replaces the `.vip` writer ([ADR 6](../adr/0006-lvpkg-only-vip-read-only.md)).
 
 Pinned sources (S7c) land before OCI feeds (S7b) on purpose: no org registry
 should sit next to a public feed without a way to pin a package to it.
 
 Not sliced yet, with the milestone they belong to:
 - the `ppl` kind (M2) and `lvpm convert` (M4): add slices after S7a. The M2
-  `.lvpkg` box is ticked by S7a, not by the M2 slices.
+  `.lvpkg` box is ticked by whichever of S7a and S9 merges second.
 - `lvpm tree` (M2): the dependency view on top of S5's linker reader.
 - OIDC Trusted Publishing and Notation signatures (M3, design 5.2 and 5.3).
 - `[policy] min-release-age` and yanking (design 4 and 5.7).
@@ -160,9 +161,8 @@ Not sliced yet, with the milestone they belong to:
   package, one version per name per LabVIEW instance, and no install-time
   writes outside the venv.
 
-Spike the two biggest unknowns before you put dates on anything: whether
-VIPM installs a `.vip` that lvpm wrote (S1b), and the linker-table reader
-(S5). The Python prototype `deptree.py` that S5 was to port is not in this
+Spike the biggest unknown left before you put dates on anything: the
+linker-table reader (S5). The Python prototype `deptree.py` that S5 was to port is not in this
 repository, so S5 starts from the roadmap's description of it and from
 observed VI files, not from its code.
 
@@ -228,7 +228,7 @@ In scope:
 - Write the `spec` file (the inverse of `spec::parse`) and a
   deterministic zip (sorted entries, fixed timestamps) into `dist/`.
 
-Out of scope: VIPM acceptance (S1b), `.lvpkg`, link validation (S5), PPLs,
+Out of scope: VIPM acceptance (S1b), `.lvpkg` (S7a), link validation (S5), PPLs,
 signing, SBOM.
 
 Acceptance criteria:
@@ -243,6 +243,11 @@ Demo: `lvpm build` in pilot A, then `lvpm install` the result in project B.
 Decide in `/specs`: nothing about key names; ADR 1 fixes them.
 
 ### Slice S1b: VIPM installs an lvpm-built `.vip`
+
+**Closed 2026-10-29, not achievable.** VIPM checks a package `ID` lvpm cannot
+compute, and the first probe run had only installed VIPM's cached copy. What
+was found is in the [S1b spec](../specs/lvpm-vip-roundtrip-s1b.md#outcome);
+the decision is [ADR 6](../adr/0006-lvpkg-only-vip-read-only.md). The text below is the slice as it was planned.
 
 **Depends-on:** S0, S1
 **Files:** `crates/lvpm-core/src/spec.rs`, `crates/lvpm-core/src/ops/build.rs`, `tests/features/build-slices/`
@@ -315,9 +320,10 @@ Goal: the open-source loop without any registry of your own.
 In scope:
 - `libX = { github = "owner/repo", version = ">=1.2" }` in `lvpm.toml`: a direct
   source for that one package, never looked up in `[sources]` (ADR 4, decision 6).
-- Versions come from release tags; the release file is `*.vip` (`*.lvpkg` first once S7a ships).
+- Versions come from release tags; the release file is `*.lvpkg` (once S7a reads it), with `*.vip` as a fallback for releases VIPM built.
 - The lock's `source` field names the GitHub feed; the file's SHA-256 is pinned on first lock.
-- A CI template that runs `lvpm build` on a tag and uploads with `gh release upload`.
+- A CI template that runs `lvpm build` on a tag and uploads the `.lvpkg` with `gh release upload`.
+  It ships with whichever of S4 and S7a merges second: until S7a, `lvpm build` writes a `.vip` that is not to be distributed (ADR 6).
 
 Out of scope: attestations (S6), the community index (S8).
 
@@ -397,24 +403,33 @@ Decide in `/specs`: verify with the `gh` CLI or a Rust Sigstore library.
 
 ### Slice S7a: `.lvpkg` format
 
-**Depends-on:** S1b, S4, S9
-**Files:** `crates/lvpm-core/src/ops/build.rs`, `crates/lvpm-core/src/lvpkg.rs`, `crates/lvpm-core/src/index.rs`, `crates/lvpm-core/src/install.rs`, `crates/lvpm-core/src/sbom.rs`
+**Depends-on:** S1
+**Files:** `crates/lvpm-core/src/ops/build.rs`, `crates/lvpm-core/src/lvpkg.rs`, `crates/lvpm-core/src/project.rs`, `crates/lvpm-core/src/index.rs`, `crates/lvpm-core/src/install.rs`, `crates/lvpm-core/src/ops/publish.rs`, `tests/features/build-slices/`
 
-Goal: lvpm's own format, with per-file hashes and an SBOM inside.
+Goal: lvpm's own format, with per-file hashes, replacing the `.vip` writer
+([ADR 6](../adr/0006-lvpkg-only-vip-read-only.md)).
 
 In scope:
-- `formats = ["lvpkg", "vip"]`: a deterministic `.lvpkg` with `package.toml`, `RECORD` and a CycloneDX SBOM (the generator S9 added).
+- `lvpm build` writes a deterministic `dist/<name>-<version>.lvpkg` with
+  `package.toml` and `RECORD`, and no longer writes `.vip`.
+- `formats`, `[distribution.vip]` and its `dependency-names` are removed;
+  scoped names go into `package.toml` as they are.
 - lvpm installs `.lvpkg` from every feed it reads `.vip` from, and checks `RECORD`.
+- `lvpm publish` copies the `.lvpkg`. S1's and S2's scenarios move to it.
+
+Out of scope: the SBOM inside the package (whichever of S7a and S9 merges second adds it), `lvpm convert`.
 
 Acceptance criteria:
-- [ ] Both formats from one `lvpm build`; each is byte-identical across two builds.
-- [ ] A `.lvpkg` with a file whose hash disagrees with `RECORD` is refused.
-- [ ] A GitHub release with both files resolves to the `.lvpkg`.
-- [ ] README milestone "`lvpm build`: `source` kind, `.lvpkg` format, SBOM" is ticked.
+- [ ] `lvpm build` writes only `dist/<name>-<version>.lvpkg`; two builds are byte-identical.
+- [ ] A `.lvpkg` with a file whose hash disagrees with `RECORD` is refused, naming the file.
+- [ ] `formats` or `[distribution.vip]` in `lvpm.toml` fails with a message that names the key and ADR 6.
+- [ ] Pilot A built as `.lvpkg` installs from a folder feed into project B and mass compiles (`@labview`).
+- [ ] Installing a `.vip` from every feed still works (S0's scenarios pass).
 
 Demo: build pilot B as `.lvpkg`, publish to a folder, install in project A.
 
-Decide in `/specs`: `package.toml` keys (reuse ADR 1's names).
+Decide in `/specs`: `package.toml` keys (reuse ADR 1's names); whether a
+GitHub release with both files is S4's or S7a's, whichever merges second.
 
 ### Slice S7c: Pinned sources
 
@@ -503,7 +518,8 @@ SBOM. It reuses S1's `build` command.
 
 In scope:
 - `lvpm build` runs a named `.lvproj` build spec through LabVIEW in the project's venv.
-- A CycloneDX SBOM from `lvpm.lock`, shipped next to the build. S7a reuses the generator.
+- A CycloneDX SBOM from `lvpm.lock`, shipped next to the build, and inside each `.lvpkg` `lvpm build` writes (whichever of S7a and S9 merges second adds that part).
+- README milestone "`lvpm build`: `source` kind, `.lvpkg` format, SBOM" is ticked once S7a and S9 have both merged.
 
 Out of scope: PPL packages (not sliced yet).
 
@@ -626,7 +642,7 @@ In scope:
 - The project allowlist is `hooks = "run"` on the dependency line ([ADR 4](../adr/0004-sources-first-wins-and-pinning.md)); global installs use one in the user config.
 - Uninstall hooks run only if the install hook ran.
 
-Out of scope: running hooks in a venv (never); hooks in lvpm-built packages (ADR 2); pinning each allowed hook VI's hash in `lvpm.lock` (ADR 3).
+Out of scope: running hooks in a venv (never); hooks in lvpm-built packages (ADR 6, decision 4); pinning each allowed hook VI's hash in `lvpm.lock` (ADR 3).
 
 Acceptance criteria:
 - [ ] A global install of a package with a `PostInstall` hook does not run it, warns, and exits 0.

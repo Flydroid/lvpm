@@ -10,7 +10,7 @@
   "components": [
     { "id": "dev", "type": "external", "label": "Developer", "sublabel": "inner + open source", "pos": [40, 40], "size": [120, 64] },
     { "id": "src", "type": "frontend", "label": "Library A source", "sublabel": "lvpm.toml + .lvlib", "pos": [220, 40], "size": [170, 64] },
-    { "id": "build", "type": "backend", "label": "lvpm build", "sublabel": "source | ppl → .lvpkg | .vip", "pos": [470, 40], "size": [170, 64], "tag": "proposed" },
+    { "id": "build", "type": "backend", "label": "lvpm build", "sublabel": "source | ppl → .lvpkg", "pos": [470, 40], "size": [170, 64], "tag": "proposed" },
     { "id": "ci", "type": "security", "label": "CI pipeline", "sublabel": "Sigstore sign · SLSA provenance", "pos": [755, 40], "size": [190, 64], "tag": "proposed" },
 
     { "id": "legacy", "type": "cloud", "label": "VIPM / NI indexes", "sublabel": ".vip / .ogp, read-only", "pos": [230, 200], "size": [160, 64], "tag": "works today" },
@@ -59,7 +59,7 @@
   ],
   "cards": [
     { "dot": "emerald", "title": "Works today", "items": ["Per-project .lv-venv, one LabVIEW process each: same package, different versions, no clash (a global copy still shadows it)", "Install from VIPM/NI indexes and folders; hooks never run in a venv; headless skips them unless --hooks", "NIPM dependencies checked; lvpm launch / relink / refresh"] },
-    { "dot": "cyan", "title": "Build (proposed)", "items": ["Kind: source (any LabVIEW ≥ min) or ppl (version + bitness)", "Format: .lvpkg native, .vip for VIPM users, from one lvpm.toml", "Linker check without LabVIEW; app builds + SBOM via lvproj specs"] },
+    { "dot": "cyan", "title": "Build (proposed)", "items": ["Kind: source (any LabVIEW ≥ min) or ppl (version + bitness)", "Format: .lvpkg, from one lvpm.toml; .vip is read, never written", "Linker check without LabVIEW; app builds + SBOM via lvproj specs"] },
     { "dot": "rose", "title": "Trust (proposed)", "items": ["SHA-256 pinned in lvpm.lock; lock --check in CI", "Publish from CI only: OIDC, Sigstore, SLSA provenance", "First source that lists a name wins; a dependency can pin a source"] },
     { "dot": "amber", "title": "Distributed sources (proposed)", "items": ["Registry ≠ storage: a git index maps names to repos and hashes", "Release files stay on GitHub Releases or any OCI registry", "Anyone can fork or mirror the index; vipm.io is one source of many"] },
     { "dot": "violet", "title": "Develop library B (proposed)", "items": ["Depend on A by version, or { path = \"../libA\" } mounted live", "Release B through the same build → CI → publish path"] }

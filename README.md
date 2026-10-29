@@ -161,9 +161,10 @@ change to them is a breaking change and gets a major version.
   manifest and shown by `lvpm list`. No warning yet when a global copy of a
   venv package shadows it.
 
-- `lvpm build` packages one library's members as a `.vip`: no build hooks,
-  no probes or templates from outside the library, no `.lvpkg`, and
-  installing the result with VIPM itself is not tested yet.
+- `lvpm build` packages one library's members as a `.vip` for lvpm only:
+  no build hooks, no probes or templates from outside the library. VIPM
+  refuses it, so don't hand it to VIPM users. lvpm's own `.lvpkg` format
+  replaces it ([ADR 6](docs/adr/0006-lvpkg-only-vip-read-only.md)).
 
 [docs/roadmap.md](docs/roadmap.md) has what is planned.
 

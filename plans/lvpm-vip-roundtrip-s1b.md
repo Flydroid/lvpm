@@ -1,8 +1,8 @@
 # Plan: S1b — VIPM installs an lvpm-built `.vip`
 
-**Created**: 2026-10-27 · **Revised**: 2026-10-27 (plan review rounds 1 and 2)
+**Created**: 2026-10-27 · **Revised**: 2026-10-28 (plan review round 3, PR 2)
 **Branch**: claude/s1b-vipm-roundtrip-spec (build continues on it)
-**Status**: implemented (PR 1: steps 1.1-1.5 and 2.1; step 1.6 is the operator run, still open)
+**Status**: closed 2026-10-29. PR 1 merged (#80). PR 2's round trips failed: VIPM refuses lvpm's `.vip` at a new version, and the 2026-10-28 run had only installed VIPM's cached copy. See the spec's [Outcome](../docs/specs/lvpm-vip-roundtrip-s1b.md#outcome) and [ADR 6](../docs/adr/0006-lvpkg-only-vip-read-only.md). PR 2 ships the probe fixes and these docs only
 **Gherkin persistence**: plan-file-only (steps write the feature file themselves, as S1 did)
 **Spec**: [docs/specs/lvpm-vip-roundtrip-s1b.md](../docs/specs/lvpm-vip-roundtrip-s1b.md) · issue #60
 
@@ -14,9 +14,9 @@ on both pilots. The work ships as **two PRs** with a checkpoint between:
 
 - **PR 1 (this plan, in detail):** slice 1, the probe runner, and slice 2,
   pilot B built from its pinned checkout. Ends with one probe run (step 1.6).
-- **PR 2 (slices 3–4, sketched):** what lvpm must write, the round trips and
-  the docs. Its steps depend on the probe's findings. It is re-planned and
-  re-reviewed after step 1.6, not built from the sketch.
+- **PR 2 (slices 3–4, re-planned after step 1.6):** planned as the probe
+  fixes, the round trips and the docs. The round trips failed (see Status),
+  so it ships the probe fixes and the closing docs.
 
 ## Acceptance Criteria
 
@@ -28,13 +28,13 @@ on both pilots. The work ships as **two PRs** with a checkpoint between:
 | AC | Scenarios | Step | PR |
 |---|---|---|---|
 | AC1 findings table, local | S1 "every variant gets a row", "a rejected variant records VIPM's message", "git status is unchanged by the run", "a vipm command that hangs is recorded", "a missing variable fails the run naming it" | 1.1–1.5, 1.6 | 1 |
-| AC1 PROVENANCE paragraph | S4 PROVENANCE check | 4.2 | 2 |
+| AC1 PROVENANCE paragraph | S4 PROVENANCE check | 4.3 | 2 |
 | AC7 no residue | S1 "the tree is unchanged after the run", "a probe that leaves a file fails naming variant and file", "an installed package stops the run before any install", "an interrupted run is named at the next start" | 1.3, 1.4 | 1 |
 | AC5 (build half) | S2 "pilot B builds from its pinned checkout" | 2.1 | 1 |
-| AC2, AC3 | S3 (re-planned) | 3.x | 2 |
-| AC4, AC5, AC6 | S4 manual round trips (AC6's file is `s1b-vip-in-vipm-roundtrip.feature`; deviation logged) | 4.1 | 2 |
+| AC2, AC3 | AC2 vacuous (empty `crates/` diff); AC3: S1 "building twice gives the same bytes" | 3 (none), PR 2 gate | 2 |
+| AC4, AC5, AC6 | S4 manual round trips (AC6's file is `s1b-vip-in-vipm-roundtrip.feature`; deviation logged) | 4.2 | 2 |
 | AC8 | gate run with `LVPM_TEST_LABVIEW=1 LVPM_TEST_PILOT_A=…` | PR 2 gate | 2 |
-| AC9 | — (doc edit) | 4.2 | 2 |
+| AC9 | — (doc edit) | 4.3 | 2 |
 
 ## Approach stances (decision-defaults)
 
@@ -53,7 +53,7 @@ on both pilots. The work ships as **two PRs** with a checkpoint between:
 - Format fidelity: lvpm adds only what a probe shows VIPM rejects without,
   plus `ID` if VIPM identifies packages by it.
 - Integration: PRs against `main`, no auto-merge. PR 1 is test-only (no lvpm-core change): patch
-  bump. PR 2 changes `.vip` output: minor bump.
+  bump. PR 2 leaves `.vip` output as it is: patch bump (0.12.1).
 
 ## Slices
 
@@ -407,59 +407,105 @@ above; existing selection tests pass with `Env`.
 **Files**: `tests/support/selection.rs`, `tests/support/pilots.rs`, `tests/steps/pilots.rs`, `tests/acceptance.rs`, `tests/support_unit.rs`, `tests/features/build-slices/s1b-vip-in-vipm.feature`, `tests/features/build-slices/README.md`
 **Commit**: `test(pilots): pilot B builds from its pinned checkout`
 
-### Slice 3: lvpm writes what VIPM needs (PR 2, sketch)
+### Slice 3: lvpm writes what VIPM needs (none needed)
 
-**Depends-on:** 1
-**Files:** `crates/lvpm-core/src/spec.rs`, `crates/lvpm-core/src/ops/build.rs`
+Refuted 2026-10-29 (spec Outcome, ADR 6): that run reused a version VIPM had
+cached, so its "accepted" was VIPM's own copy. The original text follows.
 
-Re-planned after step 1.6 and reviewed again (acceptance and design
-critics) before it is built. Fixed now:
+Re-planned after step 1.6. The probe run accepted lvpm's base build and every
+variant, each installing the reference's files. lvpm-core needs no change.
+AC2 is vacuous: no change, so no requirement to test; the PR 2 gate checks
+`git diff main -- crates/` is empty. AC3 is S1's scenario "building twice
+gives the same bytes" (`s1-lvpm-build.feature`), unchanged; lvpm writes no
+`ID`. The sketched `WriteExtras` and `write_zip` seams are dropped. Nothing to
+build.
 
-- `Spec` stays the read model; writer-only data goes to
-  `spec::write(&s, &WriteExtras { id, … })`, so `lvpm info --json` is
-  unchanged.
-- One step per finding; each adds an `Examples` row `| key or entry | expected value pattern | test name |`
-  to the outline `Then the spec has key "<key>" in "<section>" matching <pattern>`,
-  and a unit test asserting on `spec::write` or the zip entry list.
-- A negative scenario: the spec's keys are S1's keys in S1's order plus
-  exactly this slice's rows.
-- Non-member zip entries (icon, license), if needed, come through a
-  `write_zip(…, extra: &[(String, Vec<u8>)], members)` seam; their source is
-  decided at re-plan, and `distribution.rs` joins the file list then.
-- Cap: more than 5 requirements, or any change to the zip layout → stop and ask.
+### Slice 4: round trips recorded, docs (PR 2)
 
-### Slice 4: round trips recorded, docs (PR 2, sketch)
+**Depends-on:** 2
+**Files:** `tests/vipm_probe.rs`, `tests/vipm_probe/vipm.rs`, `tests/features/build-slices/s1b-vip-in-vipm-roundtrip.feature`, `tests/features/build-slices/README.md`, `tests/acceptance.rs`, `PROVENANCE.md`, `docs/vision/README.md`, `docs/vision/build-slices.md`, `docs/specs/lvpm-vip-roundtrip-s1b.md`
 
-**Depends-on:** 2, 3
-**Files:** `tests/features/build-slices/s1b-vip-in-vipm-roundtrip.feature`, `PROVENANCE.md`, `docs/vision/README.md`, `docs/vision/build-slices.md`, `docs/specs/lvpm-vip-roundtrip-s1b.md`, `Cargo.toml`, `Cargo.lock`
+PR 2 is this branch (the probe fixes from step 1.6 plus this slice). `.vip`
+output does not change, so the bump is a patch: 0.12.1, already made.
 
-Fixed now: the round-trip scenarios are tagged `@unsafe` (the harness's
-existing "would change the user's LabVIEW, never run, counted as not run").
-A file holds one `Feature`, so they go into
-`tests/features/build-slices/s1b-vip-in-vipm-roundtrip.feature`, not
-registered in `FEATURE_FILES`.
-They carry: VIPM logged in and able to install Data Manipulation by name
-alone; "the install is accepted" (glossary); mass compile via the S0 wording;
-the files check through `tests/support/snapshot.rs`; pilot B's dependencies
-named (Data Manipulation and the palette); a run line per scenario
-(`Run <date>, VIPM 2026.3: pass|fail`). A failing round trip loops back to
-slice 3. PROVENANCE check: the paragraph names "documented `vipm` commands"
-and "VIPM 2026.3".
+#### Step 4.1: the probe refuses a `LVPM_TEST_VIPM` that is not the CLI
+
+Hardening for AC1's run: the GUI exe sits next to the CLI and is easy to pick.
+**Complexity**: trivial
+**IMPLEMENT**: `Vipm::version` returns an error naming `LVPM_TEST_VIPM` and
+`support\vipm.exe` unless the first line of `--version` starts with `vipm `
+(the real CLI prints `vipm 26.3.0`); its other error arms (non-zero exit,
+timeout, cannot start) name the variable too. In `tests/vipm_probe.rs` the
+`vipm.version()` call moves to just after `Vipm::new`, before `Guard::take`,
+so no `info` or `uninstall` runs against the wrong binary.
+**TEST**: `version_that_is_not_vipms_names_the_variable` (fake prints other
+text), `empty_version_output_names_the_variable`;
+`version_is_the_first_line_of_vipm_version` still passes (its fake prints
+`vipm synthetic 1.0`).
+**Files**: `tests/vipm_probe.rs`, `tests/vipm_probe/vipm.rs`
+**Commit**: `test(vipm): the probe names LVPM_TEST_VIPM when it is not the CLI`
+
+#### Step 4.2: round trips on both pilots (operator)
+
+**Complexity**: standard
+**IMPLEMENT**: `s1b-vip-in-vipm-roundtrip.feature`, its scenarios tagged
+`@unsafe`, registered in `FEATURE_FILES` like every feature file (the harness
+counts `@unsafe` scenarios as never run and needs no step definitions for
+them); not tagged `@labview`. The build-slices README's "VIPM probe" section
+gets a paragraph on how the operator runs it and that the run lines are the
+evidence.
+Background: VIPM logged in and able to install Data Manipulation by name;
+`vipm info` shows none of pilot A, pilot B, Data Manipulation or the palette
+installed; VIPM's confirmation for a package that reuses a published name and
+version is answered when it shows (unanswered, the install makes no progress
+and VIPM gives up).
+Scenario A (AC4): pilot A built by lvpm is installed with `vipm install -y`;
+the install is accepted (glossary: exits 0 and `vipm info` shows the
+version); VIPM's mass compile (S0 wording) lists zero broken VIs; the
+installed files equal those of the published archive's install minus S1
+criterion 4's six files, as the probe's base row shows.
+Scenario B (AC5): pilot B built from its pinned checkout installs the same
+way and is accepted; `vipm info` shows Data Manipulation and the palette
+installed; mass compile lists zero broken VIs.
+After both: everything is uninstalled and `vipm info` shows the four not
+installed. Each scenario ends with a run line
+`Run <date>, VIPM 26.3.0, LabVIEW <version>: pass|fail`; the operator fills it
+in. A fail stops PR 2: a lvpm cause re-opens slice 3, anything else is logged
+in Risks. The rejected path is the probe's (its rejected-variant tests); the
+round trips add none.
+**TEST**: AC4–AC6: `grep -c ": pass$"` on the file gives 2;
+`cargo test --test acceptance` counts the two as `@unsafe`, never run.
+**Files**: `tests/features/build-slices/s1b-vip-in-vipm-roundtrip.feature`, `tests/features/build-slices/README.md`, `tests/acceptance.rs`
+**Commit**: `test(s1b): pilot A and B round trips in VIPM, recorded`
+
+#### Step 4.3: PROVENANCE, milestone, spec deviations
+
+**Complexity**: trivial
+**IMPLEMENT**: after the PR 2 gate passes. PROVENANCE.md gets a ".vip
+writing" paragraph: lvpm's `.vip` layout was checked only through documented
+`vipm` commands (install, uninstall, info) against VIPM 26.3.0, with no VIPM
+code or cache read (AC1). README milestone "`.vip` output, verified by a
+round-trip install in VIPM" ticked (AC9), only once 4.2's run lines say pass;
+S1b is closed on the board, not in build-slices.md (its convention). The
+spec logs the deviations from Risks, AC6's file name among them.
+**TEST**: PROVENANCE names "documented `vipm` commands" and "VIPM 26.3.0" and
+no VIPM message or variant; the README line reads `- [x]`; no spec text
+names `s1b-vip-in-vipm.feature` for the round trips.
+**Files**: `PROVENANCE.md`, `docs/vision/README.md`, `docs/vision/build-slices.md`, `docs/specs/lvpm-vip-roundtrip-s1b.md`
+**Commit**: `docs(s1b): .vip output verified in VIPM`
 
 ## Parallelization
 
 ```mermaid
 graph TD
-  S1[Slice 1: probe runner] --> S3[Slice 3: VIPM requirements, PR 2]
+  S1[Slice 1: probe runner] --> S3[Slice 3: none needed]
   S2[Slice 2: pilot B build] --> S4[Slice 4: round trips, docs, PR 2]
-  S3 --> S4
 ```
 
 | Wave | Slices (parallel) |
 |------|-------------------|
 | 1 | 1, 2 |
-| 2 | 3 |
-| 3 | 4 |
+| 2 | 4 (slice 3 has no steps) |
 
 Wave 1 slices share no file. `/build` (or the orchestrator) owns the Build
 Progress ticks; slices do not edit this plan.
@@ -479,7 +525,9 @@ PR 1:
 - [ ] `/code-review` passes
 
 PR 2 adds: `LVPM_TEST_LABVIEW=1 LVPM_TEST_PILOT_A=<checkout> cargo test --test acceptance`
-with S1's pilot scenarios in the run count (AC8, AC3).
+with S1's pilot scenarios in the run count (AC8) and "building twice gives the
+same bytes" passing (AC3); `git diff main -- crates/` empty (AC2); both run
+lines in the round-trip file say pass (AC4–AC6).
 
 ## Skipped (low value)
 
@@ -490,8 +538,6 @@ with S1's pilot scenarios in the run count (AC8, AC3).
 
 ## Risks & Open Questions
 
-- **`vipm info` may not list a locally installed package.** Step 1.6 checks;
-  if not, step 1.3's verdict is re-planned before PR 1 merges.
 - **VIPM rejects everything** (spec Q3, deferred): stop and ask the user.
 - **Snapshot scope** may miss a directory VIPM writes to. The reference
   install at the start of the run shows where VIPM writes; if outside the
@@ -499,10 +545,8 @@ with S1's pilot scenarios in the run count (AC8, AC3).
 - **Requires variants install Data Manipulation and the palette** from
   vipm.io; network or login failure shows as a rejected row with VIPM's
   message, and the preflight and tree check cover their clean-up.
-- **Slices 3 and 4 have no steps yet** (`plan_waves.py` reports their declared files as over-declared): acknowledged, they are re-planned after step 1.6.
-- **`vipm info` output format is a guess until step 1.6.** `Vipm::info` matches the package name and version as whole tokens (letters, digits, `_`, and `.` between them). If VIPM prints the name glued to the version (e.g. `name.1.0.0.1`), the match needs adjusting at step 1.6.
 - **Backstop review items left for later:** the `ours`/`theirs`/`published` naming in the probe, splitting the remaining multi-behavior tests, whether `Guard::drop` should keep the global claim after a failed uninstall, `global.rs` findings (spawned LabVIEW not checked with `try_wait`, a partial claim file on write error), the hidden success check in the `dist holds` step, a negative pilot B scenario, and symlink handling in `copy_tree`/`snapshot`. The support unit tests run in both `support_unit` and `vipm_probe` (accepted).
-- **Spec deviations to log** in the spec at step 1.6: probe step 1 (census)
+- **Spec deviations to log** in the spec at step 4.3: probe step 1 (census)
   dropped; pilot B has one direct dependency, not two (spec AC5 wording);
   AC6's round trips live in `s1b-vip-in-vipm-roundtrip.feature`, `@unsafe`
   and unregistered, so AC4–6 rest on the recorded run lines, not the
@@ -516,8 +560,14 @@ with S1's pilot scenarios in the run count (AC8, AC3).
   (deviation to log at 1.6): the tree check covers the scoped directories
   (after the full-tree discovery around the reference install) and excludes
   `*.ini`, `*.aliases`, `*.cache`, `*.lvlps`, which LabVIEW and VIPM rewrite
-  on their own; the `git status` check excludes `.claude/`, which this
+  on their own, and `*.vidb` (the compiled-object cache, found by the first
+  run at 1.6), and VIPM's own `project/VI Package Manager.vi`, which VIPM
+  rewrote during the second run at 1.6; the `git status` check excludes `.claude/`, which this
   repo's hooks write during any session. Any other change fails the run.
+- **Content beyond S1's members.** The published pilot archives also carry
+  examples, VI templates, palettes and install hooks that lvpm's build leaves
+  out by S1's scope, not VIPM's. AC4 compares against S1 criterion 4's list;
+  anything else missing at step 4.2 is a candidate slice, not S1b work.
 - Tag names: pilot A is `@pilot-source`, pilot B `@pilot-b-source`;
   renaming pilot A's tag is out of scope.
 
@@ -562,23 +612,34 @@ tests; ID independent of `spec`; `pilot_checkout` error cases; LabVIEW
 version in the table; patch bump in the gate; deviations in Risks
 (Acceptance).
 
+Round 3 (PR 2 re-plan; Acceptance, Design). Both needs-revision. Fixed: AC2
+and AC3 given checks (empty `crates/` diff, S1's determinism scenario named);
+the round trips name their evidence (glossary verdict, `vipm info` for the
+dependencies and the clean-up, zero broken VIs, the run-line grep); the
+version guard runs before `Guard::take` and every error arm names the
+variable; the round-trip file is registered in `FEATURE_FILES`; README and
+AC9 checks added. Not taken: negative manual scenarios (the probe covers the
+rejected path); a stored file diff for scenario A (the probe's base row
+already compares pilot A's install with the published archive's).
+
 ## Build Progress
 
 ### Slices (grouped by wave)
 
 #### Wave 1
-- [ ] Slice 1: the probe runner
+- [x] Slice 1: the probe runner
   - [x] Step 1.1: `package_id`, probe-side
   - [x] Step 1.2: variants, reference diff and the table
   - [x] Step 1.3: drive vipm.exe, with timeouts and preflight
   - [x] Step 1.4: claim, state file, scoped snapshots
   - [x] Step 1.5: the `#[ignore]` run
-  - [ ] Step 1.6: run it (operator, nothing committed but the spec tick)
+  - [x] Step 1.6: run it (operator, nothing committed but the spec tick)
 - [x] Slice 2: pilot B builds from its pinned checkout
   - [x] Step 2.1: `LVPM_TEST_PILOT_B`
 
-#### Wave 2 (do not build until re-planned after step 1.6)
-- [ ] Slice 3 (PR 2, sketch): lvpm writes what VIPM needs
-
-#### Wave 3 (do not build until re-planned after step 1.6)
-- [ ] Slice 4 (PR 2, sketch): round trips recorded, docs
+#### Wave 2
+- [x] Slice 3: lvpm writes what VIPM needs (none needed)
+- [x] Slice 4: round trips recorded, docs (closed by ADR 6)
+  - [x] Step 4.1: the probe refuses a non-CLI `LVPM_TEST_VIPM`
+  - [x] Step 4.2: dropped (ADR 6): VIPM refuses lvpm's `.vip`; no round-trip file is kept
+  - [x] Step 4.3: PROVENANCE and spec done; the milestone was dropped instead of ticked (ADR 6)

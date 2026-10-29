@@ -76,7 +76,7 @@ pub struct Judged {
 }
 
 /// The note of an install that exited 0 but that `vipm info` does not list.
-pub const NOT_LISTED_NOTE: &str = "not listed by vipm info";
+pub const NOT_LISTED_NOTE: &str = "not listed at this version by vipm info";
 
 pub fn timed_out_note(timeout: Duration) -> String {
     format!("timed out after {}s", timeout.as_secs_f64())
@@ -116,15 +116,15 @@ impl<'a> Vipm<'a> {
         self.exec(&["uninstall", name], self.timeouts.other)
     }
 
-    /// Whether `vipm info <name>` lists the package: it exits 0 and its output
-    /// holds the name and, when given, the version, each as a whole token (not
-    /// inside a longer name or number). Otherwise broad: a false "listed" only
-    /// stops the run. An error means the command gave no answer.
+    /// Whether `vipm info <name>` lists the package as installed: it exits 0
+    /// and its `Installed Version:` line holds a version, the given one when
+    /// there is one. vipm 26.3 describes a catalog package that is not
+    /// installed too, exiting 0 with `Installed Version: (not installed)`.
+    /// An error means the command gave no answer.
     pub fn info(&self, name: &str, version: Option<&str>) -> Result<bool, String> {
         match self.exec(&["info", name], self.timeouts.other) {
             Ran::Exited { code, output } => Ok(code == 0
-                && has_token(&output, name)
-                && version.is_none_or(|v| has_token(&output, v))),
+                && installed_version(&output).is_some_and(|got| version.is_none_or(|v| got == v))),
             Ran::TimedOut(_) => Err(format!(
                 "`vipm info {name}` {}",
                 timed_out_note(self.timeouts.other)
@@ -133,10 +133,15 @@ impl<'a> Vipm<'a> {
         }
     }
 
+    /// The first line of `vipm --version`. It must start with `vipm `: the GUI
+    /// exe sits next to the CLI and is easy to pick for `LVPM_TEST_VIPM`.
     pub fn version(&self) -> Result<String, String> {
+        let not_cli = format!("is {VIPM_ENV_VAR} VIPM's CLI, `support\\vipm.exe`?");
         match self.exec(&["--version"], self.timeouts.other) {
-            Ran::Exited { code: 0, output } => Ok(first_line(&output)),
-            other => Err(format!("`vipm --version` gave {other:?}")),
+            Ran::Exited { code: 0, output } if first_line(&output).starts_with("vipm ") => {
+                Ok(first_line(&output))
+            }
+            other => Err(format!("`vipm --version` gave {other:?}; {not_cli}")),
         }
     }
 
@@ -183,23 +188,14 @@ impl<'a> Vipm<'a> {
     }
 }
 
-/// Whether `needle` stands in `text` as a whole token: letters, digits, `_`
-/// and a `.` between them join a token, so `1.0.0.1` is not in `11.0.0.12`.
-fn has_token(text: &str, needle: &str) -> bool {
-    let word = |c: char| c.is_alphanumeric() || c == '_';
-    // A '.' joins a longer name before the token, but only a longer number
-    // after it, so a file suffix such as `1.0.0.1.vip` still ends the token.
-    let joins =
-        |next: &mut dyn Iterator<Item = char>, dot_joins: fn(char) -> bool| match next.next() {
-            Some(c) if word(c) => true,
-            Some('.') => next.next().is_some_and(dot_joins),
-            _ => false,
-        };
-    text.match_indices(needle).any(|(at, _)| {
-        let before = &mut text[..at].chars().rev();
-        let after = &mut text[at + needle.len()..].chars();
-        !joins(before, |c| c.is_alphanumeric() || c == '_') && !joins(after, |c| c.is_ascii_digit())
-    })
+/// The value of `vipm info`'s `Installed Version:` line, or none when the
+/// line is missing, empty or `(not installed)`.
+fn installed_version(output: &str) -> Option<&str> {
+    output
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("Installed Version:"))
+        .map(str::trim)
+        .filter(|v| !v.is_empty() && !v.starts_with('('))
 }
 
 /// The command that removes `name` by hand.
@@ -318,50 +314,46 @@ mod tests {
         check(&Vipm::new(&run, SHORT))
     }
 
+    /// `vipm info` output in vipm 26.3's shape, trimmed to the lines it reads.
+    fn info_output(installed: &str) -> String {
+        format!(
+            "Auto-detected LabVIEW 2026 (64-bit)\nName: pkg\nVersion: 1.0.0.1\n\
+             Description: Installed Version: 1.0.0.1 in prose does not count.\n\
+             Installed Version: {installed}\nLatest Version: 1.0.0.1\n"
+        )
+    }
+
     #[test]
-    fn listed_needs_exit_zero_name_and_version() {
+    fn listed_needs_exit_zero_and_the_installed_version() {
         let cases = [
-            (exited(0, "pkg 1.2.3 installed"), true),
-            (exited(0, "pkg 9.9.9 installed"), false),
-            (exited(0, "other 1.2.3 installed"), false),
-            (exited(1, "pkg 1.2.3 installed"), false),
+            (exited(0, &info_output("1.0.0.1")), true),
+            (exited(0, &info_output("9.9.9")), false),
+            (exited(0, &info_output("11.0.0.1")), false),
+            (exited(1, &info_output("1.0.0.1")), false),
             (exited(0, ""), false),
         ];
         for (info, listed) in cases {
             let fake = Fake::new(exited(0, ""), info.clone());
-            let got = with(&fake, |v| v.info("pkg", Some("1.2.3")));
+            let got = with(&fake, |v| v.info("pkg", Some("1.0.0.1")));
             assert_eq!(got, Ok(listed), "{info:?}");
         }
     }
 
     #[test]
-    fn the_version_and_the_name_must_be_whole_tokens() {
-        let cases = [
-            ("pkg 11.0.0.12 installed", false),
-            ("pkg 1.0.0.12 installed", false),
-            ("pkg 1.0.0.1.5 installed", false),
-            ("pkg 21.0.0.1 installed", false),
-            ("xpkg 1.0.0.1", false),
-            ("pkg_extra 1.0.0.1", false),
-            ("my.pkg 1.0.0.1", false),
-            ("pkg 1.0.0.1", true),
-            ("pkg 1.0.0.1.", true),
-            ("pkg 1.0.0.1.vip", true),
-            ("pkg.lvlib 1.0.0.1", true),
-            ("pkg-1.0.0.1", true),
-            ("[pkg] (1.0.0.1)", true),
-            ("pkg 11.0.0.12, pkg 1.0.0.1", true),
-        ];
-        for (output, listed) in cases {
-            let fake = Fake::new(exited(0, ""), exited(0, output));
-            let got = with(&fake, |v| v.info("pkg", Some("1.0.0.1")));
-            assert_eq!(got, Ok(listed), "{output}");
+    fn a_catalog_entry_that_is_not_installed_is_not_listed() {
+        for installed in ["(not installed)", ""] {
+            let fake = Fake::new(exited(0, ""), exited(0, &info_output(installed)));
+            assert_eq!(
+                with(&fake, |v| v.info("pkg", None)),
+                Ok(false),
+                "{installed:?}"
+            );
         }
     }
 
     #[test]
     fn without_a_version_the_name_is_enough() {
-        let fake = Fake::new(exited(0, ""), exited(0, "pkg 9.9.9"));
+        let fake = Fake::new(exited(0, ""), exited(0, &info_output("9.9.9")));
         assert_eq!(with(&fake, |v| v.info("pkg", None)), Ok(true));
         let fake = Fake::new(exited(0, ""), Ran::TimedOut(String::new()));
         assert!(with(&fake, |v| v.info("pkg", None)).is_err());
@@ -369,7 +361,7 @@ mod tests {
 
     #[test]
     fn an_install_that_exits_zero_and_is_listed_is_accepted() {
-        let fake = Fake::new(exited(0, "done\nbye"), exited(0, "pkg 1.0.0.1"));
+        let fake = Fake::new(exited(0, "done\nbye"), exited(0, &info_output("1.0.0.1")));
         let judged = with(&fake, |v| {
             v.judge_install(Path::new("p.vip"), "pkg", "1.0.0.1")
         });
@@ -380,7 +372,10 @@ mod tests {
 
     #[test]
     fn exit_zero_not_listed_is_rejected() {
-        let fake = Fake::new(exited(0, "done"), exited(0, "nothing here"));
+        let fake = Fake::new(
+            exited(0, "done"),
+            exited(0, &info_output("(not installed)")),
+        );
         let judged = with(&fake, |v| {
             v.judge_install(Path::new("p.vip"), "pkg", "1.0.0.1")
         });
@@ -393,7 +388,7 @@ mod tests {
     fn nonzero_exit_is_rejected_with_its_output() {
         let fake = Fake::new(
             exited(3, "\nboom here\nsecond line"),
-            exited(0, "pkg 1.0.0.1"),
+            exited(0, &info_output("1.0.0.1")),
         );
         let judged = with(&fake, |v| {
             v.judge_install(Path::new("p.vip"), "pkg", "1.0.0.1")
@@ -411,7 +406,10 @@ mod tests {
 
     #[test]
     fn a_timed_out_command_is_rejected() {
-        let fake = Fake::new(Ran::TimedOut(String::new()), exited(0, "pkg 1.0.0.1"));
+        let fake = Fake::new(
+            Ran::TimedOut(String::new()),
+            exited(0, &info_output("1.0.0.1")),
+        );
         let judged = with(&fake, |v| {
             v.judge_install(Path::new("p.vip"), "pkg", "1.0.0.1")
         });
@@ -432,7 +430,10 @@ mod tests {
 
     #[test]
     fn a_timed_out_install_keeps_what_it_wrote() {
-        let fake = Fake::new(Ran::TimedOut("half done".into()), exited(0, "pkg 1.0.0.1"));
+        let fake = Fake::new(
+            Ran::TimedOut("half done".into()),
+            exited(0, &info_output("1.0.0.1")),
+        );
         let judged = with(&fake, |v| {
             v.judge_install(Path::new("p.vip"), "pkg", "1.0.0.1")
         });
@@ -503,12 +504,27 @@ mod tests {
     }
 
     #[test]
+    fn version_that_is_not_vipms_names_the_variable() {
+        for output in ["VI Package Manager 2026", ""] {
+            // double-waiver: B1 — vipm.exe is a subprocess that drives LabVIEW and VIPM's own state
+            let run = |_: &[String], _: Duration| exited(0, output);
+            let why = Vipm::new(&run, SHORT).version().unwrap_err();
+            assert!(
+                why.contains(VIPM_ENV_VAR) && why.contains("support\\vipm.exe"),
+                "{output:?}: {why}"
+            );
+        }
+    }
+
+    #[test]
     fn a_version_that_fails_says_what_vipm_gave() {
         // double-waiver: B1 — vipm.exe is a subprocess that drives LabVIEW and VIPM's own state
         let run = |_: &[String], _: Duration| exited(2, "no such flag");
         let why = Vipm::new(&run, SHORT).version().unwrap_err();
         assert!(
-            why.contains("vipm --version") && why.contains("no such flag"),
+            why.contains("vipm --version")
+                && why.contains("no such flag")
+                && why.contains(VIPM_ENV_VAR),
             "{why}"
         );
     }
@@ -569,8 +585,8 @@ mod tests {
     #[test]
     fn preflight_refuses_when_a_touched_package_is_installed() {
         let run = |args: &[String], _: Duration| match args[1].as_str() {
-            "a" | "c" => exited(0, &format!("{} 1.0", args[1])),
-            _ => exited(1, ""),
+            "a" | "c" => exited(0, &info_output("1.0")),
+            _ => exited(0, &info_output("(not installed)")),
         };
         let vipm = Vipm::new(&run, SHORT);
         let why = preflight(&vipm, &["a", "b", "c"]).unwrap_err();

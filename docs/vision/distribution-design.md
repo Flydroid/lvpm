@@ -16,7 +16,7 @@ The workflow it serves:
 | Term | Meaning here |
 |---|---|
 | **kind** | what a package contains: `source` or `ppl` |
-| **format** | the container: `.lvpkg` or `.vip` |
+| **format** | the container: `.lvpkg` (written from S7a, and read) or `.vip` (read; written until S7a for lvpm only) |
 | **feed** | any place packages are resolved from (folder, index, OCI registry, GitHub repo); the existing `[sources]` table and `sources.local` setting configure feeds |
 | `lvpm.toml` | the project manifest a developer edits; its `[project]` table names the package and its `[distribution]` table says what to ship |
 | `package.toml` | the metadata file `lvpm build` writes inside each `.lvpkg`, generated from `lvpm.toml` |
@@ -37,7 +37,7 @@ pure wheel rather than an sdist.
 | Format | Purpose | Carries signature/provenance |
 |---|---|---|
 | `.lvpkg` | native: deterministic zip, LVAddons layout, `package.toml`, `RECORD` (SHA-256 per file), CycloneDX SBOM | yes (OCI referrers or a Sigstore bundle) |
-| `.vip` | compatibility with VIPM users | only as a detached bundle next to the file |
+| `.vip` | read: packages from VIPM and NI indexes, folders and releases; written by `lvpm build` for lvpm only until S7a ([ADR 6](../adr/0006-lvpkg-only-vip-read-only.md)) | only as a detached bundle next to the file |
 
 Rules for every package:
 
@@ -61,17 +61,6 @@ labview = ">=2021"                # minimum; source packages are saved at its lo
 [distribution]
 top-level-library = "src/Motion.lvlib"  # membership defines the payload, not a folder glob
 kinds   = ["source"]              # "ppl" names an existing .lvproj build spec (needs LabVIEW)
-formats = ["lvpkg", "vip"]
-
-[distribution.vip]                 # only what VIPM needs and lvpm cannot derive
-name         = "hexagon_lib_motion"            # VIPM has no @scope
-vendor       = "Hexagon"
-display-name = "Motion Library"
-icon         = "assets/icon.png"
-version-map  = "{major}.{minor}.{patch}.{build}"
-
-[distribution.vip.dependency-names]  # scoped name -> VIPM name, for Requires
-"@hexagon/libA" = "hexagon_lib_a"
 ```
 
 What `build` does, in order:
@@ -85,23 +74,19 @@ What `build` does, in order:
    - there are no broken links;
    - every external link resolves to `vi.lib`, the package itself, or a declared dependency.
 3. Infer dependencies from the links and fail if they disagree with `[dependencies]`.
-4. Write a deterministic zip per format (sorted entries, fixed timestamps) and the SBOM.
+4. Write a deterministic `.lvpkg` (sorted entries, fixed timestamps) with the SBOM inside.
 
-### Writing `.vip` without VIPM
+### No `.vip` output
 
-`spec.rs` already parses the `spec` file inside a `.vip`: name, version, file
-groups, `Target Dir`, `Requires`, `Exclusive_LabVIEW_Version`. Writing one is the
-inverse. The payload carries over unchanged, because the overlay already gives
-`<vilib>`-relative linkage. What lvpm cannot derive is in `[distribution.vip]`.
-
-Limits:
-
-- A `.vip` cannot name an `@org/...` dependency without the name map.
-- A `.vip` carries no signature; publish a Sigstore bundle beside it.
-- Format knowledge must come from published specifications and observed files,
-  as [PROVENANCE.md](../../PROVENANCE.md) requires.
-- **Unverified:** whether VIPM accepts a `.vip` that lvpm wrote. Release this only
-  after a round-trip test with VIPM itself.
+From S7a, lvpm does not write `.vip` ([ADR 6](../adr/0006-lvpkg-only-vip-read-only.md));
+until then `lvpm build` still writes one, for lvpm only.
+S1 wrote one, and lvpm installed it, but VIPM refuses it: VIPM checks a
+package `ID` in the `spec` that only its own builder writes, and how that
+`ID` is computed is not published. A `.vip` that VIPM refuses would only
+confuse people, and building through `vipm build` needs VIPM Pro or a public
+repository. Library authors who also want VIPM users keep building their
+`.vip` with VIPM. The [S1b spec](../specs/lvpm-vip-roundtrip-s1b.md#outcome)
+records what was tested.
 
 ## 3. Where packages live
 
@@ -126,7 +111,7 @@ feed as a fallback transport.
 
 - Versions come from the release tags.
 - The release file is picked by naming convention: `*.lvpkg` first, `*.vip` as fallback
-  (`.vip` only until `.lvpkg` ships; see [build-slices.md](build-slices.md#decisions-before-s1)).
+  for releases VIPM built.
 - Its SHA-256 is pinned in `lvpm.lock`.
 - If the release has a GitHub artifact attestation (Sigstore), lvpm verifies that the
   file was built by that repo's workflow. Otherwise it is trusted on first use and
@@ -227,5 +212,4 @@ External facts this design relies on, as of 2026-10:
 ## Open questions
 
 - Who hosts the first community index, and under which organisation.
-- Whether VIPM installs lvpm-written `.vip` files correctly (needs a round-trip test).
 - Which CI OIDC issuers Sigstore's public instance accepts for Azure Pipelines.

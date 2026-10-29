@@ -16,7 +16,7 @@ This folder is this fork's direction. The upstream author's plan stays in
 | 1. Start a library or app | `lvpm init` | planned (M1) |
 | 2. Add dependencies | `lvpm add libA@">=1.4"` | **works** (`name@constraint`; pinning a source planned (S7c); `^` not yet) |
 | 3. Develop in an isolated env | `lvpm install` → `lvpm launch` | **works** (venv + overlay, `lvpm.lock`, exact `sync`) |
-| 4. Build packages | `lvpm build` → `.lvpkg` and/or `.vip` | proposed (M2) |
+| 4. Build packages | `lvpm build` → `.lvpkg` | proposed (M2) |
 | 5. Publish | tag → CI signs and publishes | proposed (M3) |
 | 6. Build the application | `lvpm build` with a `.lvproj` build spec, + SBOM | proposed (M2) |
 
@@ -32,8 +32,9 @@ This folder is this fork's direction. The upstream author's plan stays in
    provenance checked against the consumer's policy, no install-time code
    unless allowed by name. (Target: today hooks still run by default on a
    developer machine.)
-4. **Meet people where they are.** Read VIPM and NI indexes, write `.vip`
-   for VIPM users, import `.vipc` projects, check NIPM drivers.
+4. **Meet people where they are.** Read VIPM and NI indexes and install
+   `.vip`, import `.vipc` projects, check NIPM drivers. lvpm stops writing
+   `.vip` with S7a: VIPM refuses it, because its spec lacks the `ID` that VIPM's own builder writes ([ADR 6](../adr/0006-lvpkg-only-vip-read-only.md)).
 5. **Standard infrastructure.** OCI registries, git, GitHub Releases,
    Sigstore — nothing lvpm-specific to run.
 
@@ -61,7 +62,6 @@ Each one is usable on its own. Ticks mean done.
 **M2 — build**
 - [ ] `lvpm check` / `tree`: linker scan without LabVIEW
 - [ ] `lvpm build`: `source` kind, `.lvpkg` format, SBOM
-- [ ] `.vip` output, verified by a round-trip install in VIPM
 - [ ] `ppl` kind and application builds through `.lvproj` specs
 
 **M3 — publish and trust**
