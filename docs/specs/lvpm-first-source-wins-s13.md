@@ -54,7 +54,9 @@ TUI. A shadowed copy is never shown and never installed.
 **Unchanged.**
 - `[sources]` syntax, and the lock file format (no `FORMAT_VERSION` bump).
 - `sync` installs from the source each locked package records. Its per-source
-  index holds one source, so the filter does nothing there.
+  archive lookup (`index::load`) is not filtered: it always reads the cache
+  imports too, and a filter there would hide a locked feed copy behind an
+  import of the same name.
 - A source that cannot be read: `load_index` already fails on it. Callers that
   skip a failing source (`on_fail` returns `Ok`, as the TUI catalog does) see
   the later source's copy. That is a display-only case: resolution never skips

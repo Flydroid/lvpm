@@ -118,7 +118,12 @@ async fn fails_naming(world: &mut CliWorld, source: String) {
         .lines()
         .map(|line| match line.find("Error:") {
             Some(at) => &line[at..],
-            None if line.trim_start().starts_with("downloading feed") => "",
+            None if ["downloading feed", "checking feed"]
+                .iter()
+                .any(|progress| line.trim_start().starts_with(progress)) =>
+            {
+                ""
+            }
             None => line,
         })
         .any(|line| line.contains(dir(&source)));

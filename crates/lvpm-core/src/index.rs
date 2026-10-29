@@ -403,6 +403,9 @@ pub(crate) fn source_of(url: &str, feeds: &[(String, String)]) -> String {
 
 /// Load public indexes, global local package folders, and hosted manifest sources.
 ///
+/// Every source's entries are kept, so a locked archive is found wherever it
+/// is listed; resolving reads [`load_each`], where the first source wins.
+///
 /// A cancelled `cancel` ends the load with [`Cancelled`] before the next feed is
 /// asked for; a request already sent runs to its end.
 pub fn load(
@@ -414,7 +417,7 @@ pub fn load(
     sink: &dyn EventSink,
     cancel: &CancelToken,
 ) -> Result<Index> {
-    let loaded = load_each(
+    let loaded = read_each(
         cache_dir,
         refresh,
         extra,
@@ -436,9 +439,38 @@ pub struct Loaded {
 
 /// [`load`], handing a source that cannot be read to `on_fail` with its name:
 /// an `Err` back ends the load, an `Ok` skips that source. A cache error while
-/// reading a source counts as that source failing.
+/// reading a source counts as that source failing. Each name keeps only the
+/// entries of the first source that lists it.
 #[allow(clippy::too_many_arguments)]
 pub fn load_each(
+    cache_dir: &Path,
+    refresh: bool,
+    extra: &[String],
+    local_sources: &[PathBuf],
+    defaults: bool,
+    sink: &dyn EventSink,
+    cancel: &CancelToken,
+    on_fail: impl FnMut(&str, anyhow::Error) -> Result<()>,
+) -> Result<Loaded> {
+    let Loaded { index, sources } = read_each(
+        cache_dir,
+        refresh,
+        extra,
+        local_sources,
+        defaults,
+        sink,
+        cancel,
+        on_fail,
+    )?;
+    let index = Index {
+        entries: first_source_wins(index.entries),
+    };
+    Ok(Loaded { index, sources })
+}
+
+/// [`load_each`] with every source's entries.
+#[allow(clippy::too_many_arguments)]
+fn read_each(
     cache_dir: &Path,
     refresh: bool,
     extra: &[String],
@@ -484,9 +516,7 @@ pub fn load_each(
 
     let feeds = feeds(extra, defaults);
     if feeds.is_empty() {
-        let index = Index {
-            entries: first_source_wins(entries),
-        };
+        let index = Index { entries };
         return Ok(Loaded { index, sources });
     }
     let client = Client::builder()
@@ -507,9 +537,7 @@ pub fn load_each(
         }
     }
 
-    let index = Index {
-        entries: first_source_wins(entries),
-    };
+    let index = Index { entries };
     Ok(Loaded { index, sources })
 }
 
@@ -1291,7 +1319,7 @@ Package.Display Name=A Thing
         let kept = first_source_wins(vec![
             listed("Alpha", "1.0", "hosted"),
             listed("alpha", "1.1", "hosted"),
-            listed("alpha", "9.0", "ni"),
+            listed("ALPHA", "9.0", "ni"),
             listed("beta", "2.0", "ni"),
         ]);
         let kept: Vec<(&str, String, &str)> = kept
@@ -1319,11 +1347,26 @@ Package.Display Name=A Thing
         write_import_fixture(&folder.join("imported_library-2.0.0.vip"), "2.0.0");
         cache_add(&root, &imports, false).unwrap();
 
-        let index = load(&root, false, &[], &[folder], false, &NullSink).unwrap();
+        let folders = [folder];
+        let resolved = load_each(
+            &root,
+            false,
+            &[],
+            &folders,
+            false,
+            &NullSink,
+            &CancelToken::new(),
+            |_, error| Err(error),
+        )
+        .unwrap()
+        .index;
+        // sync's archive lookup keeps every source, so a locked copy is found.
+        let lookup = load(&root, false, &[], &folders, false, &NullSink).unwrap();
 
-        assert_eq!(index.entries.len(), 1);
-        assert_eq!(index.entries[0].version.to_string(), "1.0.0");
-        assert_eq!(index.entries[0].source, CACHE_SOURCE);
+        assert_eq!(resolved.entries.len(), 1);
+        assert_eq!(resolved.entries[0].version.to_string(), "1.0.0");
+        assert_eq!(resolved.entries[0].source, CACHE_SOURCE);
+        assert_eq!(lookup.entries.len(), 2);
         std::fs::remove_dir_all(root).ok();
     }
 }
