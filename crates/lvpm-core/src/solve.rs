@@ -422,15 +422,22 @@ pub enum Fact {
         needs: String,
         wanted: String,
     },
-    /// `package` at `versions` needs a newer LabVIEW than the project's.
+    /// `package` at `versions`, listed by source `from`, needs a newer
+    /// LabVIEW than the project's.
     NeedsLabview {
         package: String,
         versions: String,
+        from: String,
         needs_year: u32,
         project_year: u32,
     },
-    /// No listed version of `package` is within `wanted`.
-    NoVersion { package: String, wanted: String },
+    /// No version source `from` lists of `package` is within `wanted`. A
+    /// later source is never asked (ADR 4).
+    NoVersion {
+        package: String,
+        wanted: String,
+        from: String,
+    },
     /// No source lists `package` at all.
     NotListed { package: String },
 }
@@ -466,15 +473,21 @@ impl fmt::Display for Fact {
             Fact::NeedsLabview {
                 package,
                 versions,
+                from,
                 needs_year,
                 project_year,
             } => write!(
                 f,
-                "{package} {versions} needs LabVIEW {needs_year}, and the project's is {project_year}"
+                "{package} {versions} from {from} needs LabVIEW {needs_year}, and the project's is {project_year}"
             ),
-            Fact::NoVersion { package, wanted } => {
-                write!(f, "no version of {package} {wanted} is available")
-            }
+            Fact::NoVersion {
+                package,
+                wanted,
+                from,
+            } => write!(
+                f,
+                "no version of {package} {wanted} is available from {from}"
+            ),
             Fact::NotListed { package } => write!(f, "{package} is in no configured source"),
         }
     }
@@ -512,6 +525,15 @@ impl Names<'_> {
             (None, None) => key.clone(),
         }
     }
+
+    /// The one source the package's versions come from.
+    fn source(&self, package: &Pkg) -> String {
+        let Pkg::Named(key) = package else {
+            return String::new();
+        };
+        let first = self.catalog.versions(key).first();
+        first.map_or_else(String::new, |entry| entry.source.clone())
+    }
 }
 
 type Tree = DerivationTree<Pkg, Ranges<Version>, Gated>;
@@ -548,6 +570,7 @@ fn collect_facts(tree: &Tree, names: &Names, walked: &mut HashSet<usize>, facts:
             _ => Fact::NoVersion {
                 package: names.of(package),
                 wanted: describe(wanted),
+                from: names.source(package),
             },
         },
         // The root's hand-off to a stand-in says nothing the stand-in's own
@@ -571,6 +594,7 @@ fn collect_facts(tree: &Tree, names: &Names, walked: &mut HashSet<usize>, facts:
             Fact::NeedsLabview {
                 package: names.of(package),
                 versions: subject(versions),
+                from: names.source(package),
                 needs_year: gated.needs_year,
                 project_year: gated.project_year,
             }
@@ -878,6 +902,7 @@ mod tests {
     fn a_gate_that_rules_out_every_version_is_named() {
         let mut gated = entry("alpha", "2.0", &[]);
         gated.lv_min = Some(26.0);
+        gated.source = "hosted".into();
         let index = Index {
             entries: vec![gated],
         };
@@ -888,9 +913,29 @@ mod tests {
         assert!(conflict.facts.contains(&Fact::NeedsLabview {
             package: "alpha".into(),
             versions: "2.0".into(),
+            from: "hosted".into(),
             needs_year: 2026,
             project_year: 2024
         }));
+    }
+
+    #[test]
+    fn a_version_miss_names_the_source_of_the_package() {
+        let mut listed = entry("alpha", "1.0", &[]);
+        listed.source = "http://h/first/index.vipr".into();
+        let index = Index {
+            entries: vec![listed],
+        };
+        let Err(SolveError::Conflict(conflict)) = run(&[("alpha", ">=2.0")], &index, &[], None)
+        else {
+            panic!("expected a conflict");
+        };
+        assert!(
+            conflict
+                .to_string()
+                .contains("no version of alpha >= 2.0 is available from http://h/first/index.vipr"),
+            "{conflict}"
+        );
     }
 
     #[test]

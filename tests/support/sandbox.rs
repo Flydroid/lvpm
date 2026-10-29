@@ -338,6 +338,17 @@ impl Sandbox {
         );
     }
 
+    /// A project for LabVIEW `year` whose `[sources]` are the loopback feed's
+    /// `dirs`, in this order, each named as its folder is.
+    pub fn use_project_sources(&self, year: &str, dirs: &[&str]) {
+        let manifest = dirs
+            .iter()
+            .fold(ProjectManifest::new().labview(year), |m, dir| {
+                m.source(dir.trim_matches('/'), &self.feed().source_url(dir))
+            });
+        self.write_manifest(&manifest);
+    }
+
     fn write_manifest(&self, manifest: &ProjectManifest) {
         std::fs::write(self.work_dir().join(MANIFEST_FILE), manifest.render())
             .expect("write the project manifest");
