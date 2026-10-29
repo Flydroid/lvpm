@@ -194,16 +194,11 @@ impl Lockfile {
         (now != Some(self.labview.as_str())).then_some(StaleReason::LabviewChanged)
     }
 
-    /// The hosted sources are a set: listing them in another order asks for
-    /// the same thing.
+    /// The hosted sources are a list: the first that lists a name is where it
+    /// comes from, so another order asks for something else.
     fn sources_changed(&self, project: &Project) -> Option<StaleReason> {
-        let sorted = |mut urls: Vec<String>| {
-            urls.sort();
-            urls
-        };
         let now = Inputs::of(project);
-        let changed = now.defaults != self.inputs.defaults
-            || sorted(now.sources) != sorted(self.inputs.sources.clone());
+        let changed = now.defaults != self.inputs.defaults || now.sources != self.inputs.sources;
         changed.then_some(StaleReason::SourcesChanged)
     }
 
@@ -574,7 +569,7 @@ mod tests {
     }
 
     #[test]
-    fn the_order_hosted_sources_are_listed_in_does_not_matter() {
+    fn reordering_the_hosted_sources_makes_the_lock_stale() {
         let mut two = lock();
         two.inputs.sources = vec!["http://h/a".to_string(), "http://h/b".to_string()];
         let manifest = crate::project::parse(&MANIFEST.replace(
@@ -582,7 +577,8 @@ mod tests {
             "b = \"http://h/b\"\na = \"http://h/a\"",
         ))
         .unwrap();
-        assert_eq!(two.staleness(&manifest), None);
+        // The first source that lists a name is where it comes from (ADR 4).
+        assert_eq!(two.staleness(&manifest), Some(StaleReason::SourcesChanged));
     }
 
     #[test]

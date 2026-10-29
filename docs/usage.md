@@ -110,7 +110,7 @@ fails. Constraints are exact (`7.1.2.1547`), `>=` or `*`.
 
 **Out of date.** A lock is out of date when a dependency was added or removed,
 a constraint no longer admits the locked version, `labview` changed, or the
-hosted `[sources]` changed. New releases upstream do not make it so, and
+hosted `[sources]` changed, including their order. New releases upstream do not make it so, and
 neither does the per-user `sources.local`. `lvpm lock --check` writes nothing:
 it exits 0 if `lvpm.lock` exists and is current, and otherwise exits non-zero
 with the reason on one line. It reads no source, so it is cheap.
@@ -359,6 +359,20 @@ your own, named in the manifest's `[sources]`. A `[sources]` entry is an
 instead; lvpm reads their specs and package files directly. These local
 directories reuse cached spec metadata when file size and modification time
 match; installation still reads their original archives unless imported.
+
+**The first source wins.** A package name comes from exactly one source: the
+first one, in this order, that lists it.
+
+1. Packages imported with `lvpm cache add`.
+2. Each `sources.local` folder, in config order.
+3. Each `[sources]` entry, in file order.
+4. The public NI index, then JKI's, unless `defaults = false`.
+
+A later source never replaces a name and never adds versions to it, even a
+higher one. If the first source has no version that fits, or cannot be
+reached, the command fails and names that source. `lvpm search` and
+`lvpm info` show only the versions that source lists. To take a package from
+another source, list that source earlier.
 
 Use `lvpm cache add` to import a `.vip` or `.ogp`, or all such files directly
 inside a directory, into the shared content-addressed cache:

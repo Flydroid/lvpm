@@ -339,23 +339,31 @@ mod tests {
     }
 
     #[test]
-    fn the_catalog_lists_every_version_from_every_source_by_name_then_newest_first() {
+    fn the_catalog_lists_each_name_from_its_first_source_by_name_then_newest_first() {
         let (cwd, env) = catalog_env(
             "catalog-all",
             &[
-                &[("beta", "0.1", "Beta"), ("alpha", "1.0", "Alpha")],
-                &[("alpha", "2.0", "Alpha")],
+                &[
+                    ("beta", "0.1", "Beta"),
+                    ("alpha", "1.0", "Alpha"),
+                    ("alpha", "1.5", "Alpha"),
+                ],
+                &[("alpha", "2.0", "Alpha"), ("gamma", "3.0", "Gamma")],
             ],
         );
         let catalog = catalog(&env, None).unwrap();
-        assert_eq!(rows(&catalog), ["alpha 2.0", "alpha 1.0", "beta 0.1"]);
+        // alpha 2.0 is shadowed: the first folder already lists alpha.
+        assert_eq!(
+            rows(&catalog),
+            ["alpha 1.5", "alpha 1.0", "beta 0.1", "gamma 3.0"]
+        );
         let folder = |i: usize| {
             cwd.join(format!("folder-{i}"))
                 .to_string_lossy()
                 .into_owned()
         };
-        assert_eq!(catalog.entries[0].source, folder(1));
-        assert_eq!(catalog.entries[1].source, folder(0));
+        assert_eq!(catalog.entries[0].source, folder(0));
+        assert_eq!(catalog.entries[3].source, folder(1));
         assert_eq!(catalog.sources, [folder(0), folder(1)]);
         assert!(catalog.failed.is_empty());
         let _ = std::fs::remove_dir_all(&cwd);
