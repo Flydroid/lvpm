@@ -231,7 +231,7 @@ impl Cache {
         Ok(sha.filter(|sha| valid_sha256(sha) && self.blob_path(sha).is_file()))
     }
 
-    /// Atomically record package ownership by absolute source path and its stat link.
+    /// Atomically record package ownership by source path (or label) and its stat link.
     /// The caller must store the blob and compute both digests first. Package rows
     /// survive original-file deletion; missing timestamps disable the stat shortcut.
     /// `metadata` is `None` when no file backs `path` (a label), so there is no stat link.

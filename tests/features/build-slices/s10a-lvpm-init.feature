@@ -217,7 +217,7 @@ Feature: lvpm init starts a project (S10a)
 
   # Built on the same guessed layout as the three above.
   @labview @interactive-labview
-  Scenario: sync installs an embedded package with no feed
+  Scenario: sync installs an embedded package with no feed (synthetic layout)
     Given a VIPM configuration "p.vipc" that embeds labview_open_source_project_lib_labview_open_source_palette 1.0.2.7
     And no folder feed
     When I run "lvpm init --from p.vipc --labview-version 2026" in its folder

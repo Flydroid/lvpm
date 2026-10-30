@@ -1,8 +1,8 @@
 //! Errors that carry what went wrong as data.
 //!
-//! The message of each is neutral: it says what failed and names no command or
-//! flag. A front end words the hint that follows, because only it knows what
-//! the user can type.
+//! The message of each is neutral: it says what failed and names no command; it
+//! names a flag only when that flag's value is what is wrong. A front end words
+//! the hint that follows, because only it knows what the user can type.
 
 use crate::events::SyncStep;
 use crate::lockfile::StaleReason;
@@ -208,7 +208,7 @@ pub enum InitError {
          export a .vipc from VIPM instead"
     )]
     DragonFile { file: String },
-    /// The `--from` file cannot be read; `why` leads with the file as typed.
+    /// The `--from` file cannot be read or is not a usable `.vipc`; `why` leads with the file as typed.
     #[error("{why}")]
     BadSource { why: String },
     /// Anything else that went wrong: its own text.

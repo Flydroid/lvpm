@@ -174,7 +174,8 @@ planned.
 
 This table is the contract, together with the spec's console example.
 Errors and warnings go to stderr, everything else to stdout, as the other
-commands do. `<file>` is the `--from` argument as typed, and `<path>` is
+commands do. Errors print with the CLI's shared `Error: ` prefix, which `main`
+adds for every command; the `error:` below stands for it. `<file>` is the `--from` argument as typed, and `<path>` is
 absolute. Plurals follow the count: one is singular, any other count is
 plural.
 
@@ -189,7 +190,7 @@ plural.
 | existing manifest | `error: <path> already exists; lvpm init does not overwrite it` / `  this folder is already an lvpm project: lvpm add puts packages in it, lvpm venv create makes its venv` |
 | bad flag | `error: --labview-version <value> is not a LabVIEW year (expected e.g. 2025); nothing was written` |
 | vipm.toml unreadable | `error: <file>: <read_toml's reason>; nothing was written` |
-| bad `--from` | `error: <file>: cannot be read: <io error>; nothing was written` · `error: <file>: not a zip file; nothing was written` · `error: <file>: config.xml is missing; nothing was written` · `error: <file>: config.xml: <what>; nothing was written` (what: `no <Target>`, `more than one <Target>`, `<Version> <value> is not N.N`, `package <Name>: no version (expected name-version)`, `package <Name>: <tail> is not a version`, `package <name>: <Flag> is missing`, `package <name>: <Flag> is not true or false`, `unsupported XML (<construct>)`, `larger than 1 MiB`) · `error: <file>: embedded <entry> is not a package: <why>; nothing was written` · `error: <file>: embedded <entry> is larger than 256 MiB; nothing was written` · `error: <file>: more than one <name>-<version>.vip inside; nothing was written` |
+| bad `--from` | `error: <file>: cannot be read: <io error>; nothing was written` · `error: <file>: not a zip file; nothing was written` · `error: <file>: config.xml is missing; nothing was written` · `error: <file>: config.xml: <what>; nothing was written` (what: `no <Target>`, `more than one <Target>`, `<Version> <value> is not N.N`, `package <Name>: no version (expected name-version)`, `package <Name>: <tail> is not a version`, `package <name>: <Flag> is missing`, `package <name>: <Flag> is not true or false`, `unsupported XML (<construct>)`, `larger than 1 MiB`, `not UTF-8 text`, `<zip error>`, `<Package> is not closed`, `<Target> is not closed`, `Version is missing`, `package: Name is missing`) · `error: <file>: embedded packages are larger than <N> bytes in total; nothing was written` · `error: <file>: embedded <entry> is not a package: <why>; nothing was written` · `error: <file>: embedded <entry> is larger than 256 MiB; nothing was written` · `error: <file>: more than one <name>-<version>.vip inside; nothing was written` |
 | `.dragon` | `error: <file>: .dragon files are not supported and not planned (VIPM discontinued the format); export a .vipc from VIPM instead` |
 | git initialized | `initialized a git repository` / `  add a remote:  git remote add origin <url>` / `  first push:    git add -A && git commit -m "lvpm init" && git push -u origin HEAD` |
 | inside a work tree | `already inside a git repository at <top>; left it as it is` |
@@ -992,6 +993,18 @@ neither is a cross-cutting change.
   are not compared to the `.vipc`'s `<Name>`. The three embedded scenarios
   end "(synthetic layout)"; AC10 stays unverified.
 
+- **Slice 3 review decisions.** A `.vipc` package version is checked with
+  `version::is_version`, the same rule the index uses to split package ids,
+  not a stricter digits-only rule; lock takes any such version as an exact
+  constraint. Embedded archives are capped at 1 GiB in total besides 256 MiB
+  each, and a name listed twice is embedded once, as its last listing.
+  Deferred from the quality review: no SQLite busy timeout in `cache.rs`
+  (pre-existing; a candidate for the intermittent failure above); the
+  import-failed hint names `lvpm cache add <archive>`, which cannot take the
+  `.vipc` itself; test-helper duplication in `ops/init.rs` and
+  `tests/steps/init.rs`; no tests for hostile entry names (`../x.vip`) or
+  corrupt-CRC entries (entry names are only compared, never used as paths).
+
 ## Build Progress
 
 ### Slices (grouped by wave)
@@ -1007,7 +1020,7 @@ neither is a cross-cutting change.
   - [x] Step 2.2: venv
 
 #### Wave 3
-- [ ] Slice 3: `init --from project.vipc`
+- [x] Slice 3: `init --from project.vipc`
   - [x] Step 3.1: `vipc.rs` reads a `.vipc`
   - [x] Step 3.2: `--from .vipc` adds dependencies
   - [x] Step 3.3: embedded packages, and sync installs them

@@ -21,6 +21,9 @@ const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 /// The most of one embedded package archive that is read.
 const MAX_EMBEDDED_BYTES: u64 = 256 * 1024 * 1024;
 
+/// The most of all embedded archives together; they are held in memory until imported.
+const MAX_EMBEDDED_TOTAL: u64 = 1024 * 1024 * 1024;
+
 /// One `<Package>` of the target.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Package {
@@ -83,6 +86,10 @@ fn parse(xml: &str) -> Result<Vipc, String> {
     let labview_year = year(field(head, "Version", "")?)?;
     let mut packages = Vec::new();
     while let Some((block, after)) = element(rest, "Package") {
+        // An unclosed `<Package>` would otherwise swallow the next one.
+        if block.contains("<Package>") {
+            return Err("<Package> is not closed".to_string());
+        }
         packages.push(package(block)?);
         rest = after;
     }
@@ -167,6 +174,13 @@ fn element<'a>(s: &'a str, tag: &str) -> Option<(&'a str, &'a str)> {
     Some((&s[from..from + len], &s[from + len + tag.len() + 3..]))
 }
 
+impl Package {
+    /// Init takes it: VIPM did not list it only because another package needs it.
+    fn chosen(&self) -> bool {
+        !self.dependency
+    }
+}
+
 impl Vipc {
     /// What init takes from it. A `Dependency` package is skipped and counted;
     /// a `Pinned` one gets its exact version and the rest a floor. A name listed
@@ -177,7 +191,7 @@ impl Vipc {
             ..Seed::default()
         };
         for package in &self.packages {
-            if package.dependency {
+            if !package.chosen() {
                 seed.skipped += 1;
                 continue;
             }
@@ -203,26 +217,45 @@ impl Vipc {
     /// archive inside goes to `not_embedded`; an archive that cannot be taken
     /// is an error, and `seed` is then not to be used.
     pub fn embed(&self, path: &Path, label: &str, seed: &mut Seed) -> Result<()> {
-        let held: Vec<&Package> = self
-            .packages
+        self.embed_within(path, label, seed, MAX_EMBEDDED_TOTAL)
+    }
+
+    /// `embed`, refusing archives that together hold more than `total` bytes.
+    fn embed_within(&self, path: &Path, label: &str, seed: &mut Seed, total: u64) -> Result<()> {
+        // Like `seed`, a name listed twice counts once, as its last listing.
+        let chosen: Vec<&Package> = self.packages.iter().filter(|p| p.chosen()).collect();
+        let held: Vec<&Package> = chosen
             .iter()
-            .filter(|p| p.included && !p.dependency)
+            .enumerate()
+            .filter(|(at, p)| {
+                p.included && !chosen[at + 1..].iter().any(|q| same_name(&q.name, &p.name))
+            })
+            .map(|(_, p)| *p)
             .collect();
         if held.is_empty() {
             return Ok(());
         }
         let mut zip = open(path).map_err(|what| anyhow!("{label}: {what}"))?;
+        let mut used = 0;
         for package in held {
             let found = find_archive(&mut zip, package, MAX_EMBEDDED_BYTES)
                 .map_err(|what| anyhow!("{label}: {what}"))?;
             let (name, version) = (package.name.clone(), package.version.clone());
             match found {
-                Some((entry, bytes)) => seed.embedded.push(Embedded {
-                    name,
-                    version,
-                    label: format!("{label}!/{entry}"),
-                    bytes,
-                }),
+                Some((entry, bytes)) => {
+                    used += bytes.len() as u64;
+                    if used > total {
+                        return Err(anyhow!(
+                            "{label}: embedded packages are larger than {total} bytes in total"
+                        ));
+                    }
+                    seed.embedded.push(Embedded {
+                        name,
+                        version,
+                        label: format!("{label}!/{entry}"),
+                        bytes,
+                    });
+                }
                 None => seed.not_embedded.push((name, version)),
             }
         }
@@ -325,7 +358,7 @@ mod tests {
         )
     }
 
-    /// The one package `demo_lib-1.5.0.15`, as chosen and not pinned.
+    /// A config.xml for LabVIEW 2013 holding `packages`.
     fn demo(packages: &str) -> String {
         config_xml("13.0", packages)
     }
@@ -778,5 +811,34 @@ mod tests {
         vipc.embed(&path, "p.vipc", &mut seed).unwrap();
 
         assert!(seed.embedded.is_empty() && seed.not_embedded.is_empty());
+    }
+
+    #[test]
+    fn a_name_listed_twice_is_embedded_once_and_the_total_is_capped() {
+        let dir = Dir::new("embed-twice");
+        let vip = vip_bytes("demo_lib", "1.0.0");
+        let packages = [
+            package_xml("demo_lib-1.0.0", "true", "false", "false"),
+            package_xml("demo_lib-1.0.0", "true", "false", "false"),
+        ]
+        .concat();
+        let path = dir.vipc(&[
+            ("config.xml", demo(&packages).as_bytes()),
+            ("demo_lib-1.0.0.vip", &vip),
+        ]);
+        let vipc = read(&path, "p.vipc").unwrap();
+        let (mut seed, mut small) = (vipc.seed(), vipc.seed());
+
+        vipc.embed(&path, "p.vipc", &mut seed).unwrap();
+        let err = vipc
+            .embed_within(&path, "p.vipc", &mut small, vip.len() as u64 - 1)
+            .unwrap_err()
+            .to_string();
+
+        assert_eq!(seed.embedded.len(), 1);
+        assert!(
+            err.starts_with("p.vipc: embedded packages are larger than"),
+            "{err}"
+        );
     }
 }
