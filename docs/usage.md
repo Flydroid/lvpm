@@ -109,7 +109,9 @@ dependencies. The path is read from the working directory, not from
 
 A package marked Included whose archive is not in the `.vipc` is a warning,
 and one whose archive is not a package, or is another package or version than
-the `.vipc` lists, fails. The `.vipc`'s own LabVIEW is only
+the `.vipc` lists, fails. A name listed twice follows its last listing. A
+`config.xml` over 1 MiB, an archive over 256 MiB or archives over 1 GiB in
+all are refused. The `.vipc`'s own LabVIEW is only
 reported (`the .vipc targets LabVIEW 2013; lvpm.toml says >=2026`); `labview`
 comes from `--labview-version` or the installed LabVIEW, as above. Run
 `lvpm sync` next. A `.vipc` that cannot be read fails and writes nothing. A

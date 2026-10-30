@@ -2,7 +2,7 @@
 
 **Created**: 2026-10-30
 **Branch**: 71-feats10a-lvpm-init-and-init---from
-**Status**: approved
+**Status**: implemented
 **Gherkin persistence**: custom: tests/features/build-slices/
 **Spec**: [docs/specs/lvpm-init-s10a.md](../docs/specs/lvpm-init-s10a.md)
 
@@ -32,7 +32,7 @@ planned.
 | 7 venv ready | unit: fake 2026 → bound venv and its rendered lines; fake 2023 only → skip naming 2024 Q1; flag year not installed → skip naming it; no LabVIEW → skip; venv already there → skip, venv untouched; S10a "a venv that cannot be made is a hint"; `@labview` "add installs into the venv" | 2.2 |
 | 8 adds what the user chose | S10a outline over the package flags; "init reports what it added and skipped"; "one package added, none skipped"; "a .vipc with no packages" | 3.2 |
 | 9 pinned exact, rest floor | same outline | 3.2 |
-| 10 embedded packages | S10a "an embedded package is imported", "an Included package missing from the zip", "a corrupt embedded package writes nothing"; checked against a real `.vipc` or recorded unverified (gate) | 3.3 |
+| 10 embedded packages | S10a "an embedded package is imported", "an Included package missing from the zip", "a corrupt embedded package writes nothing"; unit `embed_takes_every_included_archive_and_names_where_each_came_from` (a `Dependency = true` one too), `an_archive_whose_spec_names_another_package_or_version_is_refused`; checked against a real `.vipc` or recorded unverified (gate) | 3.3 |
 | 11 sync installs them | S10a "lock resolves what init added" (default run); `@labview` "sync installs what init added" | 3.2, 3.3 |
 | 12 `.vipc` LabVIEW reported | S10a "the .vipc's LabVIEW is reported, not used", "no report when the .vipc targets the chosen LabVIEW"; unit "reported with no labview chosen" | 3.2 |
 | 13 bad input writes nothing | unit outline (`vipc.rs`); S10a outline "a bad --from file writes nothing" with exact texts | 3.1, 3.2 |
@@ -190,7 +190,7 @@ plural.
 | existing manifest | `error: <path> already exists; lvpm init does not overwrite it` / `  this folder is already an lvpm project: lvpm add puts packages in it, lvpm venv create makes its venv` |
 | bad flag | `error: --labview-version <value> is not a LabVIEW year (expected e.g. 2025); nothing was written` |
 | vipm.toml unreadable | `error: <file>: <read_toml's reason>; nothing was written` |
-| bad `--from` | `error: <file>: cannot be read: <io error>; nothing was written` · `error: <file>: not a zip file; nothing was written` · `error: <file>: config.xml is missing; nothing was written` · `error: <file>: config.xml: <what>; nothing was written` (what: `no <Target>`, `more than one <Target>`, `<Version> <value> is not N.N`, `package <Name>: no version (expected name-version)`, `package <Name>: <tail> is not a version`, `package <name>: <Flag> is missing`, `package <name>: <Flag> is not true or false`, `unsupported XML (<construct>)`, `larger than 1 MiB`, `not UTF-8 text`, `<zip error>`, `<Package> is not closed`, `<Target> is not closed`, `Version is missing`, `package: Name is missing`) · `error: <file>: embedded packages are larger than <N> bytes in total; nothing was written` · `error: <file>: embedded <entry> is not a package: <why>; nothing was written` · `error: <file>: embedded <entry> is larger than 256 MiB; nothing was written` · `error: <file>: more than one <name>-<version>.vip inside; nothing was written` |
+| bad `--from` | `error: <file>: cannot be read: <io error>; nothing was written` · `error: <file>: not a zip file; nothing was written` · `error: <file>: config.xml is missing; nothing was written` · `error: <file>: config.xml: <what>; nothing was written` (what: `no <Target>`, `more than one <Target>`, `<Version> <value> is not N.N`, `package <Name>: no version (expected name-version)`, `package <Name>: <tail> is not a version`, `package <name>: <Flag> is missing`, `package <name>: <Flag> is not true or false`, `unsupported XML (<construct>)`, `larger than 1 MiB`, `not UTF-8 text`, `<zip error>`, `<Package> is not closed`, `<Target> is not closed`, `Version is missing`, `package: Name is missing`) · `error: <file>: embedded packages are larger than <N> bytes in total; nothing was written` · `error: <file>: embedded <entry> is not a package: <why>; nothing was written` · `error: <file>: embedded <entry> is larger than <268435456 bytes, or the N bytes left of N for all of them>; nothing was written` · `error: <file>: embedded <entry> is <name> <version>, not <name> <version>; nothing was written` · `error: <file>: more than one <name>-<version>.vip inside; nothing was written` |
 | `.dragon` | `error: <file>: .dragon files are not supported and not planned (VIPM discontinued the format); export a .vipc from VIPM instead` |
 | git initialized | `initialized a git repository` / `  add a remote:  git remote add origin <url>` / `  first push:    git add -A && git commit -m "lvpm init" && git push -u origin HEAD` |
 | inside a work tree | `already inside a git repository at <top>; left it as it is` |
@@ -911,13 +911,13 @@ neither is a cross-cutting change.
 
 ## Pre-PR Quality Gate
 
-- [ ] `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, green after every step
-- [ ] The S10a `@labview` scenarios run once here with `LVPM_TEST_LABVIEW=1`; the PR records the result
-- [ ] The #71 demo runs: `lvpm init --from C:\Projects\Serializer\Serializer.vipc`, then `lvpm sync`, with the output in the PR
-- [ ] AC10 is checked against a real `.vipc` with an embedded package, or the PR records it as unverified
-- [ ] The PR's AC table marks AC15, AC16 and AC17's manifest.md part deferred if slice 4 is not in it (moot now: #89 merged into main on 2026-10-30, so slice 4 ships in this PR)
-- [ ] `/code-review` on the branch diff
-- [ ] Docs updated (slices 5 and 4)
+- [x] `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, green after every step
+- [x] The S10a `@labview` scenarios run once here with `LVPM_TEST_LABVIEW=1`; the PR records the result (2026-10-31: 5 of 5 passed)
+- [x] The #71 demo runs: `lvpm init --from C:\Projects\Serializer\Serializer.vipc`, then `lvpm sync`, with the output in the PR (2026-10-31: passed, 1 added, 1 skipped, installed)
+- [x] AC10 is checked against a real `.vipc` with an embedded package, or the PR records it as unverified (recorded unverified: Serializer.vipc embeds nothing)
+- [x] The PR's AC table marks AC15, AC16 and AC17's manifest.md part deferred if slice 4 is not in it (moot now: #89 merged into main on 2026-10-30, so slice 4 ships in this PR)
+- [x] `/code-review` on the branch diff
+- [x] Docs updated (slices 5 and 4)
 
 ## Skipped (low value)
 

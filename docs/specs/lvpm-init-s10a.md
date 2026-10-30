@@ -201,7 +201,10 @@ no citation are inferences and are in the Ambiguity Log.
 10. **Embedded packages.** A package with `Included = true` is imported into
     the cache, `Dependency = true` or not, so `lvpm sync` installs it with no
     source listing it. An archive whose spec names another package or version
-    than its `<Package>` is refused, with nothing written. *(inference)*
+    than its `<Package>` is refused, with nothing written. One marked
+    `Included` whose archive is not inside is a warning, and it is still added
+    or skipped as AC8 says. A name listed twice follows its last listing, for
+    both the constraint and the import. *(inference)*
 11. **Sync installs them.** After `init --from`, `lvpm sync` locks and installs
     every added package into the venv. *(#71 AC2, demo)*
 12. **The `.vipc`'s LabVIEW is reported, not used.** When the `.vipc` targets
@@ -268,6 +271,8 @@ The same from a `vipm.toml`. *(user)*
 | CRUD sweep: project | `inferable` | inference | Created by init; read by every command; changed by `add`/`remove`/editing; deleted by the user. Init adds no delete path. |
 | Authentication / authorization | `inferable` | inference | None: init reads a local file and writes local files. |
 | Audit / logging | `inferable` | inference | The printed report (and `--json` events) is the record; no log asked for. |
+| A name listed twice in a `.vipc` | `inferable` | inference, review 2026-10-31 | The last listing wins, for the constraint and the import, as a TOML table keeps one key. |
+| Size limits on a `.vipc` | `inferable` | inference, review 2026-10-31 | `config.xml` at most 1 MiB, one embedded archive at most 256 MiB, all of them at most 1 GiB; beyond that the file is refused with nothing written, so a crafted zip cannot exhaust memory. |
 | Error handling | `inferable` | inference | Every check runs before the first write (AC2, AC13). Steps after the manifest (git, venv) only warn, so a written manifest is never rolled back by an optional step. |
 
 ## Consistency Gate
