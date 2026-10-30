@@ -4,7 +4,9 @@
 
 use crate::CliWorld;
 use crate::support::golden::Output;
+use crate::support::pilots::check_checksums;
 use crate::support::project::MANIFEST_FILE;
+use crate::support::venv::VENV_DIR;
 use cucumber::{given, then, when};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -293,6 +295,63 @@ async fn folder_has_no_git_and_no_venv(world: &mut CliWorld) {
 #[then("the folder has no lvpm.toml, no .git and no .lv-venv")]
 async fn folder_has_nothing(world: &mut CliWorld) {
     assert_none_of(world.init_cwd(), &["lvpm.toml", ".git", ".lv-venv"]);
+}
+
+#[then("the folder has no .lv-venv")]
+async fn folder_has_no_venv(world: &mut CliWorld) {
+    assert_none_of(world.init_cwd(), &[".lv-venv"]);
+}
+
+/// The lines of both streams.
+fn printed_lines(output: &Output) -> impl Iterator<Item = &str> {
+    output.stdout.lines().chain(output.stderr.lines())
+}
+
+#[then(regex = r#"^the output has a line starting "([^"]*)" with a reason after it$"#)]
+async fn output_has_a_line_with_a_reason(world: &mut CliWorld, start: String) {
+    let output = world.init_output();
+    assert!(
+        printed_lines(output).any(|line| line
+            .strip_prefix(start.as_str())
+            .is_some_and(|reason| !reason.trim().is_empty())),
+        "no line is {start:?} and a reason: {output:?}"
+    );
+}
+
+#[then(regex = r#"^the output has a line starting "([^"]*)"$"#)]
+async fn output_has_a_line_starting(world: &mut CliWorld, start: String) {
+    let output = world.init_output();
+    assert!(
+        printed_lines(output).any(|line| line.starts_with(&start)),
+        "no line starts {start:?}: {output:?}"
+    );
+}
+
+/// The pilot archives as a local source folder, as the pilot-loop scenarios have them.
+#[given("a folder feed with the pilot packages")]
+async fn folder_feed_with_the_pilots(world: &mut CliWorld) {
+    let feed = world.sandbox.add_local_source_folder("pilots");
+    super::pilots::copy_pilots_to(&feed);
+    if let Err(why) = check_checksums(&feed) {
+        panic!("the pilot archives do not match their checksums: {why}");
+    }
+}
+
+#[then(regex = r"^the folder has a venv bound to LabVIEW (\d{4})$")]
+async fn folder_has_a_venv_bound_to(world: &mut CliWorld, year: String) {
+    let binding = world
+        .init_cwd()
+        .join(VENV_DIR)
+        .join(".lvpm")
+        .join("venv.json");
+    let text = std::fs::read_to_string(&binding)
+        .unwrap_or_else(|why| panic!("{}: {why}", binding.display()));
+    let json: serde_json::Value = serde_json::from_str(&text).expect("a venv binding in JSON");
+    let key = json["target_key"].as_str().expect("a target_key");
+    assert!(
+        key.starts_with(&format!("LabVIEW-{year}-")),
+        "the venv is bound to {key}"
+    );
 }
 
 #[given(regex = r"^an empty folder with no \.git in it or above it$")]

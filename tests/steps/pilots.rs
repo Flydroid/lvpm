@@ -225,7 +225,7 @@ async fn mass_compile(world: &mut CliWorld) {
     );
 }
 
-fn copy_pilots_to(dir: &Path) {
+pub(super) fn copy_pilots_to(dir: &Path) {
     std::fs::create_dir_all(dir).expect("create the folder");
     for archive in archives(&pilots_dir()) {
         let name = archive.file_name().expect("a file name");

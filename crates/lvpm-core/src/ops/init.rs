@@ -8,6 +8,7 @@ use crate::errors::InitError;
 use crate::events::{Event, Retarget};
 use crate::git::{self, Runner};
 use crate::target::LvTarget;
+use crate::venv::{self, Venv};
 use crate::{manifest_edit, paths, project};
 use anyhow::anyhow;
 use serde::Serialize;
@@ -25,12 +26,22 @@ pub struct Initialized {
     pub manifest: PathBuf,
     /// The year its `labview` states, if it has one.
     pub labview: Option<u32>,
+    /// The venv bound to that LabVIEW, or why there is none.
+    pub venv: Result<Venv, VenvSkip>,
+}
+
+/// Why `init` made no venv. The folder is set up all the same.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct VenvSkip {
+    pub why: String,
 }
 
 /// The LabVIEW the manifest names, and how to choose another installation.
 #[derive(Debug, PartialEq)]
 struct Choice {
     year: Option<u32>,
+    /// Where the installation of that year is, when it is installed.
+    path: Option<PathBuf>,
     /// Every installation, newest first.
     installed: Vec<String>,
     retarget: Option<Retarget>,
@@ -63,6 +74,7 @@ fn choose_labview(targets: &[LvTarget], flag: Option<u32>) -> Choice {
             });
     Choice {
         year,
+        path: chosen.map(|t| t.path.clone()),
         installed: ranked.iter().map(|t| installation_label(t)).collect(),
         retarget,
     }
@@ -76,8 +88,8 @@ fn installation_label(target: &LvTarget) -> String {
 /// Write an `lvpm.toml` in the project root — `--project`, else the directory
 /// the command ran in — named after its folder. `labview` is `--labview-version`
 /// when given, else the newest LabVIEW installed, and left out when there is none.
-/// Once the manifest is written, `git` makes the repository: the op does not know
-/// how git is run.
+/// Once the manifest is written, `git` makes the repository (the op does not know
+/// how git is run) and a venv is bound to the chosen LabVIEW when it can be.
 pub fn run(env: &OpEnv, git: Runner) -> Result<Initialized, InitError> {
     let root = match &env.flags.project {
         Some(dir) => paths::resolve(&env.cwd, dir),
@@ -120,10 +132,40 @@ pub fn run(env: &OpEnv, git: Runner) -> Result<Initialized, InitError> {
     env.sink.emit(Event::InitGit {
         outcome: git::init(&root, git),
     });
+    let venv = make_venv(env, &root, choice.year, choice.path.as_deref());
     Ok(Initialized {
         manifest,
         labview: choice.year,
+        venv,
     })
+}
+
+/// The venv for the LabVIEW `year` names, bound to the installation at `path`
+/// (by path, so the one `init` chose and said so of is the one bound, never
+/// another of that year). Whatever stops it is a skip, in `venv::create`'s own
+/// words when it is what said no.
+fn make_venv(
+    env: &OpEnv,
+    root: &Path,
+    year: Option<u32>,
+    path: Option<&Path>,
+) -> Result<Venv, VenvSkip> {
+    let skip = |why: String| VenvSkip { why };
+    let Some(year) = year else {
+        return Err(skip("no LabVIEW found".into()));
+    };
+    let Some(path) = path else {
+        return Err(skip(format!("LabVIEW {year} is not installed")));
+    };
+    venv::create(
+        root,
+        Some(&path.to_string_lossy()),
+        None,
+        &env.config.venv_dir,
+        &env.targets,
+        env.sink,
+    )
+    .map_err(|why| skip(format!("{why:#}")))
 }
 
 /// `text` as the file at `path`, which must not be there.
@@ -196,6 +238,10 @@ mod tests {
                 done,
                 scratch,
             }
+        }
+
+        fn root(&self) -> &Path {
+            self.done.manifest.parent().unwrap()
         }
 
         /// The one `InitManifestWritten`'s `(labview, installed, retarget)`.
@@ -338,6 +384,69 @@ mod tests {
         assert_eq!(calls.get(), 0);
         assert!(!root.join(".lv-venv").exists());
         assert!(!root.join(".git").exists());
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
+    fn the_venv_is_bound_to_the_chosen_labview_and_found_again_through_the_binding() {
+        let targets = vec![lv(2026, 64), lv(2025, 64)];
+        let ran = Ran::init("init-venv-bound", targets.clone(), None);
+
+        let made = ran.done.venv.clone().unwrap();
+
+        assert_eq!(made.target.path, lv(2026, 64).path);
+        assert_eq!(made.dir, ran.root().join(".lv-venv"));
+        let found = venv::load(ran.root(), Path::new(".lv-venv"), &targets).unwrap();
+        assert_eq!(found.target.path, lv(2026, 64).path);
+    }
+
+    #[test]
+    fn the_venv_binds_the_installation_init_chose_not_the_first_of_its_year() {
+        let mut newer_32_bit = lv(2026, 32);
+        newer_32_bit.version = 26.3;
+        let ran = Ran::init("init-venv-by-path", vec![newer_32_bit, lv(2026, 64)], None);
+
+        let made = ran.done.venv.clone().unwrap();
+
+        assert_eq!(
+            (made.target.bitness, made.target.path),
+            (64, lv(2026, 64).path)
+        );
+    }
+
+    #[test]
+    fn a_venv_that_cannot_be_made_is_a_skip_with_its_reason_and_init_still_succeeds() {
+        let cases = [
+            (vec![lv(2023, 64)], None, "2024 Q1"),
+            (
+                vec![lv(2026, 64)],
+                Some("2025"),
+                "LabVIEW 2025 is not installed",
+            ),
+            (Vec::new(), None, "no LabVIEW found"),
+        ];
+        for (targets, flag, why) in cases {
+            let ran = Ran::init("init-venv-skip", targets, flag);
+
+            let skip = ran.done.venv.clone().unwrap_err();
+
+            assert!(skip.why.contains(why), "{why:?} is not in {:?}", skip.why);
+            assert!(!ran.root().join(".lv-venv").exists(), "{why}");
+        }
+    }
+
+    #[test]
+    fn a_venv_that_is_already_there_is_kept_and_init_says_so() {
+        let (scratch, root) = folder("init-venv-there", "App");
+        let binding = root.join(".lv-venv").join(".lvpm").join("venv.json");
+        std::fs::create_dir_all(binding.parent().unwrap()).unwrap();
+        std::fs::write(&binding, "{\"mine\":1}").unwrap();
+
+        let done = run(&env(&root), &git_ok).unwrap();
+
+        let skip = done.venv.unwrap_err();
+        assert!(skip.why.contains("already has a venv"), "{}", skip.why);
+        assert_eq!(std::fs::read_to_string(&binding).unwrap(), "{\"mine\":1}");
         let _ = std::fs::remove_dir_all(&scratch);
     }
 

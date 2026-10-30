@@ -585,7 +585,7 @@ fn run(cli: &Cli) -> Result<Report> {
         Cmd::Init => {
             let done = ops::init::run(&env, &git::spawn)
                 .map_err(|why| anyhow!(render::init::error(&why)))?;
-            Report::new(render::init::initialized(done.labview), &done)
+            Report::new(render::init::initialized(&done), &done)
         }
         Cmd::Install {
             package,

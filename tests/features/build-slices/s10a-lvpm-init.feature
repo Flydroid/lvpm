@@ -65,6 +65,28 @@ Feature: lvpm init starts a project (S10a)
     And "app" has no .git of its own
     And the output says "already inside a git repository at" and the repository's folder
 
+  # --labview-version 2023 always skips the venv: either 2023 is not
+  # installed, or it is before 2024 Q1. Only the reason text varies.
+  Scenario: a venv that cannot be made is a hint, not a failure
+    Given an empty folder "App"
+    When I run "lvpm init --labview-version 2023" in it
+    Then it succeeds
+    And the folder has no .lv-venv
+    And the output has a line starting "no venv: " with a reason after it
+    And the output has a line starting "  later: lvpm venv create"
+
+  # The working directory is the project, so the venv is where the sandbox
+  # looks for one and its cleanup finds a LabVIEW started on it.
+  @labview @interactive-labview
+  Scenario: the venv is bound and add installs into it
+    Given a folder feed with the pilot packages
+    When I run "lvpm init --labview-version 2026" in the working directory
+    Then it succeeds
+    And the folder has a venv bound to LabVIEW 2026
+    When I run "lvpm add labview_open_source_project_lib_labview_open_source_palette" in the working directory
+    Then it succeeds
+    And the venv holds labview_open_source_project_lib_labview_open_source_palette in its add-on folder and no staging folder
+
   @labview @interactive-labview
   Scenario: labview is the newest installed
     Given the LabVIEW installations "lvpm targets" lists

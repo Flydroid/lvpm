@@ -938,7 +938,8 @@ neither is a cross-cutting change.
   consistent; a later plain `lvpm venv create` may still pick the other.
 - **`labview` is a year (`u32`) in `InitManifestWritten`/`Initialized`
   JSON** but a string elsewhere. Rename to `labview_year` before release
-  if the JSON is published; left as is for now.
+  if the JSON is published; left as is for now. Same for `Initialized.venv`,
+  which serializes as serde's `{"Ok": ...}` / `{"Err": {"why": ...}}`.
 - **Intermittent test failures.** One run of `cargo test --workspace` on
   2026-10-30 failed one lvpm-core lib test and one test in a 5-test
   binary; three reruns passed. The failing tests were not identified.
@@ -987,7 +988,7 @@ neither is a cross-cutting change.
 #### Wave 2
 - [ ] Slice 2: git repository and venv
   - [x] Step 2.1: git
-  - [ ] Step 2.2: venv
+  - [x] Step 2.2: venv
 
 #### Wave 3
 - [ ] Slice 3: `init --from project.vipc`

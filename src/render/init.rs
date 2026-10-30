@@ -5,6 +5,7 @@ use super::{Renderer, Stream};
 use lvpm_core::errors::InitError;
 use lvpm_core::events::{Event, Retarget};
 use lvpm_core::git::GitOutcome;
+use lvpm_core::ops::init::Initialized;
 
 pub(super) fn render(r: &mut Renderer, event: &Event) {
     match event {
@@ -76,13 +77,21 @@ fn git(r: &mut Renderer, outcome: &GitOutcome) {
     }
 }
 
-/// What `lvpm init` prints last: `labview` is the year the manifest states, if
-/// it states one.
-pub fn initialized(labview: Option<u32>) -> String {
-    match labview {
-        Some(_) => "next: lvpm sync\n".to_string(),
-        None => "next: add labview = \">=YYYY\" to lvpm.toml, then lvpm sync\n".to_string(),
-    }
+/// What `lvpm init` prints last: the venv it made or why not, then what to do next.
+pub fn initialized(done: &Initialized) -> String {
+    let venv = match &done.venv {
+        Ok(v) => format!(
+            "created {}\n  bound to       {}\n",
+            v.dir.display(),
+            v.target.label()
+        ),
+        Err(skip) => format!("no venv: {}\n  later: lvpm venv create\n", skip.why),
+    };
+    let next = match done.labview {
+        Some(_) => "next: lvpm sync\n",
+        None => "next: add labview = \">=YYYY\" to lvpm.toml, then lvpm sync\n",
+    };
+    format!("{venv}{next}")
 }
 
 /// What `lvpm init` prints when it fails: what happened, and that nothing was
@@ -104,6 +113,9 @@ pub fn error(error: &InitError) -> String {
 mod tests {
     use super::super::tests::renderer;
     use super::*;
+    use lvpm_core::ops::init::VenvSkip;
+    use lvpm_core::target::LvTarget;
+    use lvpm_core::venv::Venv;
     use std::path::PathBuf;
 
     fn written(
@@ -249,16 +261,58 @@ mod tests {
         );
     }
 
+    fn done(labview: Option<u32>, venv: Result<Venv, VenvSkip>) -> Initialized {
+        Initialized {
+            manifest: PathBuf::from("proj").join("lvpm.toml"),
+            labview,
+            venv,
+        }
+    }
+
+    fn skipped(why: &str) -> Result<Venv, VenvSkip> {
+        Err(VenvSkip { why: why.into() })
+    }
+
+    fn a_venv() -> Venv {
+        let repo = PathBuf::from("proj");
+        Venv {
+            dir: repo.join(".lv-venv"),
+            repo,
+            target: LvTarget {
+                version: 26.3,
+                bitness: 64,
+                path: PathBuf::from("LabVIEW 2026"),
+            },
+            port: 3412,
+        }
+    }
+
     #[test]
-    fn init_ends_with_the_command_to_run_next() {
-        assert_eq!(initialized(Some(2026)), "next: lvpm sync\n");
+    fn a_created_venv_is_named_with_what_it_is_bound_to_and_the_next_command() {
+        let venv = a_venv();
+        assert_eq!(
+            initialized(&done(Some(2026), Ok(venv.clone()))),
+            format!(
+                "created {}\n  bound to       LabVIEW 2026 (64-bit)  v26.3\nnext: lvpm sync\n",
+                venv.dir.display()
+            )
+        );
+    }
+
+    #[test]
+    fn a_skipped_venv_gives_its_reason_and_the_bare_command_for_later() {
+        assert_eq!(
+            initialized(&done(Some(2025), skipped("LabVIEW 2025 is not installed"))),
+            "no venv: LabVIEW 2025 is not installed\n  later: lvpm venv create\nnext: lvpm sync\n"
+        );
     }
 
     #[test]
     fn without_a_labview_the_next_step_is_to_add_one() {
         assert_eq!(
-            initialized(None),
-            "next: add labview = \">=YYYY\" to lvpm.toml, then lvpm sync\n"
+            initialized(&done(None, skipped("no LabVIEW found"))),
+            "no venv: no LabVIEW found\n  later: lvpm venv create\n\
+             next: add labview = \">=YYYY\" to lvpm.toml, then lvpm sync\n"
         );
     }
 
