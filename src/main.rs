@@ -175,7 +175,7 @@ enum Cmd {
     },
     /// Start a project here: write an lvpm.toml named after the folder.
     ///
-    /// `labview` is set from --labview-version. An existing lvpm.toml is never
+    /// `labview` is --labview-version, else the newest installed LabVIEW. An existing lvpm.toml is never
     /// replaced, and nothing is written unless every check passes.
     Init,
     /// Install a package by name, or name@version. In a project, a bare

@@ -56,11 +56,14 @@ pub fn folder_name(root: &Path) -> String {
 /// the error is [`ErrorKind::AlreadyExists`](std::io::ErrorKind::AlreadyExists).
 pub fn create_file(path: &Path, text: &str) -> std::io::Result<()> {
     use std::io::Write;
-    std::fs::OpenOptions::new()
+    let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(path)?
-        .write_all(text.as_bytes())
+        .open(path)?;
+    file.write_all(text.as_bytes()).inspect_err(|_| {
+        // A partial file would make the next `lvpm init` refuse the folder.
+        let _ = std::fs::remove_file(path);
+    })
 }
 
 /// `text` with `name = "<constraint>"` in `table`: a new entry is added at the

@@ -42,7 +42,7 @@ Feature: lvpm init starts a project (S10a)
   Scenario Outline: an unusable --labview-version writes nothing
     Given an empty folder "App"
     When I run "lvpm init --labview-version <value>" in it
-    Then it fails with "--labview-version <value>"
+    Then it fails with "--labview-version <value> is not a LabVIEW year"
     And the output says "nothing was written"
     And the folder has no lvpm.toml, no .git and no .lv-venv
 

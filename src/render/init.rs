@@ -65,9 +65,7 @@ pub fn error(error: &InitError) -> String {
              this folder is already an lvpm project: lvpm add puts packages in it, \
              lvpm venv create makes its venv"
         ),
-        InitError::BadLabview { value, why } => {
-            format!("--labview-version {value}: {why}; nothing was written")
-        }
+        InitError::BadLabview { .. } => format!("{error}; nothing was written"),
         InitError::Other(cause) => format!("{cause:#}"),
     }
 }
@@ -76,7 +74,6 @@ pub fn error(error: &InitError) -> String {
 mod tests {
     use super::super::tests::renderer;
     use super::*;
-    use lvpm_core::errors::LockError;
     use std::path::PathBuf;
 
     fn written(
@@ -205,15 +202,11 @@ mod tests {
             error(&InitError::ProjectMissing { dir }),
             "Missing does not exist; nothing was written"
         );
-        let why = LockError::LabviewNotAYear {
-            value: "26.3".into(),
-        };
         assert_eq!(
             error(&InitError::BadLabview {
-                value: "26.3".into(),
-                why
+                value: "26.3".into()
             }),
-            "--labview-version 26.3: labview = \"26.3\" in lvpm.toml is not a minimum LabVIEW year; nothing was written"
+            "--labview-version 26.3 is not a LabVIEW year (expected e.g. 2025); nothing was written"
         );
     }
 

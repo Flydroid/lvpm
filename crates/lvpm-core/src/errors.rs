@@ -199,9 +199,9 @@ pub enum InitError {
     /// The folder already has an `lvpm.toml`, which init never replaces.
     #[error("{} already exists", .path.display())]
     ManifestExists { path: PathBuf },
-    /// The LabVIEW version asked for is not a year: [`LockError`]'s own words.
-    #[error("{why}")]
-    BadLabview { value: String, why: LockError },
+    /// `--labview-version` is not a LabVIEW year.
+    #[error("--labview-version {value} is not a LabVIEW year (expected e.g. 2025)")]
+    BadLabview { value: String },
     /// Anything else that went wrong: its own text.
     #[error(transparent)]
     Other(#[from] anyhow::Error),

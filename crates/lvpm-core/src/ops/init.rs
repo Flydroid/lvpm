@@ -38,9 +38,9 @@ struct Choice {
 /// `--labview-version`'s `flag` year, else the newest installation's. Of two
 /// bitnesses of one year the 64-bit one wins, whatever order `targets` is in.
 ///
-/// `retarget` is the next installation after the chosen one, and there is none
-/// when no installation was chosen. A flag year that is not installed is still
-/// the year written.
+/// `retarget` is the first installation that is not the chosen one, so with a
+/// flag year that is not installed it is the newest; it is `None` with only one
+/// installation. A flag year that is not installed is still the year written.
 fn choose_labview(targets: &[LvTarget], flag: Option<u32>) -> Choice {
     let mut ranked: Vec<&LvTarget> = targets.iter().collect();
     ranked.sort_by_key(|t| Reverse((t.year(), t.bitness)));
@@ -52,14 +52,16 @@ fn choose_labview(targets: &[LvTarget], flag: Option<u32>) -> Choice {
             other = Some(target);
         }
     }
-    let retarget = chosen
-        .zip(other)
-        .map(|(chosen, other)| match other.year() == chosen.year() {
-            true => Retarget::Path(other.path.clone()),
-            false => Retarget::Year(other.year()),
-        });
+    let year = flag.or(chosen.map(LvTarget::year));
+    let retarget =
+        other
+            .filter(|_| ranked.len() > 1)
+            .map(|other| match Some(other.year()) == year {
+                true => Retarget::Path(other.path.clone()),
+                false => Retarget::Year(other.year()),
+            });
     Choice {
-        year: flag.or(chosen.map(LvTarget::year)),
+        year,
         installed: ranked.iter().map(|t| installation_label(t)).collect(),
         retarget,
     }
@@ -90,9 +92,8 @@ pub fn run(env: &OpEnv) -> Result<Initialized, InitError> {
         .labview_version
         .as_deref()
         .map(|value| {
-            project::labview_year(value).map_err(|why| InitError::BadLabview {
+            project::labview_year(value).map_err(|_| InitError::BadLabview {
                 value: value.to_string(),
-                why,
             })
         })
         .transpose()?;
@@ -283,12 +284,8 @@ mod tests {
     }
 
     #[test]
-    fn a_flag_year_that_is_not_installed_is_written_and_offers_nothing() {
-        let ran = Ran::init(
-            "init-flag-absent",
-            vec![lv(2026, 64), lv(2024, 64)],
-            Some("2025"),
-        );
+    fn a_flag_year_that_is_not_installed_is_written_and_offers_nothing_with_one_installation() {
+        let ran = Ran::init("init-flag-absent-one", vec![lv(2026, 64)], Some("2025"));
 
         assert_eq!(ran.written().0, Some(2025));
         assert!(
@@ -298,6 +295,22 @@ mod tests {
         );
         assert_eq!(ran.written().2, None);
         assert_eq!(ran.events.len(), 1, "no warning when the flag named one");
+    }
+
+    #[test]
+    fn a_flag_year_that_is_not_installed_offers_the_newest_of_several() {
+        let ran = Ran::init(
+            "init-flag-absent-two",
+            vec![lv(2024, 64), lv(2026, 64)],
+            Some("2025"),
+        );
+
+        assert_eq!(ran.written().0, Some(2025));
+        assert_eq!(
+            ran.written().1,
+            vec!["2026 (64-bit)".to_string(), "2024 (64-bit)".to_string()]
+        );
+        assert_eq!(ran.written().2, Some(Retarget::Year(2026)));
     }
 
     #[test]
@@ -456,7 +469,7 @@ mod tests {
             let why = run(&env).unwrap_err();
 
             assert!(
-                matches!(&why, InitError::BadLabview { value: v, .. } if v == value),
+                matches!(&why, InitError::BadLabview { value: v } if v == value),
                 "{value:?}: {why:?}"
             );
             assert!(!root.join("lvpm.toml").exists(), "{value:?}");

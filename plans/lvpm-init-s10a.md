@@ -98,8 +98,9 @@ planned.
     newest first); between two bitnesses of that year, 64-bit wins. A
     `--from` file's own LabVIEW is never used. With no targets, `labview`
     is left out.
-  - `retarget: Option<Retarget>` is the next installation after the
-    chosen one in that order. `Retarget::Year(y)` when its year differs,
+  - `retarget: Option<Retarget>` is the first installation in that
+    order that is not the chosen one (the newest when the flag names an
+    uninstalled year), whenever more than one is installed. `Retarget::Year(y)` when its year differs,
     `Retarget::Path(p)` when it is the other bitness of the chosen year
     (`target::select` accepts a path). It is typed data in the event, next
     to the display labels. The "to target another one" lines appear only
@@ -186,7 +187,7 @@ plural.
 | deps added | `added <n> dependenc(y/ies) from <file>` / `  <name> <constraint>` per line / `  skipped <n> package(s) VIPM marked as a dependency of another` (only when n > 0) |
 | embedded | `  imported <name> <version> from <file>` / `warning: <name> <version> is marked Included but is not inside <file>` / `warning: could not import <name> <version> into the cache: <why>; add it later with lvpm cache add <archive>` |
 | existing manifest | `error: <path> already exists; lvpm init does not overwrite it` / `  this folder is already an lvpm project: lvpm add puts packages in it, lvpm venv create makes its venv` |
-| bad flag | `error: --labview-version <value>: <labview_year's reason>; nothing was written` |
+| bad flag | `error: --labview-version <value> is not a LabVIEW year (expected e.g. 2025); nothing was written` |
 | vipm.toml unreadable | `error: <file>: <read_toml's reason>; nothing was written` |
 | bad `--from` | `error: <file>: cannot be read: <io error>; nothing was written` · `error: <file>: not a zip file; nothing was written` · `error: <file>: config.xml is missing; nothing was written` · `error: <file>: config.xml: <what>; nothing was written` (what: `no <Target>`, `more than one <Target>`, `<Version> <value> is not N.N`, `package <Name>: no version (expected name-version)`, `package <Name>: <tail> is not a version`, `package <name>: <Flag> is missing`, `package <name>: <Flag> is not true or false`, `unsupported XML (<construct>)`, `larger than 1 MiB`) · `error: <file>: embedded <entry> is not a package: <why>; nothing was written` · `error: <file>: embedded <entry> is larger than 256 MiB; nothing was written` · `error: <file>: more than one <name>-<version>.vip inside; nothing was written` |
 | `.dragon` | `error: <file>: .dragon files are not supported and not planned (VIPM discontinued the format); export a .vipc from VIPM instead` |
