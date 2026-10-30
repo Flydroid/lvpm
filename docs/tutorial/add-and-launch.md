@@ -22,13 +22,13 @@ That one command does three things:
    in `lvpm.toml`.
 2. Resolves every package, direct or transitive, and writes the exact
    versions, SHA-256 hashes and sources to `lvpm.lock`.
-3. Installs exactly what the lock lists into `.lv-venv`, resaves the VIs in
+3. Syncs: installs exactly what the lock lists into `.lv-venv`, resaves the VIs in
    the venv's LabVIEW and relinks them. lvpm starts that LabVIEW itself,
    so this takes a minute or so per package.
 
-Look at `lvpm.toml` and `lvpm.lock` now. Commit both: a teammate or a CI job
-that runs `lvpm install` in a fresh clone gets the same packages, byte for
-byte.
+Look at `lvpm.toml` and `lvpm.lock` now. Commit both: a teammate who runs `lvpm venv create` and `lvpm sync` in a
+fresh clone, or a CI job that runs `lvpm sync`, gets the same packages, byte
+for byte.
 
 ```console
 $ lvpm list
@@ -49,8 +49,8 @@ file to open it straight away: `lvpm launch HelloLvpm.lvproj`. A LabVIEW
 you already had open is left alone.
 
 Save a project (`HelloLvpm.lvproj`) and a VI that uses one of the package's
-VIs into the folder. The VI links to the package portably, so it works on
-any machine that syncs the same lock.
+VIs into the folder. The VI links to the package by a portable path, so it works on
+any machine with the same LabVIEW version that syncs the same lock.
 
 After a later `lvpm add`, restart with `lvpm launch`: LabVIEW reads the venv
 only when it starts.

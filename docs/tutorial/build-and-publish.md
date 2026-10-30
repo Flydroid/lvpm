@@ -60,7 +60,8 @@ and build again.
 
 ## Install it from another project
 
-Point lvpm at the feed. Package folders are configured per user, not per
+Point lvpm at the feed by adding it as a package source. Package folders
+(`sources.local`) are configured per user, not per
 project ([Package sources](../usage.md#package-sources)):
 
 ```console

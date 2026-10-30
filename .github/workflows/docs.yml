@@ -18,21 +18,29 @@ concurrency:
 
 env:
   MDBOOK_VERSION: v0.5.4
+  MDBOOK_SHA256: 5222beabd3e37dc5be0d18ff99b79058469354db5c220153a1b92db5ba12be89
   MDBOOK_MERMAID_VERSION: v0.17.1
+  MDBOOK_MERMAID_SHA256: 42aca57eea8521971cc595fe4bb853c5b8b7d9f7138a2ec9f14a0a72c210922d
 
 jobs:
   build:
+    name: build book
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      # A release asset can be replaced after publishing; the hash pins its contents.
       - name: Install mdBook and mdbook-mermaid
         run: |
           mkdir -p "$RUNNER_TEMP/bin"
-          curl -sSfL "https://github.com/rust-lang/mdBook/releases/download/$MDBOOK_VERSION/mdbook-$MDBOOK_VERSION-x86_64-unknown-linux-musl.tar.gz" | tar -xz -C "$RUNNER_TEMP/bin"
-          curl -sSfL "https://github.com/badboy/mdbook-mermaid/releases/download/$MDBOOK_MERMAID_VERSION/mdbook-mermaid-$MDBOOK_MERMAID_VERSION-x86_64-unknown-linux-musl.tar.gz" | tar -xz -C "$RUNNER_TEMP/bin"
+          curl -sSfLo mdbook.tgz "https://github.com/rust-lang/mdBook/releases/download/$MDBOOK_VERSION/mdbook-$MDBOOK_VERSION-x86_64-unknown-linux-musl.tar.gz"
+          curl -sSfLo mermaid.tgz "https://github.com/badboy/mdbook-mermaid/releases/download/$MDBOOK_MERMAID_VERSION/mdbook-mermaid-$MDBOOK_MERMAID_VERSION-x86_64-unknown-linux-musl.tar.gz"
+          printf '%s  mdbook.tgz\n%s  mermaid.tgz\n' "$MDBOOK_SHA256" "$MDBOOK_MERMAID_SHA256" | sha256sum -c -
+          tar -xzf mdbook.tgz -C "$RUNNER_TEMP/bin"
+          tar -xzf mermaid.tgz -C "$RUNNER_TEMP/bin"
+          rm mdbook.tgz mermaid.tgz
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: Build the book
         run: |
@@ -40,6 +48,9 @@ jobs:
           mdbook build
           # Internal design pages that sit in docs/ but are not part of the book.
           rm -rf target/book/vision target/book/specs target/book/manual
+          # An include whose README anchor was renamed renders empty without failing the build.
+          grep -q 'exit code' target/book/reference/json-output.html
+          grep -q 'class="mermaid"' target/book/introduction.html
       # Offline: every link inside the book, anchors included; links out are not fetched.
       # 404.html links root-relative to site-url, which resolves only once deployed.
       - name: Check links
@@ -47,15 +58,19 @@ jobs:
         with:
           args: --offline --include-fragments --no-progress --exclude-path '404.html$' target/book
           fail: true
-      - if: github.event_name != 'pull_request'
+      - name: Upload the book as the Pages artifact
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
         uses: actions/upload-pages-artifact@v5
         with:
           path: target/book
 
   deploy:
-    if: github.event_name != 'pull_request'
+    name: deploy to Pages
+    # Only main publishes; a dispatch from another branch builds and checks only.
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       pages: write
       id-token: write
@@ -63,5 +78,6 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - id: deployment
+      - name: Deploy to GitHub Pages
+        id: deployment
         uses: actions/deploy-pages@v5
