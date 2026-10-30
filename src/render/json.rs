@@ -52,7 +52,7 @@ fn to_line(value: serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lvpm_core::events::Phase;
+    use lvpm_core::events::{Phase, Retarget};
     use lvpm_core::ops::venv_cmd::VenvStatus;
     use lvpm_core::target::LvTarget;
     use lvpm_core::venv::Venv;
@@ -134,18 +134,36 @@ mod tests {
 
     #[test]
     fn the_manifest_init_wrote_keeps_its_field_names_and_a_missing_labview_is_null() {
-        let written = |labview| {
+        let written = |labview, retarget| {
             serde_json::json!(Event::InitManifestWritten {
                 path: "proj/lvpm.toml".into(),
                 labview,
+                installed: vec!["2023 (64-bit)".into(), "2022 (64-bit)".into()],
+                retarget,
             })
         };
         assert_eq!(
-            written(Some(2023)),
+            written(Some(2023), Some(Retarget::Year(2022))),
             serde_json::json!({"event": "init_manifest_written", "data":
-                {"path": "proj/lvpm.toml", "labview": 2023}})
+                {"path": "proj/lvpm.toml", "labview": 2023,
+                 "installed": ["2023 (64-bit)", "2022 (64-bit)"],
+                 "retarget": {"by": "year", "value": 2022}}})
         );
-        assert_eq!(written(None)["data"]["labview"], serde_json::Value::Null);
+        assert_eq!(
+            written(None, Some(Retarget::Path("lv32".into())))["data"]["retarget"],
+            serde_json::json!({"by": "path", "value": "lv32"})
+        );
+        let none = written(None, None);
+        assert_eq!(none["data"]["labview"], serde_json::Value::Null);
+        assert_eq!(none["data"]["retarget"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn no_labview_is_an_event_with_no_data() {
+        assert_eq!(
+            serde_json::json!(Event::InitNoLabview),
+            serde_json::json!({"event": "init_no_labview"})
+        );
     }
 
     #[test]

@@ -19,6 +19,17 @@ pub struct InitState {
     output: Option<Output>,
     /// A manifest as the scenario's Given wrote it, to compare after the run.
     given_manifest: Option<(PathBuf, String)>,
+    /// The newest year `lvpm targets` listed.
+    newest_installed: Option<u32>,
+}
+
+/// The newest year in the output of `lvpm targets`
+/// (`LabVIEW 2026 (64-bit)  v26.3  C:\...`).
+fn newest_year(targets_output: &str) -> Option<u32> {
+    targets_output
+        .lines()
+        .filter_map(|line| line.strip_prefix("LabVIEW ")?.get(..4)?.parse().ok())
+        .max()
 }
 
 /// `path` as the command may print it: as built, and as the file system
@@ -129,6 +140,21 @@ async fn run_in_the_folder(world: &mut CliWorld, command_line: String) {
     world.run_in(&command_line, folder);
 }
 
+#[given(r#"the LabVIEW installations "lvpm targets" lists"#)]
+async fn the_installations_targets_lists(world: &mut CliWorld) {
+    let listing = world.sandbox.run_lvpm(&["targets"], None);
+    let newest = newest_year(&listing.stdout)
+        .unwrap_or_else(|| panic!("`lvpm targets` lists no LabVIEW: {listing:?}"));
+    world.init.newest_installed = Some(newest);
+}
+
+#[when(regex = r#"^I run "([^"]+)" in an empty folder$"#)]
+async fn run_in_a_new_empty_folder(world: &mut CliWorld, command_line: String) {
+    let folder = world.sandbox.work_dir().join("Fresh");
+    std::fs::create_dir_all(&folder).expect("create the folder");
+    world.run_in(&command_line, folder);
+}
+
 #[when(regex = r#"^I run "([^"]+)" in the working directory$"#)]
 async fn run_in_the_working_directory(world: &mut CliWorld, command_line: String) {
     let work = world.sandbox.work_dir();
@@ -154,6 +180,16 @@ async fn manifest_has_project(
     assert_eq!(project_text(&manifest, "name"), name);
     assert_eq!(project_text(&manifest, "version"), version);
     assert_eq!(project_text(&manifest, "labview"), labview);
+}
+
+#[then(regex = r#"^lvpm\.toml says labview ">=" the newest listed year$"#)]
+async fn manifest_says_the_newest_year(world: &mut CliWorld) {
+    let newest = world
+        .init
+        .newest_installed
+        .expect("the listed installations");
+    let manifest = manifest_in(world.init_cwd());
+    assert_eq!(project_text(&manifest, "labview"), format!(">={newest}"));
 }
 
 #[then("lvpm.toml has an empty [dependencies] table")]

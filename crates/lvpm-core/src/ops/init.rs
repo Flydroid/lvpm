@@ -5,10 +5,12 @@
 
 use super::env::OpEnv;
 use crate::errors::InitError;
-use crate::events::Event;
+use crate::events::{Event, Retarget};
+use crate::target::LvTarget;
 use crate::{manifest_edit, paths, project};
 use anyhow::anyhow;
 use serde::Serialize;
+use std::cmp::Reverse;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
@@ -20,11 +22,57 @@ const FIRST_VERSION: &str = "0.1.0";
 pub struct Initialized {
     /// The `lvpm.toml` it wrote.
     pub manifest: PathBuf,
+    /// The year its `labview` states, if it has one.
+    pub labview: Option<u32>,
+}
+
+/// The LabVIEW the manifest names, and how to choose another installation.
+#[derive(Debug, PartialEq)]
+struct Choice {
+    year: Option<u32>,
+    /// Every installation, newest first.
+    installed: Vec<String>,
+    retarget: Option<Retarget>,
+}
+
+/// `--labview-version`'s `flag` year, else the newest installation's. Of two
+/// bitnesses of one year the 64-bit one wins, whatever order `targets` is in.
+///
+/// `retarget` is the next installation after the chosen one, and there is none
+/// when no installation was chosen. A flag year that is not installed is still
+/// the year written.
+fn choose_labview(targets: &[LvTarget], flag: Option<u32>) -> Choice {
+    let mut ranked: Vec<&LvTarget> = targets.iter().collect();
+    ranked.sort_by_key(|t| Reverse((t.year(), t.bitness)));
+    let (mut chosen, mut other) = (None, None);
+    for &target in &ranked {
+        if chosen.is_none() && flag.is_none_or(|year| target.year() == year) {
+            chosen = Some(target);
+        } else if other.is_none() {
+            other = Some(target);
+        }
+    }
+    let retarget = chosen
+        .zip(other)
+        .map(|(chosen, other)| match other.year() == chosen.year() {
+            true => Retarget::Path(other.path.clone()),
+            false => Retarget::Year(other.year()),
+        });
+    Choice {
+        year: flag.or(chosen.map(LvTarget::year)),
+        installed: ranked.iter().map(|t| installation_label(t)).collect(),
+        retarget,
+    }
+}
+
+/// How an installation is told apart in what `init` says: `2026 (64-bit)`.
+fn installation_label(target: &LvTarget) -> String {
+    format!("{} ({}-bit)", target.year(), target.bitness)
 }
 
 /// Write an `lvpm.toml` in the project root — `--project`, else the directory
 /// the command ran in — named after its folder. `labview` is `--labview-version`
-/// when given.
+/// when given, else the newest LabVIEW installed, and left out when there is none.
 pub fn run(env: &OpEnv) -> Result<Initialized, InitError> {
     let root = match &env.flags.project {
         Some(dir) => paths::resolve(&env.cwd, dir),
@@ -37,7 +85,7 @@ pub fn run(env: &OpEnv) -> Result<Initialized, InitError> {
     if manifest.exists() {
         return Err(InitError::ManifestExists { path: manifest });
     }
-    let labview = env
+    let flag = env
         .flags
         .labview_version
         .as_deref()
@@ -48,18 +96,27 @@ pub fn run(env: &OpEnv) -> Result<Initialized, InitError> {
             })
         })
         .transpose()?;
+    let choice = choose_labview(&env.targets, flag);
 
     let text = manifest_edit::skeleton(
         &manifest_edit::folder_name(&root),
         Some(FIRST_VERSION),
-        labview,
+        choice.year,
     );
     write_new(&manifest, &text)?;
     env.sink.emit(Event::InitManifestWritten {
         path: manifest.clone(),
-        labview,
+        labview: choice.year,
+        installed: choice.installed,
+        retarget: choice.retarget,
     });
-    Ok(Initialized { manifest })
+    if choice.year.is_none() {
+        env.sink.emit(Event::InitNoLabview);
+    }
+    Ok(Initialized {
+        manifest,
+        labview: choice.year,
+    })
 }
 
 /// `text` as the file at `path`, which must not be there.
@@ -85,6 +142,59 @@ mod tests {
         (scratch, root)
     }
 
+    fn lv(year: u32, bitness: u8) -> LvTarget {
+        LvTarget {
+            version: f64::from(year - 2000),
+            bitness,
+            path: PathBuf::from(format!("LabVIEW {year} {bitness}-bit")),
+        }
+    }
+
+    /// What `init` says and writes in an empty folder where exactly `targets`
+    /// are installed, run with `flag` as `--labview-version`.
+    struct Ran {
+        events: Vec<Event>,
+        manifest: String,
+        done: Initialized,
+        scratch: PathBuf,
+    }
+
+    impl Ran {
+        fn init(tag: &str, targets: Vec<LvTarget>, flag: Option<&str>) -> Ran {
+            let (scratch, root) = folder(tag, "App");
+            let sink = Recorded::default();
+            let mut env = env_on(&sink, &root);
+            env.targets = targets;
+            env.flags.labview_version = flag.map(String::from);
+            let done = run(&env).unwrap();
+            Ran {
+                events: sink.events(),
+                manifest: std::fs::read_to_string(&done.manifest).unwrap(),
+                done,
+                scratch,
+            }
+        }
+
+        /// The one `InitManifestWritten`'s `(labview, installed, retarget)`.
+        fn written(&self) -> (Option<u32>, Vec<String>, Option<Retarget>) {
+            match &self.events[0] {
+                Event::InitManifestWritten {
+                    labview,
+                    installed,
+                    retarget,
+                    ..
+                } => (*labview, installed.clone(), retarget.clone()),
+                other => panic!("the first event is the manifest: {other:?}"),
+            }
+        }
+    }
+
+    impl Drop for Ran {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.scratch);
+        }
+    }
+
     #[test]
     fn init_writes_the_skeleton_named_after_its_folder_and_says_so() {
         let (scratch, root) = folder("init-writes", "Serializer");
@@ -95,6 +205,7 @@ mod tests {
         let done = run(&env).unwrap();
 
         assert_eq!(done.manifest, root.join("lvpm.toml"));
+        assert_eq!(done.labview, Some(2023));
         assert_eq!(
             std::fs::read_to_string(&done.manifest).unwrap(),
             "[project]\nname = \"Serializer\"\nversion = \"0.1.0\"\nlabview = \">=2023\"\n\n[dependencies]\n"
@@ -103,24 +214,152 @@ mod tests {
             sink.events(),
             [Event::InitManifestWritten {
                 path: done.manifest.clone(),
-                labview: Some(2023)
+                labview: Some(2023),
+                installed: vec!["2026 (64-bit)".into()],
+                retarget: None,
             }]
         );
         let _ = std::fs::remove_dir_all(&scratch);
     }
 
     #[test]
-    fn without_a_labview_version_the_manifest_has_no_labview() {
-        let (scratch, root) = folder("init-no-labview", "App");
+    fn the_newest_is_chosen_and_the_next_year_is_offered() {
+        let ran = Ran::init(
+            "init-newest",
+            vec![lv(2026, 64), lv(2025, 64), lv(2024, 64)],
+            None,
+        );
 
-        let done = run(&env_on(&Recorded::default(), &root)).unwrap();
-
-        let text = std::fs::read_to_string(done.manifest).unwrap();
         assert_eq!(
-            text,
+            ran.written(),
+            (
+                Some(2026),
+                vec![
+                    "2026 (64-bit)".into(),
+                    "2025 (64-bit)".into(),
+                    "2024 (64-bit)".into()
+                ],
+                Some(Retarget::Year(2025))
+            )
+        );
+        assert!(
+            ran.manifest.contains("labview = \">=2026\""),
+            "{}",
+            ran.manifest
+        );
+        assert_eq!(ran.done.labview, Some(2026));
+    }
+
+    #[test]
+    fn the_newest_is_chosen_whatever_order_the_installations_come_in() {
+        let ran = Ran::init("init-order-in", vec![lv(2024, 64), lv(2026, 64)], None);
+
+        assert_eq!(ran.written().0, Some(2026));
+        assert_eq!(ran.written().2, Some(Retarget::Year(2024)));
+    }
+
+    #[test]
+    fn a_labview_version_overrides_the_newest_and_offers_the_newest_instead() {
+        let ran = Ran::init("init-flag", vec![lv(2026, 64), lv(2025, 64)], Some("2025"));
+
+        assert_eq!(ran.written().0, Some(2025));
+        assert!(
+            ran.manifest.contains("labview = \">=2025\""),
+            "{}",
+            ran.manifest
+        );
+        assert_eq!(ran.written().2, Some(Retarget::Year(2026)));
+    }
+
+    #[test]
+    fn the_oldest_installation_still_offers_another_when_chosen_by_flag() {
+        let ran = Ran::init(
+            "init-flag-oldest",
+            vec![lv(2026, 64), lv(2025, 64), lv(2024, 64)],
+            Some("2024"),
+        );
+
+        assert_eq!(ran.written().2, Some(Retarget::Year(2026)));
+    }
+
+    #[test]
+    fn a_flag_year_that_is_not_installed_is_written_and_offers_nothing() {
+        let ran = Ran::init(
+            "init-flag-absent",
+            vec![lv(2026, 64), lv(2024, 64)],
+            Some("2025"),
+        );
+
+        assert_eq!(ran.written().0, Some(2025));
+        assert!(
+            ran.manifest.contains("labview = \">=2025\""),
+            "{}",
+            ran.manifest
+        );
+        assert_eq!(ran.written().2, None);
+        assert_eq!(ran.events.len(), 1, "no warning when the flag named one");
+    }
+
+    #[test]
+    fn one_installation_offers_nothing() {
+        let ran = Ran::init("init-one", vec![lv(2026, 64)], None);
+
+        assert_eq!(
+            ran.written(),
+            (Some(2026), vec!["2026 (64-bit)".into()], None)
+        );
+    }
+
+    #[test]
+    fn two_bitnesses_of_a_year_choose_the_64_bit_and_offer_the_other_by_path() {
+        for targets in [
+            vec![lv(2026, 32), lv(2026, 64)],
+            vec![lv(2026, 64), lv(2026, 32)],
+        ] {
+            let ran = Ran::init("init-bitness", targets, None);
+
+            assert_eq!(
+                ran.written(),
+                (
+                    Some(2026),
+                    vec!["2026 (64-bit)".into(), "2026 (32-bit)".into()],
+                    Some(Retarget::Path(lv(2026, 32).path))
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn a_64_bit_older_year_does_not_outrank_a_newer_32_bit_one() {
+        let ran = Ran::init("init-year-first", vec![lv(2025, 64), lv(2026, 32)], None);
+
+        assert_eq!(ran.written().0, Some(2026));
+        assert_eq!(ran.written().2, Some(Retarget::Year(2025)));
+    }
+
+    #[test]
+    fn with_no_labview_the_manifest_has_none_and_init_warns_and_succeeds() {
+        let ran = Ran::init("init-no-labview", Vec::new(), None);
+
+        assert_eq!(
+            ran.manifest,
             "[project]\nname = \"App\"\nversion = \"0.1.0\"\n\n[dependencies]\n"
         );
-        let _ = std::fs::remove_dir_all(&scratch);
+        assert_eq!(ran.done.labview, None);
+        assert_eq!(ran.written(), (None, Vec::new(), None));
+        assert_eq!(ran.events[1..], [Event::InitNoLabview]);
+    }
+
+    #[test]
+    fn with_no_labview_a_flag_still_names_the_year_and_nothing_warns() {
+        let ran = Ran::init("init-no-labview-flag", Vec::new(), Some("2023"));
+
+        assert!(
+            ran.manifest.contains("labview = \">=2023\""),
+            "{}",
+            ran.manifest
+        );
+        assert_eq!(ran.events.len(), 1, "{:?}", ran.events);
     }
 
     #[test]

@@ -393,12 +393,33 @@ pub enum Event {
 
     // ---- ops::init ----
     /// `init` wrote the project's manifest. `labview` is the year its `labview`
-    /// states, if it has one.
-    InitManifestWritten { path: PathBuf, labview: Option<u32> },
+    /// states, if it has one. `installed` labels every LabVIEW installation,
+    /// newest first (`2026 (64-bit)`), and `retarget` is how to choose another
+    /// one: `None` when there is no other installation, or none was chosen.
+    InitManifestWritten {
+        path: PathBuf,
+        labview: Option<u32>,
+        installed: Vec<String>,
+        retarget: Option<Retarget>,
+    },
+    /// No LabVIEW is installed and `--labview-version` was not given, so the
+    /// manifest has no `labview`.
+    InitNoLabview,
 
     // ---- ops::query ----
     /// A package's archive is not cached and is about to be downloaded.
     ArchiveFetching { name: String, version: String },
+}
+
+/// What `--labview-version` takes to name another installation than the one
+/// `init` chose, as `target::select` reads it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "by", content = "value", rename_all = "snake_case")]
+pub enum Retarget {
+    /// The other installation's year, when it differs from the chosen one's.
+    Year(u32),
+    /// An installation's path, for the other bitness of the chosen year.
+    Path(PathBuf),
 }
 
 /// A package at a version, as a plan lists it.

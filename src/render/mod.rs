@@ -156,7 +156,7 @@ impl Renderer {
             Event::HeadlessInstallationChosen { .. } | Event::HeadlessImpliesLocked => {
                 headless::render(self, event)
             }
-            Event::InitManifestWritten { .. } => init::render(self, event),
+            Event::InitManifestWritten { .. } | Event::InitNoLabview => init::render(self, event),
             Event::ArchiveFetching { .. } => query::render(self, event),
         }
     }

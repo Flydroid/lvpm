@@ -583,7 +583,7 @@ fn run(cli: &Cli) -> Result<Report> {
         }
         Cmd::Init => {
             let done = ops::init::run(&env).map_err(|why| anyhow!(render::init::error(&why)))?;
-            Report::new(render::init::initialized(), &done)
+            Report::new(render::init::initialized(done.labview), &done)
         }
         Cmd::Install {
             package,

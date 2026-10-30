@@ -50,3 +50,9 @@ Feature: lvpm init starts a project (S10a)
       | value |
       | abc   |
       | 26.3  |
+
+  @labview @interactive-labview
+  Scenario: labview is the newest installed
+    Given the LabVIEW installations "lvpm targets" lists
+    When I run "lvpm init" in an empty folder
+    Then lvpm.toml says labview ">=" the newest listed year
