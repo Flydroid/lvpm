@@ -1,6 +1,8 @@
 [workspace]
-members = ["crates/lvpm-core", "crates/lvpm-testkit", "crates/lvpm-tui"]
+members = ["crates/lvpm-core", "crates/lvpm-testkit", "crates/lvpm-tui", "e2e"]
 # Plain `cargo test` also runs the TUI's and the testkit's tests; core's run inside tests/workspace.rs.
+# e2e/ (upstream's runner for NI's LabVIEW containers) is not built by plain `cargo build`/`test`;
+# `--workspace` builds it too.
 default-members = [".", "crates/lvpm-testkit", "crates/lvpm-tui"]
 
 [workspace.package]

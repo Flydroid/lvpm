@@ -37,6 +37,32 @@ pub(super) fn render(r: &mut Renderer, event: &Event) {
                 );
             }
         }
+        Event::VipmManifestConverted {
+            path,
+            unused,
+            labview,
+            dev_dependencies,
+        } => {
+            r.line(
+                Stream::Err,
+                &format!("manifest: {} (VIPM format, converted)", path.display()),
+            );
+            if !unused.is_empty() {
+                r.line(Stream::Err, &format!("  not used: {}", unused.join(", ")));
+            }
+            if let Some(lv) = labview {
+                r.line(
+                    Stream::Err,
+                    &format!("  labview-version {lv:?} read as minimum labview = \">={lv}\""),
+                );
+            }
+            if *dev_dependencies > 0 {
+                r.line(
+                    Stream::Err,
+                    "  [dev-dependencies] read as lvpm's [dev-dependencies]",
+                );
+            }
+        }
         Event::InstallTarget {
             labview: Some(label),
             path,

@@ -79,6 +79,7 @@ impl Renderer {
             | Event::VenvLabviewLeftOpen { .. }
             | Event::NothingToRelink { .. } => relink::render(self, event),
             Event::ManifestInUse { .. }
+            | Event::VipmManifestConverted { .. }
             | Event::InstallTarget { .. }
             | Event::IndexesLoading
             | Event::IndexesLoaded { .. }
@@ -146,7 +147,9 @@ impl Renderer {
             | Event::SyncMigration { .. }
             | Event::SyncPlanned { .. }
             | Event::SyncNothingToDo => sync::render(self, event),
-            Event::VenvLabviewStarting { .. } => launch::render(self, event),
+            Event::VenvLabviewStarting { .. }
+            | Event::VenvLabviewStillStarting { .. }
+            | Event::PortInTimeWait { .. } => launch::render(self, event),
             Event::LabviewStarting { .. } => viserver::render(self, event),
             Event::VenvSelected { .. } => env::render(self, event),
             Event::HeadlessInstallationChosen { .. } | Event::HeadlessImpliesLocked => {

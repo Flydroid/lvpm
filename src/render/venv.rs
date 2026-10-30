@@ -18,12 +18,25 @@ fn binding(v: &Venv) -> String {
 }
 
 /// What `lvpm venv create` prints.
-pub fn created(v: &Venv) -> String {
+/// `manifest` is the one `--manifest` named, if any.
+pub fn created(v: &Venv, manifest: Option<&Path>) -> String {
+    let not_lvpm_toml =
+        manifest.is_some_and(|m| m.file_name() != Some(project::FILE_NAME.as_ref()));
+    let next = match not_lvpm_toml {
+        // shortcut: lock and sync read only lvpm.toml; say how once another manifest can be locked.
+        true => format!(
+            "`lvpm launch` starts LabVIEW on it (its packages cannot be installed yet: `lvpm install` reads only {})",
+            project::FILE_NAME
+        ),
+        false => format!(
+            "`lvpm install` puts {}'s [dependencies] into it, `lvpm launch` starts LabVIEW on it",
+            project::FILE_NAME
+        ),
+    };
     format!(
-        "created {}\n{}\nnext: `lvpm install` puts {}'s [dependencies] into it, `lvpm launch` starts LabVIEW on it\n",
+        "created {}\n{}\nnext: {next}\n",
         v.dir.display(),
-        binding(v),
-        project::FILE_NAME
+        binding(v)
     )
 }
 
@@ -36,9 +49,10 @@ pub fn status(status: Option<&VenvStatus>, searched_from: &Path) -> String {
         );
     };
     let v = &status.venv;
-    let running = match status.running {
-        true => "running on this venv",
-        false => "not running on this venv",
+    let running = match (status.running, status.starting) {
+        (true, _) => "running on this venv",
+        (false, true) => "starting on this venv",
+        (false, false) => "not running on this venv",
     };
     format!(
         "{}\n  project        {}\n{}  packages       {} installed, {} not yet relinked\n  LabVIEW        {running}\n",
@@ -88,12 +102,19 @@ mod tests {
     fn a_created_venv_says_what_it_is_bound_to_and_what_to_do_next() {
         let v = venv();
         assert_eq!(
-            created(&v),
+            created(&v, None),
             format!(
                 "created {}\n  bound to       LabVIEW 2026 (64-bit)  v26.3  (LabVIEW 2026)\n  VI Server port 3412\n\nnext: `lvpm install` puts lvpm.toml's [dependencies] into it, `lvpm launch` starts LabVIEW on it\n",
                 v.dir.display()
             )
         );
+    }
+
+    #[test]
+    fn a_venv_made_from_a_vipm_toml_offers_no_install_step() {
+        let text = created(&venv(), Some(Path::new("proj/vipm.toml")));
+        assert!(text.contains("next: `lvpm launch` starts LabVIEW on it (its packages"));
+        assert!(!text.contains("--manifest"));
     }
 
     #[test]
@@ -104,6 +125,7 @@ mod tests {
             installed: 3,
             not_relinked: 1,
             running: true,
+            starting: false,
         };
         assert_eq!(
             status(Some(&found), Path::new("proj")),

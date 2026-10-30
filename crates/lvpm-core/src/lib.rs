@@ -5,6 +5,9 @@
 // environment, which only `config` and `target` may read.
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
+#[cfg(not(any(windows, target_os = "linux")))]
+compile_error!("lvpm supports Windows and Linux; macOS is on the roadmap (docs/roadmap.md)");
+
 pub mod cache;
 pub mod config;
 pub mod distribution;
@@ -23,6 +26,7 @@ pub mod spec;
 pub mod target;
 pub mod venv;
 pub mod version;
+pub mod vipm_interop;
 pub mod viserver;
 
 // The lock workflow, and the operations a front end calls with the events and

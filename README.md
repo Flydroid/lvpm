@@ -156,6 +156,8 @@ below as one book, starting with a tutorial; CONTRIBUTING.md stays in the repo.
 | [docs/usage.md](docs/usage.md) | Commands and flags, `lvpm.toml`, `lvpm.lock`, add/remove/upgrade, venvs, package sources, configuration |
 | [docs/labview-integration.md](docs/labview-integration.md) | What an install does inside LabVIEW: relinking, install hooks, VI Server |
 | [docs/ci-docker.md](docs/ci-docker.md) | Running lvpm headless in NI's Windows container |
+| [docs/linux.md](docs/linux.md) | LabVIEW for Linux: what differs, measured in NI's Linux container |
+| [docs/manifest.md](docs/manifest.md) | The `lvpm.toml` format, and how a `vipm.toml` is read |
 | [docs/ogpm-model.md](docs/ogpm-model.md) | The OpenG package model lvpm implements, mapped term by term |
 | [docs/adr/](docs/adr/README.md) | Architecture decisions, and why |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Development setup, PR rules, releases, code layout |
@@ -174,7 +176,8 @@ below as one book, starting with a tutorial; CONTRIBUTING.md stays in the repo.
   and one failed download aborts the rest of the plan.
 - In NI's LabVIEW Linux images CI runs only the smoke flow
   ([Continuous integration](CONTRIBUTING.md#continuous-integration)); the
-  `@labview` acceptance scenarios run in the Windows image only.
+  `@labview` acceptance scenarios run in the Windows image only. Linux does
+  not yet honour a package's `Exclusive_OS` ([docs/linux.md](docs/linux.md)).
 - In a venv, install hooks are extracted but never run (they act on the
   LabVIEW installation, not on an overlay), and file groups aimed at machine
   locations (`<OS ...>`, `<temp>`) are skipped. Both are recorded in the

@@ -418,7 +418,13 @@ enum Cmd {
 enum VenvCmd {
     /// Create `.lv-venv/` for the project here by default and bind it to a LabVIEW:
     /// `--labview-version`, else the manifest's `labview`.
-    Create,
+    Create {
+        /// Use this manifest (an `lvpm.toml` or a `vipm.toml`) instead of
+        /// looking for an `lvpm.toml`; the venv goes beside it and no
+        /// skeleton is written.
+        #[arg(long, value_name = "FILE")]
+        manifest: Option<PathBuf>,
+    },
     /// Which venv commands run here would use, and what it is bound to.
     Status,
     /// Delete the venv and everything installed in it.
@@ -762,9 +768,12 @@ fn cmd_sync(env: &OpEnv, options: &SyncOptions) -> Result<()> {
 
 fn cmd_venv(env: &OpEnv, sub: &VenvCmd, under_json: bool) -> Result<Report> {
     match sub {
-        VenvCmd::Create => {
-            let created = ops::venv_cmd::create(env)?;
-            Ok(Report::said(render::venv::created(&created), "venv"))
+        VenvCmd::Create { manifest } => {
+            let created = ops::venv_cmd::create(env, manifest.as_deref())?;
+            Ok(Report::said(
+                render::venv::created(&created, manifest.as_deref()),
+                "venv",
+            ))
         }
         VenvCmd::Status => {
             let status = ops::venv_cmd::status(env)?;

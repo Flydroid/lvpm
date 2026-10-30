@@ -140,7 +140,7 @@ pub fn run_relink(
     options: &RelinkOptions,
     work: &[(String, Vec<PathBuf>)],
 ) -> Result<()> {
-    let vi = relink::locate_vi()?;
+    let vi = relink::locate_vi(&env.work_dir())?;
     // One walk covers every folder nested under it, so overlapping packages
     // share a run instead of relinking the same tree twice — 18 of the first
     // pass's 109 folders were nested repeats costing 17 of its 61 minutes.

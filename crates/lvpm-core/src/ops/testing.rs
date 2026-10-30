@@ -146,6 +146,7 @@ pub(crate) fn venv_in(repo: &Path) -> Venv {
     venv::create(
         repo,
         Some("2026"),
+        None,
         Path::new(".lv-venv"),
         &[labview_2026()],
         &NullSink,

@@ -113,6 +113,7 @@ mod tests {
             installed: 2,
             not_relinked: 1,
             running: false,
+            starting: false,
         };
         assert_eq!(
             serde_json::json!(status),
@@ -125,7 +126,8 @@ mod tests {
                 },
                 "installed": 2,
                 "not_relinked": 1,
-                "running": false
+                "running": false,
+                "starting": false
             })
         );
     }
