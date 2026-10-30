@@ -48,7 +48,7 @@ pub(super) fn render(r: &mut Renderer, event: &Event) {
                 &format!("manifest: {} (VIPM format, converted)", path.display()),
             );
             if !unused.is_empty() {
-                r.line(Stream::Err, &format!("  not used: {}", unused.join(", ")));
+                r.line(Stream::Err, &super::printable(format!("  not used: {}", unused.join(", "))));
             }
             if let Some(lv) = labview {
                 r.line(

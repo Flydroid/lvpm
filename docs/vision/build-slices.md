@@ -557,7 +557,7 @@ Acceptance criteria:
 
 Demo: `lvpm init --from` an existing `.vipc` project, then `lvpm sync`.
 
-Decide in `/specs`: `.dragon` as well; pinned (exact) or floor (`>=`) constraints from a `.vipc`.
+Decided: a `.dragon` is refused; a pinned package is an exact version and any other a floor (`>=`).
 
 ### Slice S10b: `lvpm info`
 

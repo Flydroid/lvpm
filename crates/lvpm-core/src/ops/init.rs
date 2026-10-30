@@ -7,6 +7,7 @@ use super::env::OpEnv;
 use crate::errors::InitError;
 use crate::events::{AddedDependency, Event, Retarget, SourceKind};
 use crate::git::{self, Runner};
+use crate::lockfile::constraint_text;
 use crate::manifest_edit::DependencyTable;
 use crate::project::Constraint;
 use crate::target::LvTarget;
@@ -53,7 +54,7 @@ pub struct Seed {
     pub dev_deps: Vec<(String, String)>,
     /// How many packages the source marks as another's dependency and so left out.
     pub skipped: usize,
-    /// `[nipm.dependencies]` as the source wrote it, carried over unread.
+    /// `[nipm.dependencies]` as the source wrote it, carried over as written.
     pub nipm: Option<Table>,
     /// The fields of the source that `lvpm.toml` has no use for, when its reader
     /// reports them.
@@ -124,10 +125,12 @@ fn installation_label(target: &LvTarget) -> String {
 }
 
 /// Write an `lvpm.toml` in the project root — `--project`, else the directory
-/// the command ran in — named after its folder. `labview` is `--labview-version`
+/// the command ran in — named after its folder, unless `from` is a `vipm.toml`, whose
+/// `[project]` gives the name and version. `labview` is `--labview-version`
 /// when given, else the newest LabVIEW installed, and left out when there is none.
 /// `from` (`--from`, relative to the working directory) adds the packages that file
-/// chose as dependencies; its own LabVIEW is reported and never used. Once the
+/// chose as dependencies (a `vipm.toml` also gives its `[dev-dependencies]` and
+/// `[nipm.dependencies]`); its own LabVIEW is reported and never used. Once the
 /// manifest is written, the package archives `from` holds are imported into the
 /// cache, `git` makes the repository (the op does not know how git is run) and a
 /// venv is bound to the chosen LabVIEW when it can be.
@@ -244,30 +247,26 @@ fn read_vipm_toml(path: &Path, file: &str) -> anyhow::Result<Seed> {
     let refused = |why: String| anyhow!("{file}: {}", why.trim_end());
     let Converted { project, unused } =
         vipm_interop::parse_toml(&text).map_err(|why| refused(format!("{why:#}")))?;
+    // Only reported, never used: a value that is no year is not reported.
     let source_labview = project
         .labview
         .as_deref()
-        .map(|value| {
-            project::labview_year(value).map_err(|_| {
-                anyhow!("{file}: [project] labview-version {value:?} is not a LabVIEW year")
-            })
-        })
-        .transpose()?;
+        .and_then(|value| project::labview_year(value).ok());
     let doc: DocumentMut = text
         .parse()
         .map_err(|why: toml_edit::TomlError| refused(why.to_string()))?;
-    let exact = |entries: Vec<(String, Constraint)>| -> Vec<(String, String)> {
+    let as_text = |entries: Vec<(String, Constraint)>| -> Vec<(String, String)> {
         entries
             .into_iter()
-            .map(|(name, constraint)| (name, constraint_text(constraint)))
+            .map(|(name, constraint)| (name, constraint_text(&constraint)))
             .collect()
     };
     Ok(Seed {
         name: project.name,
         version: project.version,
         source_labview,
-        deps: exact(project.dependencies),
-        dev_deps: exact(project.dev_dependencies),
+        deps: as_text(project.dependencies),
+        dev_deps: as_text(project.dev_dependencies),
         nipm: doc
             .get("nipm")
             .and_then(|nipm| nipm.get("dependencies"))
@@ -275,15 +274,6 @@ fn read_vipm_toml(path: &Path, file: &str) -> anyhow::Result<Seed> {
         unused: Some(unused),
         ..Seed::default()
     })
-}
-
-/// A constraint as `lvpm.toml` writes it.
-fn constraint_text(constraint: Constraint) -> String {
-    match constraint {
-        Constraint::Exact(version) => version.raw,
-        Constraint::AtLeast(version) => format!(">={}", version.raw),
-        Constraint::Any => "*".to_string(),
-    }
 }
 
 /// The `.vipc` at `path`, with the archives it holds. Taking them is part of
@@ -364,7 +354,10 @@ fn with_nipm_dependencies(text: &str, dependencies: &Table) -> Result<String, In
     let mut doc: DocumentMut = text.parse().map_err(anyhow::Error::from)?;
     let mut nipm = Table::new();
     nipm.set_implicit(true);
-    nipm.insert("dependencies", Item::Table(dependencies.clone()));
+    // The source's header position would otherwise sort it above the skeleton's tables.
+    let mut dependencies = dependencies.clone();
+    dependencies.set_position(None);
+    nipm.insert("dependencies", Item::Table(dependencies));
     doc.insert("nipm", Item::Table(nipm));
     Ok(doc.to_string())
 }
@@ -1554,10 +1547,6 @@ build = "x"
                 "[dependencies]\na = \">=1.0\"\n",
                 "vipm.toml: [dependencies] \">=1.0\": vipm.toml requires an exact version",
             ),
-            (
-                "[project]\nlabview-version = \"latest\"\n",
-                "vipm.toml: [project] labview-version \"latest\" is not a LabVIEW year",
-            ),
         ];
         for (text, message) in cases {
             let (done, events, scratch) = init_from_vipm_toml("init-vipm-toml-bad", "App", text);
@@ -1572,6 +1561,25 @@ build = "x"
             assert_nothing_written(&scratch.join("App"));
             let _ = std::fs::remove_dir_all(&scratch);
         }
+    }
+
+    #[test]
+    fn a_vipm_toml_labview_version_that_is_no_year_is_not_reported() {
+        let (done, events, scratch) = init_from_vipm_toml(
+            "init-vipm-toml-latest",
+            "App",
+            "[project]\nlabview-version = \"latest\"\n",
+        );
+
+        assert!(done.is_ok());
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Event::InitManifestWritten {
+                source_labview: None,
+                ..
+            }
+        )));
+        let _ = std::fs::remove_dir_all(&scratch);
     }
 
     #[test]

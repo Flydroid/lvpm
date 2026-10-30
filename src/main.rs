@@ -180,8 +180,8 @@ enum Cmd {
     /// repository (left alone inside one) and bind a venv to that LabVIEW when it can. An
     /// existing lvpm.toml is never replaced, and nothing is written unless every check passes.
     Init {
-        /// Add the packages a VIPM .vipc chose as dependencies, and import the package archives
-        /// it holds into the cache. Its own LabVIEW is only reported.
+        /// Add the packages a VIPM .vipc or vipm.toml chose as dependencies, and import the
+        /// package archives a .vipc holds into the cache. Its own LabVIEW is only reported.
         /// Relative to the working directory. A .dragon file is refused.
         #[arg(long, value_name = "FILE")]
         from: Option<PathBuf>,

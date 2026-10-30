@@ -1005,6 +1005,17 @@ neither is a cross-cutting change.
   `tests/steps/init.rs`; no tests for hostile entry names (`../x.vip`) or
   corrupt-CRC entries (entry names are only compared, never used as paths).
 
+- **Slice 4 decisions.** init calls `vipm_interop::parse_toml` on the text
+  it read once, not `read_toml`, so nothing is reported before every check
+  passes; it emits the converter's `VipmManifestConverted` after the write,
+  with `labview: None`. Those converter lines (`manifest: ...`, `not used:
+  tool`) go to stderr through the shared renderer, unlike init's own lines.
+  A `labview-version` that is not a year is not reported (the spec says
+  "only reported"). Dev-dependencies are written but not listed in the
+  `added` lines. Deferred from review: no size cap on the vipm.toml read;
+  its package names are not checked with `lvpkg::check_name` (a hand-written
+  lvpm.toml has the same exposure); several frozen-test tightenings.
+
 ## Build Progress
 
 ### Slices (grouped by wave)
@@ -1030,7 +1041,7 @@ neither is a cross-cutting change.
   - [x] Step 5.1: docs
 
 #### Wave 5
-- [ ] Slice 4: `init --from vipm.toml`
+- [x] Slice 4: `init --from vipm.toml`
   - [x] Step 4.1: the `vipm.toml` arm
 
 ## Plan Review Summary

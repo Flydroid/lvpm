@@ -84,7 +84,7 @@ next: lvpm sync
   and why, and still succeeds; run `lvpm venv create` once you can.
 - With several LabVIEWs installed, init lists them. To use another one, delete
   the venv and bind a new one (edit `labview` in `lvpm.toml` too, if it is
-  lower than the version you pick):
+  higher than the version you pick):
 
   ```console
   $ lvpm venv remove

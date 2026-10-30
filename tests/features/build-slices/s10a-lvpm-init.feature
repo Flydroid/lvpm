@@ -278,7 +278,8 @@ Feature: lvpm init starts a project (S10a)
   Scenario: a vipm.toml with no labview-version gives no targets line
     Given a vipm.toml with only a [dependencies] table
     When I run "lvpm init --from vipm.toml --labview-version 2023" in its folder
-    Then the output does not say "the vipm.toml targets"
+    Then it succeeds
+    And the output does not say "the vipm.toml targets"
 
   # The lock and sync scenarios use a second fixture: only [dependencies]
   # labview_open_source_lib_serializer = "1.2.1.16", since the pilot feed holds

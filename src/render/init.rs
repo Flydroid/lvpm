@@ -78,7 +78,8 @@ pub(super) fn render(r: &mut Renderer, event: &Event) {
             for dependency in added {
                 r.line(
                     Stream::Out,
-                    &format!("  {} {}", dependency.name, dependency.constraint),
+                    // Names and constraints come from a file the user was handed.
+                    &super::printable(format!("  {} {}", dependency.name, dependency.constraint)),
                 );
             }
             if *skipped > 0 {

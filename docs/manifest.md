@@ -48,7 +48,8 @@ ni-daqmx-labview-support = "26.0"
 Every table is optional. A file containing only `[project]` is a valid
 manifest with no dependencies. `lvpm init` writes the first one:
 `name` from the directory, `version` `0.1.0`, `labview` and an empty
-`[dependencies]` ([usage.md](usage.md#starting-a-project)). `lvpm venv create`
+`[dependencies]`; with `--from` the `name` and `version` come from the source
+instead ([usage.md](usage.md#starting-a-project)). `lvpm venv create`
 writes the same skeleton, without `version`, only when it finds no manifest.
 
 ## Finding the manifest
@@ -69,7 +70,7 @@ manifest is found, its `[sources]` apply to every command that reads indexes
 manifest-driven install.
 
 Only the file name `lvpm.toml` is discovered. A `vipm.toml` is read only
-when named with `venv create --manifest`, and is converted first (see
+when named with `venv create --manifest` or `init --from`, and is converted first (see
 [Compatibility with `vipm.toml`](#compatibility-with-vipmtoml)).
 
 `venv create --manifest` puts the venv beside the manifest and binds it to
@@ -245,7 +246,7 @@ there is marked as unknown.
 
 ### Reading a `vipm.toml` with lvpm
 
-lvpm never discovers `vipm.toml`. Named with `--manifest`, it is converted
+lvpm never discovers `vipm.toml`. Named with `--manifest` (or `init --from`), it is converted
 into lvpm's model first (`crates/lvpm-core/src/vipm_interop.rs`) and then used exactly like
 an `lvpm.toml`. Every command that reads one says so:
 

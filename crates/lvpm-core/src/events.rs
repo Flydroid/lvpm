@@ -84,7 +84,8 @@ pub enum Event {
 
     // ---- vipm_interop ----
     /// A `vipm.toml` was read and converted. `unused` names the fields lvpm
-    /// has no use for; `labview` is VIPM's pinned year, read as a minimum.
+    /// has no use for; `labview` is VIPM's pinned year, read as a minimum
+    /// (`None` from `init`, which reports the year in `InitManifestWritten`).
     VipmManifestConverted {
         path: PathBuf,
         unused: Vec<String>,
