@@ -1,9 +1,10 @@
 <!-- spec-version: 14.0.1 -->
 # Spec: `lvpm init` and `init --from` (slice S10a)
 
-**Format:** dev-team specs 14.0.1 · **Status:** gate passed; the four stakeholder answers were given by the user on 2026-10-30 · **Date:** 2026-10-30 ·
+**Format:** dev-team specs 14.0.1 · **Status:** gate passed; the five stakeholder answers were given by the user on 2026-10-30 · **Date:** 2026-10-30 ·
 **Slice:** [#71](https://github.com/ThatsTheEnd/lvpm/issues/71), [S10a in build-slices.md](../vision/build-slices.md) ·
-**Rules:** [ADR 1](../adr/0001-manifest-project-and-distribution.md), [ADR 6](../adr/0006-lvpkg-only-vip-read-only.md)
+**Rules:** [ADR 1](../adr/0001-manifest-project-and-distribution.md), [ADR 6](../adr/0006-lvpkg-only-vip-read-only.md) ·
+**Depends on:** [#89](https://github.com/ThatsTheEnd/lvpm/pull/89) (the `vipm.toml` converter, `vipm_interop.rs`); build after it merges
 
 ## Intent Description
 
@@ -22,13 +23,19 @@ After this slice, one command leaves a folder ready to work in:
 `lvpm init --from project.vipc` does the same and also turns the packages the
 VIPM project chose into `[dependencies]`. `lvpm sync` then installs them.
 
+`lvpm init --from vipm.toml` does the same for VIPM 2026's TOML project file.
+#89 lets lvpm read a `vipm.toml` named with `--manifest`, but `lock` and
+`sync` read only `lvpm.toml`, so its packages cannot be installed. Init
+writes an `lvpm.toml` from it. After that the project is an ordinary lvpm
+project, and the `vipm.toml` stays where it is for VIPM.
+
 `.dragon` files are **out of scope and will not be worked on**: VIPM's
 `.dragon` format is discontinued. `init --from x.dragon` fails with a message
 saying so.
 
 ## Architecture Specification
 
-**The command.** `lvpm init [--from <file.vipc>]`, run in the folder that
+**The command.** `lvpm init [--from <file.vipc | vipm.toml>]`, run in the folder that
 becomes the project root (or `--project <DIR>`). It takes the global
 `--labview-version` and `--json` flags.
 
@@ -37,19 +44,23 @@ a check fails.
 
 1. Refuse if `lvpm.toml` already exists in the folder. *(#71 AC1)* A
    manifest in a parent folder is not this folder's and does not block.
-2. With `--from`: read and parse the `.vipc` (below). A `.dragon` file, a
-   file that is not a zip, or a zip with no `config.xml` fails here.
+2. With `--from`: read and parse the file (below). The kind is chosen by
+   name: `vipm.toml` (`vipm_interop::is_toml`), else `.vipc`. A `.dragon`
+   file, a `.vipc` that is not a zip or has no `config.xml`, or a `vipm.toml`
+   the converter rejects fails here.
 3. Pick the LabVIEW: `--labview-version` if given, else the newest detected
    (`target::detect` already sorts newest first). No LabVIEW detected and no
    flag: the manifest is written without `labview` and a warning says that
    `lvpm lock` needs it and how to add it.
-4. Write `lvpm.toml`: `[project]` with `name` (the folder name), `version =
-   "0.1.0"` and `labview = ">=<year>"`, then `[dependencies]`. The skeleton
+4. Write `lvpm.toml`: `[project]` with `name` (the folder name, or a
+   `vipm.toml`'s `name`), `version = "0.1.0"` (or a `vipm.toml`'s `version`)
+   and `labview = ">=<year>"`, then `[dependencies]`. The skeleton
    `venv::create` writes today moves into one function both use, so there is
    one manifest template.
-5. With `--from`: add each dependency with `manifest_edit::set`, and import
-   each package the `.vipc` embeds into the cache, the same import
-   `lvpm cache add` does.
+5. With `--from`: add each dependency with `manifest_edit::set`. From a
+   `.vipc`, also import each package it embeds into the cache, the same
+   import `lvpm cache add` does. From a `vipm.toml`, also write its
+   `[dev-dependencies]` and copy its `[nipm.dependencies]` table unchanged.
 6. `git init`, unless the folder is already inside a git work tree
    (`git rev-parse --is-inside-work-tree`) or `git` is not on `PATH`. Either
    way init goes on; it says which happened. No commit is made.
@@ -114,6 +125,19 @@ the `.vipc`'s LabVIEW differs from the chosen one.
 The XML is small and flat; read it with the `zip` crate lvpm already has and
 a minimal tag reader. No XML dependency for a handful of tags.
 
+**Reading a `vipm.toml`.** `vipm_interop::read_toml` (from #89) converts it
+into a `Project` and reports the fields it did not use
+(`Event::VipmManifestConverted`). Init writes that `Project` out:
+
+| `vipm.toml` | `lvpm.toml` written by init |
+|---|---|
+| `[project] name`, `version` | Copied |
+| `[project] labview-version` | Only reported, as the `.vipc`'s target is. `labview` is the chosen LabVIEW |
+| `[dependencies]` | Copied, exact as VIPM wrote them (the converter already reads them as exact) |
+| `[dev-dependencies]` | Copied to `[dev-dependencies]`, exact |
+| `[nipm.dependencies]` | Copied as written: lvpm only reports them, and the converter keeps names only |
+| everything else | Not written; listed in the converter's "not used" line |
+
 | Part | Where |
 |---|---|
 | CLI `init` subcommand | `src/main.rs` |
@@ -123,15 +147,17 @@ a minimal tag reader. No XML dependency for a handful of tags.
 | Events | `crates/lvpm-core/src/events.rs` |
 | Rendering | `src/render/edit.rs`, `src/render/mod.rs` |
 | Scenarios | `tests/features/build-slices/s10a-lvpm-init.feature` (new), in `tests/acceptance.rs` `FEATURE_FILES`. Venv steps run only with `LVPM_TEST_LABVIEW`, as other venv scenarios do |
-| Unit tests | `.vipc` parsing on a zip built in the test, LabVIEW choice on fake targets through `OpEnv::new` |
-| Docs | docs/usage.md: `init` in the command table, a short "Starting a project" section; vipm-cli-comparison.md: `.dragon` row says not planned |
+| `vipm.toml` reader | `crates/lvpm-core/src/vipm_interop.rs` (#89), used as is |
+| Unit tests | `.vipc` parsing on a zip built in the test, `vipm.toml` → `lvpm.toml` on the converter's documented example, LabVIEW choice on fake targets through `OpEnv::new` |
+| Docs | docs/usage.md: `init` in the command table, a short "Starting a project" section; docs/manifest.md: `init --from vipm.toml` under "Reading a `vipm.toml` with lvpm"; docs/cli.md: the `init` row leaves "Missing"; vipm-cli-comparison.md: `.dragon` row says not planned |
 
 **Unchanged.**
 - `lvpm venv create` behaves as today, including writing a skeleton when
   there is no manifest.
 - Lock and sync. Init does not lock: resolving reads the network, and
   `lvpm sync` locks first when there is no lock.
-- The manifest format.
+- The manifest format, and the `vipm.toml` conversion itself.
+- The `vipm.toml` file: init reads it and never changes or deletes it.
 
 ## Acceptance Criteria
 
@@ -183,18 +209,29 @@ no citation are inferences and are in the Ambiguity Log.
 14. **No `.dragon`.** `lvpm init --from x.dragon` exits ≠ 0 with a message
     that `.dragon` is not supported and not planned, and suggests a `.vipc`.
     *(user)*
-15. **Documented.** docs/usage.md lists `init` and `init --from` and the
-    `.vipc` rules above; vipm-cli-comparison.md marks `.dragon` as not
-    planned. *(inference: build-slices rules require docs for behaviour users
-    see)*
+15. **From a `vipm.toml`.** `lvpm init --from vipm.toml` writes an
+    `lvpm.toml` with the `vipm.toml`'s `name`, `version`, `[dependencies]`
+    and `[dev-dependencies]` (exact) and `[nipm.dependencies]`; `labview` is
+    the chosen LabVIEW, and a differing `labview-version` is reported. The
+    fields it did not use are listed. `lvpm sync` then installs the
+    dependencies. *(user, 2026-10-30; mapping is an inference)*
+16. **`vipm.toml` is left alone.** After init, the `vipm.toml` is byte for byte
+    what it was. *(inference)*
+17. **Documented.** docs/usage.md lists `init` and `init --from` and the
+    `.vipc` rules above; docs/manifest.md names `init --from vipm.toml` as the
+    way to move a `vipm.toml` project to lvpm; docs/cli.md no longer lists
+    `init` as missing; vipm-cli-comparison.md marks `.dragon` as not planned.
+    *(inference: build-slices rules require docs for behaviour users see)*
 
 Demo: `lvpm init --from` the Serializer `.vipc`, then `lvpm sync`. *(#71)*
+The same from a `vipm.toml`. *(user)*
 
 ## Glossary
 
 | Term | Definition | Status | Source |
 |------|------------|--------|--------|
 | `.vipc` | VIPM's project configuration: a zip whose `config.xml` lists the packages of one LabVIEW target, optionally with their `.vip` files inside | `verified` | the Serializer sample, read 2026-10-30 |
+| `vipm.toml` | VIPM 2026's TOML project file, with exact versions only; converted into lvpm's model by `vipm_interop.rs` | `verified` | #89, docs/manifest.md there |
 | `.dragon` | VIPM's older project file. Discontinued; not supported by lvpm and not planned | `verified` | user, 2026-10-30 |
 | chosen LabVIEW | The installation init writes into `labview` and binds the venv to: `--labview-version`, else the newest detected | `verified` | user, 2026-10-30 |
 | embedded package | A `.vipc` package with `Included = true`, whose `.vip` is inside the `.vipc` | `unverified` | inference; the sample embeds none |
@@ -207,6 +244,11 @@ Demo: `lvpm init --from` the Serializer `.vipc`, then `lvpm sync`. *(#71)*
 | `.vipc` packages marked `Dependency = true` | `requires-stakeholder-input` | user, 2026-10-30 | Skipped; the solver pulls them in. Declined: add every package. |
 | Exact or floor constraints from a `.vipc` (the slice asks /specs to decide) | `requires-stakeholder-input` | user, 2026-10-30 | Follow the `.vipc`'s `Pinned` flag: exact when pinned, `>=` otherwise. Declined: all exact; all floor. |
 | `.dragon` (the slice asks /specs to decide) | `requires-stakeholder-input` | user, 2026-10-30 | Out of scope and will not be worked on: the format is discontinued. A `.dragon` gets a clear error. |
+| `init --from vipm.toml` | `requires-stakeholder-input` | user, 2026-10-30 | In scope, reusing #89's converter, because in this fork a `vipm.toml`'s packages cannot otherwise be locked or synced. |
+| Constraints from a `vipm.toml` | `inferable` | inference | Exact, as written. A `vipm.toml` has no pinned flag to follow, and #89's converter already reads them as exact. Turning them into floors would quietly change what the VIPM project asked for. |
+| `labview` from a `vipm.toml` | `inferable` | inference | The chosen LabVIEW, with `labview-version` reported: the same rule the user chose for a `.vipc`. |
+| `[nipm.dependencies]` from a `vipm.toml` | `inferable` | inference | Copied as written. The converter keeps only names, and lvpm only reports NIPM packages, so the table is carried over rather than rebuilt. |
+| What happens to the `vipm.toml` | `inferable` | inference | Left untouched, so VIPM users on the same repository keep working. |
 | Folder already inside a git work tree | `inferable` | inference | Leave it: a nested `git init` would hide the project from the outer repository. |
 | Initial commit | `inferable` | inference | None. The user asked for a repository and a remote hint, not history; the hint shows the commit command. |
 | `git` not installed | `inferable` | inference | Warn and go on. A project is usable without git; failing would lose the manifest and venv the user did ask for. |
@@ -225,8 +267,8 @@ Demo: `lvpm init --from` the Serializer `.vipc`, then `lvpm sync`. *(#71)*
 
 ## Consistency Gate
 - [x] Intent is unambiguous
-- [x] Every behavior/goal maps to an acceptance criterion (manifest → AC1–5; git → AC6; venv → AC7; `--from` → AC8–12; bad input and `.dragon` → AC13–14; docs → AC15)
-- [x] Architecture constrains without over-engineering (one new op, one shared skeleton, no new dependency)
+- [x] Every behavior/goal maps to an acceptance criterion (manifest → AC1–5; git → AC6; venv → AC7; `--from .vipc` → AC8–12; bad input and `.dragon` → AC13–14; `--from vipm.toml` → AC15–16; docs → AC17)
+- [x] Architecture constrains without over-engineering (one new op, one shared skeleton, the existing `vipm.toml` converter, no new dependency)
 - [x] Terminology consistent across artifacts
 - [x] No contradictions between artifacts
-- [x] Every gap/ambiguity finding is logged. The four `requires-stakeholder-input` items were answered by the user.
+- [x] Every gap/ambiguity finding is logged. The five `requires-stakeholder-input` items were answered by the user.
