@@ -176,3 +176,51 @@ Feature: lvpm init starts a project (S10a)
       | a file "p.dragon"  | p.dragon |
       | a file "P.DRAGON"  | P.DRAGON |
       | no file "p.dragon" | p.dragon |
+
+  # No real .vipc with an included package could be made (it needs the VIPM
+  # GUI), so these three put the archive where the design guesses it is:
+  # <name>-<version>.vip at any depth.
+  # `lvpm cache list` does not exist yet, so the cache is read through
+  # `lvpm search --all`, which lists what `lvpm cache add` imported.
+  Scenario: an embedded package is imported into the cache (synthetic layout)
+    Given a VIPM configuration "p.vipc" that embeds labview_open_source_project_lib_labview_open_source_palette 1.0.2.7 as "Packages/labview_open_source_project_lib_labview_open_source_palette-1.0.2.7.vip"
+    And no folder feed
+    When I run "lvpm init --from p.vipc --labview-version 2023" in its folder
+    Then the output has the line "  imported labview_open_source_project_lib_labview_open_source_palette 1.0.2.7 from p.vipc"
+    And "lvpm search --all" lists labview_open_source_project_lib_labview_open_source_palette 1.0.2.7
+    And "lvpm lock" succeeds in the folder
+
+  Scenario: an Included package missing from the zip is a warning (synthetic layout)
+    Given a VIPM configuration "p.vipc" marking demo_lib 1.0.0 included but holding no archive for it
+    When I run "lvpm init --from p.vipc --labview-version 2023" in its folder
+    Then it succeeds
+    And lvpm.toml [dependencies] has demo_lib = ">=1.0.0"
+    And the output says "warning: demo_lib 1.0.0 is marked Included but is not inside p.vipc"
+
+  Scenario: a corrupt embedded package writes nothing (synthetic layout)
+    Given a VIPM configuration "p.vipc" marking demo_lib 1.0.0 included, with a "demo_lib-1.0.0.vip" inside that is not a package
+    When I run "lvpm init --from p.vipc --labview-version 2023" in its folder
+    Then it fails with "p.vipc: embedded demo_lib-1.0.0.vip is not a package"
+    And the folder has no lvpm.toml, no .git and no .lv-venv
+    And the cache holds nothing
+
+  @labview @interactive-labview
+  Scenario: sync installs what init added
+    Given a folder feed with the pilot packages
+    And a VIPM configuration "Serializer.vipc" choosing labview_open_source_lib_serializer 1.2.1.16, not pinned
+    When I run "lvpm init --from Serializer.vipc --labview-version 2026" in its folder
+    And I run "lvpm sync" in the same folder
+    Then it succeeds
+    And the venv holds labview_open_source_lib_serializer in its add-on folder and no staging folder
+    And the venv holds labview_open_source_lib_data_manipulation in its add-on folder and no staging folder
+    And the venv holds labview_open_source_project_lib_labview_open_source_palette in its add-on folder and no staging folder
+
+  # Built on the same guessed layout as the three above.
+  @labview @interactive-labview
+  Scenario: sync installs an embedded package with no feed
+    Given a VIPM configuration "p.vipc" that embeds labview_open_source_project_lib_labview_open_source_palette 1.0.2.7
+    And no folder feed
+    When I run "lvpm init --from p.vipc --labview-version 2026" in its folder
+    And I run "lvpm sync" in the same folder
+    Then it succeeds
+    And the venv holds labview_open_source_project_lib_labview_open_source_palette in its add-on folder and no staging folder

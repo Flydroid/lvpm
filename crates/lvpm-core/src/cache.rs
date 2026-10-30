@@ -234,10 +234,11 @@ impl Cache {
     /// Atomically record package ownership by absolute source path and its stat link.
     /// The caller must store the blob and compute both digests first. Package rows
     /// survive original-file deletion; missing timestamps disable the stat shortcut.
+    /// `metadata` is `None` when no file backs `path` (a label), so there is no stat link.
     pub(crate) fn record_import(
         &self,
         path: &Path,
-        metadata: &std::fs::Metadata,
+        metadata: Option<&std::fs::Metadata>,
         entry: &LocalEntry,
         sha256: &str,
         md5: &str,
@@ -251,14 +252,16 @@ impl Cache {
              entry=excluded.entry, added_at=excluded.added_at",
             params![entry.name, entry.version, sha256, md5, path.to_string_lossy(), entry.display_name, serde_json::to_string(entry)?, now()],
         )?;
-        if file_modified(metadata).is_none() {
-            self.forget_local(path)?;
+        if let Some(metadata) = metadata {
+            if file_modified(metadata).is_none() {
+                self.forget_local(path)?;
+            }
+            self.record_local(path, metadata, entry)?;
+            transaction.execute(
+                "UPDATE local_files SET sha256=?2 WHERE path=?1",
+                params![path.to_string_lossy(), sha256],
+            )?;
         }
-        self.record_local(path, metadata, entry)?;
-        transaction.execute(
-            "UPDATE local_files SET sha256=?2 WHERE path=?1",
-            params![path.to_string_lossy(), sha256],
-        )?;
         transaction.commit()?;
         Ok(())
     }

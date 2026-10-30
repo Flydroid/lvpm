@@ -88,6 +88,29 @@ pub(super) fn render(r: &mut Renderer, event: &Event) {
                 );
             }
         }
+        Event::InitPackageImported {
+            name,
+            version,
+            from,
+        } => r.line(
+            Stream::Out,
+            &format!("  imported {name} {version} from {from}"),
+        ),
+        Event::InitPackageNotEmbedded {
+            name,
+            version,
+            from,
+        } => r.line(
+            Stream::Err,
+            &format!("warning: {name} {version} is marked Included but is not inside {from}"),
+        ),
+        Event::InitPackageImportFailed { name, version, why } => r.line(
+            Stream::Err,
+            &format!(
+                "warning: could not import {name} {version} into the cache: {why}; \
+                 add it later with lvpm cache add <archive>"
+            ),
+        ),
         Event::InitGit { outcome } => git(r, outcome),
         _ => unreachable!("routed here by Renderer::render: {event:?}"),
     }
@@ -270,6 +293,45 @@ mod tests {
         let (mut renderer, out, _) = renderer();
         renderer.render(&added(&[], 0));
         assert_eq!(out.text(), "added 0 dependencies from p.vipc\n");
+    }
+
+    #[test]
+    fn an_imported_package_is_a_line_on_stdout_and_a_missing_one_a_warning_on_stderr() {
+        let (mut renderer, out, err) = renderer();
+        renderer.render(&Event::InitPackageImported {
+            name: "demo_lib".into(),
+            version: "1.0.0".into(),
+            from: "p.vipc".into(),
+        });
+        assert_eq!(out.text(), "  imported demo_lib 1.0.0 from p.vipc\n");
+        assert_eq!(err.text(), "");
+
+        renderer.render(&Event::InitPackageNotEmbedded {
+            name: "demo_lib".into(),
+            version: "1.0.0".into(),
+            from: "p.vipc".into(),
+        });
+        assert_eq!(out.text(), "  imported demo_lib 1.0.0 from p.vipc\n");
+        assert_eq!(
+            err.text(),
+            "warning: demo_lib 1.0.0 is marked Included but is not inside p.vipc\n"
+        );
+    }
+
+    #[test]
+    fn a_failed_import_is_a_warning_with_the_reason_and_how_to_add_it_later() {
+        let (mut renderer, out, err) = renderer();
+        renderer.render(&Event::InitPackageImportFailed {
+            name: "demo_lib".into(),
+            version: "1.0.0".into(),
+            why: "disk full".into(),
+        });
+        assert_eq!(out.text(), "");
+        assert_eq!(
+            err.text(),
+            "warning: could not import demo_lib 1.0.0 into the cache: disk full; \
+             add it later with lvpm cache add <archive>\n"
+        );
     }
 
     #[test]
@@ -486,6 +548,13 @@ mod tests {
 
     #[test]
     fn a_bad_from_file_says_nothing_was_written_and_a_dragon_file_is_not_supported() {
+        assert_eq!(
+            error(&InitError::BadSource {
+                why: "p.vipc: embedded demo_lib-1.0.0.vip is not a package: not a zip".into()
+            }),
+            "p.vipc: embedded demo_lib-1.0.0.vip is not a package: not a zip; \
+             nothing was written"
+        );
         assert_eq!(
             error(&InitError::BadSource {
                 why: "p.vipc: not a zip file".into()

@@ -180,6 +180,38 @@ mod tests {
     }
 
     #[test]
+    fn the_package_events_init_sends_keep_their_field_names() {
+        let (name, version, from) = ("demo_lib".to_string(), "1.0.0".to_string(), "p.vipc");
+        assert_eq!(
+            serde_json::json!(Event::InitPackageImported {
+                name: name.clone(),
+                version: version.clone(),
+                from: from.into(),
+            }),
+            serde_json::json!({"event": "init_package_imported", "data":
+                {"name": "demo_lib", "version": "1.0.0", "from": "p.vipc"}})
+        );
+        assert_eq!(
+            serde_json::json!(Event::InitPackageNotEmbedded {
+                name: name.clone(),
+                version: version.clone(),
+                from: from.into(),
+            }),
+            serde_json::json!({"event": "init_package_not_embedded", "data":
+                {"name": "demo_lib", "version": "1.0.0", "from": "p.vipc"}})
+        );
+        assert_eq!(
+            serde_json::json!(Event::InitPackageImportFailed {
+                name,
+                version,
+                why: "disk full".into(),
+            }),
+            serde_json::json!({"event": "init_package_import_failed", "data":
+                {"name": "demo_lib", "version": "1.0.0", "why": "disk full"}})
+        );
+    }
+
+    #[test]
     fn no_labview_is_an_event_with_no_data() {
         assert_eq!(
             serde_json::json!(Event::InitNoLabview),

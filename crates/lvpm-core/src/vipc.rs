@@ -3,19 +3,23 @@
 //! it understands from the one `<Target>` and refuses everything else, with an
 //! error that names the file. No XML dependency: the file is small and flat.
 
+use crate::index::entry_from_bytes;
 use crate::lvpkg::check_name;
-use crate::ops::init::Seed;
+use crate::ops::init::{Embedded, Seed};
 use crate::project::same_name;
 use crate::version::is_version;
 use anyhow::{Result, anyhow};
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Seek};
 use std::path::Path;
 use zip::ZipArchive;
 use zip::result::ZipError;
 
 /// The most of `config.xml` that is read; a real one is a few KiB.
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
+
+/// The most of one embedded package archive that is read.
+const MAX_EMBEDDED_BYTES: u64 = 256 * 1024 * 1024;
 
 /// One `<Package>` of the target.
 #[derive(Debug, Clone, PartialEq)]
@@ -45,13 +49,18 @@ pub fn read(path: &Path, label: &str) -> Result<Vipc> {
     parse(&config).map_err(|what| anyhow!("{label}: config.xml: {what}"))
 }
 
-/// The text of the archive's `config.xml`; the error is what is wrong with the file.
-fn read_config(path: &Path) -> Result<String, String> {
+/// The zip at `path`; the error is what is wrong with the file.
+fn open(path: &Path) -> Result<ZipArchive<File>, String> {
     let file = File::open(path).map_err(|e| format!("cannot be read: {e}"))?;
-    let mut zip = ZipArchive::new(file).map_err(|e| match e {
+    ZipArchive::new(file).map_err(|e| match e {
         ZipError::Io(e) => format!("cannot be read: {e}"),
         _ => "not a zip file".to_string(),
-    })?;
+    })
+}
+
+/// The text of the archive's `config.xml`; the error is what is wrong with the file.
+fn read_config(path: &Path) -> Result<String, String> {
+    let mut zip = open(path)?;
     let entry = zip.by_name("config.xml").map_err(|e| match e {
         ZipError::FileNotFound => "config.xml is missing".to_string(),
         e => format!("config.xml: {e}"),
@@ -187,6 +196,77 @@ impl Vipc {
         }
         seed
     }
+
+    /// Add to `seed` the package archives the `.vipc` at `path` holds: those of
+    /// the packages it marks `Included` that `seed` takes as dependencies (an
+    /// included `Dependency` is left to lock). A package it names with no
+    /// archive inside goes to `not_embedded`; an archive that cannot be taken
+    /// is an error, and `seed` is then not to be used.
+    pub fn embed(&self, path: &Path, label: &str, seed: &mut Seed) -> Result<()> {
+        let held: Vec<&Package> = self
+            .packages
+            .iter()
+            .filter(|p| p.included && !p.dependency)
+            .collect();
+        if held.is_empty() {
+            return Ok(());
+        }
+        let mut zip = open(path).map_err(|what| anyhow!("{label}: {what}"))?;
+        for package in held {
+            let found = find_archive(&mut zip, package, MAX_EMBEDDED_BYTES)
+                .map_err(|what| anyhow!("{label}: {what}"))?;
+            let (name, version) = (package.name.clone(), package.version.clone());
+            match found {
+                Some((entry, bytes)) => seed.embedded.push(Embedded {
+                    name,
+                    version,
+                    label: format!("{label}!/{entry}"),
+                    bytes,
+                }),
+                None => seed.not_embedded.push((name, version)),
+            }
+        }
+        Ok(())
+    }
+}
+
+/// `package`'s `<name>-<version>.vip` in `zip`, at any depth: its entry name
+/// and its bytes, read up to `cap`. `None` when no entry has that file name;
+/// the error is what is wrong with the archive. The entry name is only looked
+/// at, never used as a path, and one with a control character never matches.
+fn find_archive<R: Read + Seek>(
+    zip: &mut ZipArchive<R>,
+    package: &Package,
+    cap: u64,
+) -> Result<Option<(String, Vec<u8>)>, String> {
+    let wanted = format!("{}-{}.vip", package.name, package.version);
+    let mut found = Vec::new();
+    for at in 0..zip.len() {
+        let entry = zip.by_index_raw(at).map_err(|e| e.to_string())?;
+        let name = entry.name();
+        if name.rsplit(['/', '\\']).next() == Some(wanted.as_str())
+            && !name.chars().any(char::is_control)
+        {
+            found.push((at, name.to_string()));
+        }
+    }
+    let (at, entry) = match found.pop() {
+        None => return Ok(None),
+        Some(only) if found.is_empty() => only,
+        Some(_) => return Err(format!("more than one {wanted} inside")),
+    };
+    let not_a_package = |why: String| format!("embedded {entry} is not a package: {why}");
+    let mut bytes = Vec::new();
+    zip.by_index(at)
+        .map_err(|e| not_a_package(e.to_string()))?
+        .take(cap + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| not_a_package(e.to_string()))?;
+    if bytes.len() as u64 > cap {
+        return Err(format!("embedded {entry} is larger than 256 MiB"));
+    }
+    entry_from_bytes(Path::new(&entry), &bytes).map_err(|e| not_a_package(format!("{e:#}")))?;
+    Ok(Some((entry, bytes)))
 }
 
 #[cfg(test)]
@@ -522,5 +602,181 @@ mod tests {
             [("demo_lib".to_string(), ">=2.0.0.2".to_string())]
         );
         assert_eq!(seed.skipped, 0);
+    }
+
+    /// A package archive: a zip whose `spec` names `name` at `version`.
+    fn vip_bytes(name: &str, version: &str) -> Vec<u8> {
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        zip.start_file("spec", SimpleFileOptions::default())
+            .unwrap();
+        write!(zip, "[Package]\nName={name}\nVersion={version}\n").unwrap();
+        zip.finish().unwrap().into_inner()
+    }
+
+    fn demo_package() -> Package {
+        Package {
+            name: "demo_lib".into(),
+            version: "1.0.0".into(),
+            included: true,
+            dependency: false,
+            pinned: false,
+        }
+    }
+
+    type Found = Result<Option<(String, Vec<u8>)>, String>;
+
+    /// `find_archive` for `demo_lib-1.0.0` in a zip of `entries`, read up to `cap`.
+    fn found_in(entries: &[(&str, &[u8])], cap: u64) -> Found {
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for (name, bytes) in entries {
+            zip.start_file(*name, SimpleFileOptions::default()).unwrap();
+            zip.write_all(bytes).unwrap();
+        }
+        let mut zip = ZipArchive::new(zip.finish().unwrap()).unwrap();
+        find_archive(&mut zip, &demo_package(), cap)
+    }
+
+    const CAP: u64 = 1 << 20;
+
+    #[test]
+    fn an_archive_is_found_by_its_file_name_at_any_depth() {
+        let vip = vip_bytes("demo_lib", "1.0.0");
+        for entry in [
+            "demo_lib-1.0.0.vip",
+            "Packages/demo_lib-1.0.0.vip",
+            "a/b/c/demo_lib-1.0.0.vip",
+            "Packages\\demo_lib-1.0.0.vip",
+        ] {
+            let found = found_in(&[("config.xml", b"x"), (entry, &vip)], CAP);
+
+            assert_eq!(found, Ok(Some((entry.to_string(), vip.clone()))), "{entry}");
+        }
+    }
+
+    #[test]
+    fn an_entry_that_only_ends_alike_or_has_a_control_character_is_not_the_archive() {
+        let vip = vip_bytes("demo_lib", "1.0.0");
+        for entry in [
+            "xdemo_lib-1.0.0.vip",
+            "demo_lib-1.0.0.vip.bak",
+            "demo_lib-1.0.1.vip",
+            "demo_lib-1.0.0.vip/",
+            "\u{1b}[31m/demo_lib-1.0.0.vip",
+        ] {
+            assert_eq!(found_in(&[(entry, &vip)], CAP), Ok(None), "{entry:?}");
+        }
+        assert_eq!(found_in(&[], CAP), Ok(None));
+    }
+
+    #[test]
+    fn two_entries_with_the_archive_name_are_refused() {
+        let vip = vip_bytes("demo_lib", "1.0.0");
+
+        let why = found_in(
+            &[
+                ("a/demo_lib-1.0.0.vip", &vip),
+                ("b/demo_lib-1.0.0.vip", &vip),
+            ],
+            CAP,
+        );
+
+        assert_eq!(why, Err("more than one demo_lib-1.0.0.vip inside".into()));
+    }
+
+    #[test]
+    fn an_entry_of_exactly_the_cap_is_read_and_one_byte_over_is_refused() {
+        let vip = vip_bytes("demo_lib", "1.0.0");
+        let len = vip.len() as u64;
+
+        let at_cap = found_in(&[("demo_lib-1.0.0.vip", &vip)], len);
+        let over = found_in(&[("demo_lib-1.0.0.vip", &vip)], len - 1);
+
+        assert_eq!(at_cap.unwrap().map(|(_, bytes)| bytes), Some(vip));
+        assert_eq!(
+            over,
+            Err("embedded demo_lib-1.0.0.vip is larger than 256 MiB".into())
+        );
+    }
+
+    #[test]
+    fn an_entry_that_is_not_a_package_is_refused_with_the_reason() {
+        let why = found_in(&[("Packages/demo_lib-1.0.0.vip", b"not a zip")], CAP).unwrap_err();
+
+        assert!(
+            why.starts_with("embedded Packages/demo_lib-1.0.0.vip is not a package: "),
+            "{why}"
+        );
+    }
+
+    #[test]
+    fn embed_takes_the_included_chosen_archives_and_names_where_each_came_from() {
+        let dir = Dir::new("embed");
+        let vip = vip_bytes("demo_lib", "1.0.0");
+        let packages = [
+            package_xml("demo_lib-1.0.0", "true", "false", "false"),
+            package_xml("absent_lib-2.0.0", "true", "false", "false"),
+            package_xml("plain_lib-3.0.0", "false", "false", "false"),
+            package_xml("needed_lib-4.0.0", "true", "true", "false"),
+        ]
+        .concat();
+        let path = dir.vipc(&[
+            ("config.xml", demo(&packages).as_bytes()),
+            ("Packages/demo_lib-1.0.0.vip", &vip),
+            ("Packages/needed_lib-4.0.0.vip", &vip),
+        ]);
+        let vipc = read(&path, "p.vipc").unwrap();
+        let mut seed = vipc.seed();
+
+        vipc.embed(&path, "p.vipc", &mut seed).unwrap();
+
+        assert_eq!(seed.embedded.len(), 1);
+        let embedded = &seed.embedded[0];
+        assert_eq!(
+            (
+                &embedded.name[..],
+                &embedded.version[..],
+                &embedded.label[..]
+            ),
+            ("demo_lib", "1.0.0", "p.vipc!/Packages/demo_lib-1.0.0.vip")
+        );
+        assert_eq!(embedded.bytes, vip);
+        assert_eq!(
+            seed.not_embedded,
+            [("absent_lib".to_string(), "2.0.0".to_string())]
+        );
+    }
+
+    #[test]
+    fn embed_refuses_a_bad_archive_naming_the_file_as_typed() {
+        let dir = Dir::new("embed-bad");
+        let packages = package_xml("demo_lib-1.0.0", "true", "false", "false");
+        let path = dir.vipc(&[
+            ("config.xml", demo(&packages).as_bytes()),
+            ("demo_lib-1.0.0.vip", b"junk"),
+        ]);
+        let vipc = read(&path, "as/typed.vipc").unwrap();
+
+        let why = vipc
+            .embed(&path, "as/typed.vipc", &mut vipc.seed())
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            why.starts_with("as/typed.vipc: embedded demo_lib-1.0.0.vip is not a package: "),
+            "{why}"
+        );
+    }
+
+    #[test]
+    fn a_vipc_that_embeds_nothing_is_not_opened_again() {
+        let dir = Dir::new("embed-none");
+        let path = dir.config(&demo(&chosen("demo_lib-1.0.0")));
+        let vipc = read(&path, "p.vipc").unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let mut seed = vipc.seed();
+
+        vipc.embed(&path, "p.vipc", &mut seed).unwrap();
+
+        assert!(seed.embedded.is_empty() && seed.not_embedded.is_empty());
     }
 }

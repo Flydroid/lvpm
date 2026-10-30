@@ -10,7 +10,7 @@ use crate::git::{self, Runner};
 use crate::manifest_edit::DependencyTable;
 use crate::target::LvTarget;
 use crate::venv::{self, Venv};
-use crate::{manifest_edit, paths, project, vipc};
+use crate::{index, manifest_edit, paths, project, vipc};
 use anyhow::anyhow;
 use serde::Serialize;
 use std::cmp::Reverse;
@@ -53,6 +53,8 @@ pub struct Seed {
     pub nipm: Option<toml_edit::Table>,
     /// Packages the source file carries, to be imported into the cache.
     pub embedded: Vec<Embedded>,
+    /// Packages the source file says it carries and does not: `(name, version)`.
+    pub not_embedded: Vec<(String, String)>,
 }
 
 /// A package archive inside the `--from` file.
@@ -119,8 +121,9 @@ fn installation_label(target: &LvTarget) -> String {
 /// when given, else the newest LabVIEW installed, and left out when there is none.
 /// `from` (`--from`, relative to the working directory) adds the packages that file
 /// chose as dependencies; its own LabVIEW is reported and never used. Once the
-/// manifest is written, `git` makes the repository (the op does not know how git
-/// is run) and a venv is bound to the chosen LabVIEW when it can be.
+/// manifest is written, the package archives `from` holds are imported into the
+/// cache, `git` makes the repository (the op does not know how git is run) and a
+/// venv is bound to the chosen LabVIEW when it can be.
 pub fn run(env: &OpEnv, from: Option<&Path>, runner: Runner) -> Result<Initialized, InitError> {
     let root = match &env.flags.project {
         Some(dir) => paths::resolve(&env.cwd, dir),
@@ -163,8 +166,9 @@ pub fn run(env: &OpEnv, from: Option<&Path>, runner: Runner) -> Result<Initializ
         env.sink.emit(Event::InitNoLabview);
     }
     if let Some(from) = from {
+        let from = from.display().to_string();
         env.sink.emit(Event::InitDependenciesAdded {
-            from: from.display().to_string(),
+            from: from.clone(),
             added: seed
                 .deps
                 .into_iter()
@@ -172,6 +176,7 @@ pub fn run(env: &OpEnv, from: Option<&Path>, runner: Runner) -> Result<Initializ
                 .collect(),
             skipped: seed.skipped,
         });
+        import_embedded(env, &from, seed.embedded, seed.not_embedded);
     }
     env.sink.emit(Event::InitGit {
         outcome: git::init(&root, runner),
@@ -197,11 +202,60 @@ fn read_source(cwd: &Path, from: &Path) -> Result<(Seed, SourceKind), InitError>
         .to_lowercase();
     match name.as_str() {
         n if n.ends_with(".dragon") => Err(InitError::DragonFile { file }),
-        _ => vipc::read(&paths::resolve(cwd, from), &file)
-            .map(|vipc| (vipc.seed(), SourceKind::Vipc))
+        _ => read_vipc(&paths::resolve(cwd, from), &file)
+            .map(|seed| (seed, SourceKind::Vipc))
             .map_err(|why| InitError::BadSource {
                 why: format!("{why:#}"),
             }),
+    }
+}
+
+/// The `.vipc` at `path`, with the archives it holds. Taking them is part of
+/// the check, so a bad one fails before anything is written.
+fn read_vipc(path: &Path, file: &str) -> anyhow::Result<Seed> {
+    let vipc = vipc::read(path, file)?;
+    let mut seed = vipc.seed();
+    vipc.embed(path, file, &mut seed)?;
+    Ok(seed)
+}
+
+/// Put the archives the source carried into the cache, and say which it did not
+/// carry. The manifest is written by now, so a failure is a warning, never the
+/// run's end.
+fn import_embedded(
+    env: &OpEnv,
+    from: &str,
+    embedded: Vec<Embedded>,
+    not_embedded: Vec<(String, String)>,
+) {
+    for Embedded {
+        name,
+        version,
+        label,
+        bytes,
+    } in embedded
+    {
+        env.sink.emit(
+            match index::cache_add_bytes(&env.config.cache, &label, &bytes) {
+                Ok(_) => Event::InitPackageImported {
+                    name,
+                    version,
+                    from: from.to_string(),
+                },
+                Err(why) => Event::InitPackageImportFailed {
+                    name,
+                    version,
+                    why: format!("{why:#}"),
+                },
+            },
+        );
+    }
+    for (name, version) in not_embedded {
+        env.sink.emit(Event::InitPackageNotEmbedded {
+            name,
+            version,
+            from: from.to_string(),
+        });
     }
 }
 
@@ -868,6 +922,204 @@ mod tests {
         zip.write_all(xml.as_bytes()).unwrap();
         zip.finish().unwrap();
         path
+    }
+
+    /// `p.vipc` in `dir` listing `listed` as `(name-version, included)`, chosen
+    /// and not pinned, and holding each of `archives` as `(entry, bytes)`.
+    fn vipc_holding(dir: &Path, listed: &[(&str, bool)], archives: &[(&str, &[u8])]) -> PathBuf {
+        use std::io::Write;
+        let packages: String = listed
+            .iter()
+            .map(|(full, included)| {
+                format!(
+                    "<Package><Name>{full}</Name><Included>{included}</Included>\
+                     <Dependency>false</Dependency><Pinned>false</Pinned></Package>"
+                )
+            })
+            .collect();
+        let xml = format!(
+            "<VI_Package_Configuration><Target><Name>LabVIEW</Name>\
+             <Version>13.0</Version>{packages}</Target></VI_Package_Configuration>"
+        );
+        let path = dir.join("p.vipc");
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+        let options = zip::write::SimpleFileOptions::default();
+        zip.start_file("config.xml", options).unwrap();
+        zip.write_all(xml.as_bytes()).unwrap();
+        for (entry, bytes) in archives {
+            zip.start_file(*entry, options).unwrap();
+            zip.write_all(bytes).unwrap();
+        }
+        zip.finish().unwrap();
+        path
+    }
+
+    /// The bytes of a package archive `demo_lib-1.0.0.vip`.
+    fn demo_lib_archive(scratch: &Path) -> Vec<u8> {
+        let archive = super::super::testing::vip_in(scratch, "demo_lib", "1.0.0", "", &[], false);
+        std::fs::read(archive).unwrap()
+    }
+
+    /// An environment in `root` whose cache is `scratch/cache`.
+    fn env_caching<'a>(sink: &'a Recorded, scratch: &Path, root: &Path) -> OpEnv<'a> {
+        let mut env = env_on(sink, root);
+        env.config.cache = scratch.join("cache");
+        env
+    }
+
+    #[test]
+    fn an_embedded_archive_is_imported_into_the_cache_after_the_manifest_and_before_git() {
+        let (scratch, root) = folder("init-embed-import", "App");
+        let archive = demo_lib_archive(&scratch);
+        vipc_holding(
+            &root,
+            &[("demo_lib-1.0.0", true)],
+            &[("Packages/demo_lib-1.0.0.vip", &archive)],
+        );
+        let sink = Recorded::default();
+        let env = env_caching(&sink, &scratch, &root);
+
+        let done = run(&env, Some(Path::new("p.vipc")), &git_ok).unwrap();
+
+        assert!(
+            std::fs::read_to_string(done.manifest)
+                .unwrap()
+                .contains("demo_lib = \">=1.0.0\"")
+        );
+        let events = sink.events();
+        assert!(matches!(events[0], Event::InitManifestWritten { .. }));
+        assert!(matches!(events[1], Event::InitDependenciesAdded { .. }));
+        assert_eq!(
+            events[2],
+            Event::InitPackageImported {
+                name: "demo_lib".into(),
+                version: "1.0.0".into(),
+                from: "p.vipc".into(),
+            }
+        );
+        assert_eq!(events.len(), 4, "{events:?}");
+        assert!(matches!(events[3], Event::InitGit { .. }));
+        let cache = crate::cache::Cache::open(&scratch.join("cache")).unwrap();
+        let imported = cache.imported_packages().unwrap();
+        assert_eq!(
+            imported
+                .iter()
+                .map(|p| (p.entry.name.as_str(), p.entry.version.as_str()))
+                .collect::<Vec<_>>(),
+            [("demo_lib", "1.0.0")]
+        );
+        drop(cache);
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
+    fn an_included_package_with_no_archive_inside_is_a_warning_and_still_a_dependency() {
+        let (scratch, root) = folder("init-embed-missing", "App");
+        vipc_holding(&root, &[("demo_lib-1.0.0", true)], &[]);
+        let sink = Recorded::default();
+        let env = env_caching(&sink, &scratch, &root);
+
+        let done = run(&env, Some(Path::new("p.vipc")), &git_ok).unwrap();
+
+        assert!(
+            std::fs::read_to_string(done.manifest)
+                .unwrap()
+                .contains("demo_lib = \">=1.0.0\"")
+        );
+        assert!(sink.events().contains(&Event::InitPackageNotEmbedded {
+            name: "demo_lib".into(),
+            version: "1.0.0".into(),
+            from: "p.vipc".into(),
+        }));
+        assert!(!scratch.join("cache").exists());
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
+    fn an_archive_that_cannot_be_taken_is_refused_and_nothing_is_written() {
+        // Entries holding a real archive or junk, and what the refusal says.
+        let cases = [
+            (
+                "not-a-package",
+                vec!["demo_lib-1.0.0.vip"],
+                false,
+                "p.vipc: embedded demo_lib-1.0.0.vip is not a package: ",
+            ),
+            (
+                "twice",
+                vec!["a/demo_lib-1.0.0.vip", "b/demo_lib-1.0.0.vip"],
+                true,
+                "p.vipc: more than one demo_lib-1.0.0.vip inside",
+            ),
+        ];
+        for (tag, entries, is_package, message) in cases {
+            let (scratch, root) = folder(&format!("init-embed-refused-{tag}"), "App");
+            let bytes = match is_package {
+                true => demo_lib_archive(&scratch),
+                false => b"junk".to_vec(),
+            };
+            let archives: Vec<(&str, &[u8])> = entries.iter().map(|e| (*e, &bytes[..])).collect();
+            vipc_holding(&root, &[("demo_lib-1.0.0", true)], &archives);
+            let sink = Recorded::default();
+            let env = env_caching(&sink, &scratch, &root);
+
+            let why = run(&env, Some(Path::new("p.vipc")), &no_git).unwrap_err();
+
+            let InitError::BadSource { why } = why else {
+                panic!("{tag}: {why:?}")
+            };
+            assert!(why.starts_with(message), "{tag}: {why}");
+            assert!(sink.events().is_empty(), "{tag}");
+            assert_nothing_written(&root);
+            assert!(!scratch.join("cache").exists(), "{tag}");
+            let _ = std::fs::remove_dir_all(&scratch);
+        }
+    }
+
+    #[test]
+    fn an_import_that_fails_after_the_write_is_a_warning_and_the_run_still_succeeds() {
+        let (scratch, root) = folder("init-embed-io-fails", "App");
+        let archive = demo_lib_archive(&scratch);
+        vipc_holding(
+            &root,
+            &[("demo_lib-1.0.0", true)],
+            &[("demo_lib-1.0.0.vip", &archive)],
+        );
+        std::fs::write(scratch.join("cache"), "a file where the cache folder goes").unwrap();
+        let sink = Recorded::default();
+        let env = env_caching(&sink, &scratch, &root);
+
+        let done = run(&env, Some(Path::new("p.vipc")), &git_ok).unwrap();
+
+        assert!(
+            std::fs::read_to_string(done.manifest)
+                .unwrap()
+                .contains("demo_lib = \">=1.0.0\"")
+        );
+        let events = sink.events();
+        let failed: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::InitPackageImportFailed { name, version, why } => Some((name, version, why)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(failed.len(), 1, "{events:?}");
+        assert_eq!(
+            (failed[0].0.as_str(), failed[0].1.as_str()),
+            ("demo_lib", "1.0.0")
+        );
+        assert!(!failed[0].2.is_empty());
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Event::InitPackageImported { .. }))
+        );
+        assert!(
+            matches!(events.last(), Some(Event::InitGit { .. })),
+            "git still runs: {events:?}"
+        );
+        let _ = std::fs::remove_dir_all(&scratch);
     }
 
     /// A refusal leaves none of what `init` makes.

@@ -4,7 +4,7 @@
 
 use crate::CliWorld;
 use crate::support::golden::Output;
-use crate::support::pilots::check_checksums;
+use crate::support::pilots::{check_checksums, pilots_dir};
 use crate::support::project::MANIFEST_FILE;
 use crate::support::venv::VENV_DIR;
 use cucumber::{given, then, when};
@@ -455,6 +455,32 @@ fn zip_of(entries: &[(&str, String)]) -> Vec<u8> {
     zip.finish().expect("finish the zip").into_inner()
 }
 
+/// A `.vipc` that lists `name-version` as included and holds each of `archives`
+/// as `(entry, bytes)`.
+fn vipc_with_archives(name: &str, version: &str, archives: &[(&str, &[u8])]) -> Vec<u8> {
+    let config = format!(
+        "<VI_Package_Configuration><Target><Name>LabVIEW</Name><Version>13.0</Version>\
+         <Package><Name>{name}-{version}</Name><Included>true</Included>\
+         <Dependency>false</Dependency><Pinned>false</Pinned></Package>\
+         </Target></VI_Package_Configuration>"
+    );
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let entries =
+        std::iter::once(("config.xml", config.as_bytes())).chain(archives.iter().copied());
+    for (entry, bytes) in entries {
+        zip.start_file(entry, zip::write::SimpleFileOptions::default())
+            .expect("start a zip entry");
+        zip.write_all(bytes).expect("write a zip entry");
+    }
+    zip.finish().expect("finish the zip").into_inner()
+}
+
+/// The bytes of the pilot archive `<name>-<version>.vip`.
+fn pilot_archive(name: &str, version: &str) -> Vec<u8> {
+    let path = pilots_dir().join(format!("{name}-{version}.vip"));
+    std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+}
+
 impl CliWorld {
     /// `bytes` as `name` in the working directory, where the scenario's
     /// "in its folder" runs.
@@ -668,4 +694,108 @@ async fn lock_holds_the_serializer_and_its_dependencies(world: &mut CliWorld) {
         );
     }
     assert_eq!(names.len(), 3, "{names:?}");
+}
+
+// ---- `init --from` a .vipc that holds packages ----
+//
+// Nobody has built a .vipc with an included package in VIPM, so these put each
+// archive where the design guesses it is: `<name>-<version>.vip` at some depth.
+
+/// Where a scenario that names no entry puts an archive.
+fn guessed_entry(name: &str, version: &str) -> String {
+    format!("Packages/{name}-{version}.vip")
+}
+
+impl CliWorld {
+    /// `file` in the working directory: a `.vipc` marking `name` `version` as
+    /// included, holding `archives`.
+    fn vipc_holding(&self, file: &str, name: &str, version: &str, archives: &[(&str, &[u8])]) {
+        self.put_in_work_dir(file, &vipc_with_archives(name, version, archives));
+    }
+}
+
+#[given(regex = r#"^a VIPM configuration "([^"]+)" that embeds (\S+) (\S+) as "([^"]+)"$"#)]
+async fn vipc_embedding_as(
+    world: &mut CliWorld,
+    file: String,
+    name: String,
+    version: String,
+    entry: String,
+) {
+    let archive = pilot_archive(&name, &version);
+    world.vipc_holding(&file, &name, &version, &[(&entry, &archive)]);
+}
+
+#[given(regex = r#"^a VIPM configuration "([^"]+)" that embeds (\S+) (\S+)$"#)]
+async fn vipc_embedding(world: &mut CliWorld, file: String, name: String, version: String) {
+    vipc_embedding_as(
+        world,
+        file,
+        name.clone(),
+        version.clone(),
+        guessed_entry(&name, &version),
+    )
+    .await;
+}
+
+#[given("no folder feed")]
+async fn no_folder_feed(world: &mut CliWorld) {
+    world.sandbox.clear_local_packages();
+}
+
+#[given(
+    regex = r#"^a VIPM configuration "([^"]+)" marking (\S+) (\S+) included but holding no archive for it$"#
+)]
+async fn vipc_marking_included_with_no_archive(
+    world: &mut CliWorld,
+    file: String,
+    name: String,
+    version: String,
+) {
+    world.vipc_holding(&file, &name, &version, &[]);
+}
+
+#[given(
+    regex = r#"^a VIPM configuration "([^"]+)" marking (\S+) (\S+) included, with a "([^"]+)" inside that is not a package$"#
+)]
+async fn vipc_marking_included_with_junk(
+    world: &mut CliWorld,
+    file: String,
+    name: String,
+    version: String,
+    entry: String,
+) {
+    world.vipc_holding(&file, &name, &version, &[(&entry, b"not a package")]);
+}
+
+/// `lvpm search --all` has no `cache list` to ask, and lists what the cache
+/// imported along with every other source.
+#[then(regex = r#"^"lvpm search --all" lists (\S+) (\S+)$"#)]
+async fn catalog_lists(world: &mut CliWorld, name: String, version: String) {
+    let folder = world.init_cwd().to_path_buf();
+    let catalog = world
+        .sandbox
+        .run_lvpm_in(&folder, &["search", "--all"], None);
+    assert_eq!(
+        catalog.exit_code, 0,
+        "lvpm search --all failed: {catalog:?}"
+    );
+    assert!(
+        catalog.stdout.lines().any(|line| {
+            let mut words = line.split_whitespace();
+            (words.next(), words.next()) == (Some(name.as_str()), Some(version.as_str()))
+        }),
+        "{name} {version} is not listed: {catalog:?}"
+    );
+}
+
+#[then("the cache holds nothing")]
+async fn cache_holds_nothing(world: &mut CliWorld) {
+    let cache = world.sandbox.cache_dir();
+    let files: Vec<_> = std::fs::read_dir(&cache)
+        .unwrap_or_else(|e| panic!("{}: {e}", cache.display()))
+        .flatten()
+        .map(|entry| entry.path())
+        .collect();
+    assert!(files.is_empty(), "the cache holds {files:?}");
 }

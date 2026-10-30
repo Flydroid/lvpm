@@ -330,7 +330,7 @@ mod tests {
         cache
             .record_import(
                 &source,
-                &metadata,
+                Some(&metadata),
                 &LocalEntry::from(&wanted),
                 &sha256,
                 wanted.md5.as_ref().unwrap(),

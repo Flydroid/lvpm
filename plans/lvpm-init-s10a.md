@@ -984,6 +984,14 @@ neither is a cross-cutting change.
 - **The vipm.toml scenarios follow #89 as it is today.** The converter's
   exact "not used" line is pinned when slice 4 starts.
 
+- **Step 3.3 decisions.** `lvpm cache list` does not exist, so the
+  embedded scenarios check the cache with `lvpm search --all` and an empty
+  cache directory instead. A package both `Included` and `Dependency` is not
+  imported, per the rule above; an offline project whose chosen package
+  needs such a dependency fails at lock. The archive's own name and version
+  are not compared to the `.vipc`'s `<Name>`. The three embedded scenarios
+  end "(synthetic layout)"; AC10 stays unverified.
+
 ## Build Progress
 
 ### Slices (grouped by wave)
@@ -1002,7 +1010,7 @@ neither is a cross-cutting change.
 - [ ] Slice 3: `init --from project.vipc`
   - [x] Step 3.1: `vipc.rs` reads a `.vipc`
   - [x] Step 3.2: `--from .vipc` adds dependencies
-  - [ ] Step 3.3: embedded packages, and sync installs them
+  - [x] Step 3.3: embedded packages, and sync installs them
 
 #### Wave 4
 - [ ] Slice 5: document `init` and `init --from .vipc`

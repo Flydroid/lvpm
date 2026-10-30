@@ -417,6 +417,27 @@ pub enum Event {
         added: Vec<AddedDependency>,
         skipped: usize,
     },
+    /// `init` put the archive of `name` `version` that `from` (as typed) carries
+    /// into the cache.
+    InitPackageImported {
+        name: String,
+        version: String,
+        from: String,
+    },
+    /// `from` marks `name` `version` as included and holds no archive for it.
+    /// The dependency is added all the same.
+    InitPackageNotEmbedded {
+        name: String,
+        version: String,
+        from: String,
+    },
+    /// The archive of `name` `version` could not be put into the cache, for
+    /// `why`, once the manifest was written.
+    InitPackageImportFailed {
+        name: String,
+        version: String,
+        why: String,
+    },
     /// What `init` did about a git repository.
     InitGit { outcome: GitOutcome },
 

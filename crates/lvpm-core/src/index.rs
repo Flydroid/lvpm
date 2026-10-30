@@ -276,7 +276,7 @@ fn entry_from_file(path: &Path) -> Result<Entry> {
     entry_from_bytes(path, &bytes)
 }
 
-fn entry_from_bytes(path: &Path, bytes: &[u8]) -> Result<Entry> {
+pub(crate) fn entry_from_bytes(path: &Path, bytes: &[u8]) -> Result<Entry> {
     let mut zip = crate::install::open_archive(bytes.to_vec())?;
     let spec = crate::install::read_spec(&mut zip)?;
 
@@ -347,29 +347,47 @@ pub fn cache_add(cache_dir: &Path, source: &Path, refresh: bool) -> Result<Vec<I
             continue;
         }
         let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
-        let entry = entry_from_bytes(&path, &bytes)
-            .with_context(|| format!("importing {}", path.display()))?;
         let after = std::fs::metadata(&path)?;
         anyhow::ensure!(
             metadata.len() == after.len() && metadata.modified().ok() == after.modified().ok(),
             "package changed during import; retry cache add: {}",
             path.display()
         );
-        let sha256 = cache.store(&bytes)?;
-        cache.record_import(
-            &path,
-            &metadata,
-            &LocalEntry::from(&entry),
-            &sha256,
-            &md5_hex(&bytes),
-        )?;
-        imports.push(Import {
-            path,
-            sha256,
-            reused: false,
-        });
+        imports.push(import_bytes(&cache, path, Some(&metadata), &bytes)?);
     }
     Ok(imports)
+}
+
+/// Import an archive that is not a file of its own, e.g. one inside a `.vipc`.
+/// `label` is recorded as the import's path, so it says where the bytes came
+/// from; nothing backs it, so a second import of it is read again, never skipped.
+pub fn cache_add_bytes(cache_dir: &Path, label: &str, bytes: &[u8]) -> Result<Import> {
+    import_bytes(&Cache::open(cache_dir)?, PathBuf::from(label), None, bytes)
+}
+
+/// Parse `bytes`, store them and record them as imported from `path`: a file
+/// whose `metadata` links later imports to the stored copy, or a label.
+fn import_bytes(
+    cache: &Cache,
+    path: PathBuf,
+    metadata: Option<&std::fs::Metadata>,
+    bytes: &[u8],
+) -> Result<Import> {
+    let entry =
+        entry_from_bytes(&path, bytes).with_context(|| format!("importing {}", path.display()))?;
+    let sha256 = cache.store(bytes)?;
+    cache.record_import(
+        &path,
+        metadata,
+        &LocalEntry::from(&entry),
+        &sha256,
+        &md5_hex(bytes),
+    )?;
+    Ok(Import {
+        path,
+        sha256,
+        reused: false,
+    })
 }
 
 /// The feeds `load` reads, in the order a name is looked for: each hosted
@@ -1067,6 +1085,49 @@ mod tests {
         assert!(cache_add(&root, &source, false).is_err());
         assert!(cache_add(&root, &root.join("missing.vip"), false).is_err());
         assert!(cache.imported_packages().unwrap().is_empty());
+        drop(cache);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn bytes_are_imported_under_their_label_as_the_path_and_resolve_from_the_cache() {
+        let (root, cache) = test_cache("import-bytes");
+        let bytes = write_import_fixture(&root.join("unused.vip"), "1.0.0");
+        let label = "p.vipc!/Packages/imported_library-1.0.0.vip";
+
+        let import = cache_add_bytes(&root, label, &bytes).unwrap();
+
+        assert_eq!(
+            (import.path.as_path(), import.reused),
+            (Path::new(label), false)
+        );
+        assert_eq!(cache.load(&import.sha256).unwrap().unwrap(), bytes);
+        let index = load(&root, false, &[], &[], false, &NullSink).unwrap();
+        let entry = index.best("imported_library", None, None).unwrap();
+        assert_eq!(entry.url, format!("cache:{}", import.sha256));
+        // The label is the row's identity: the same one is one import, another is a second.
+        cache_add_bytes(&root, label, &bytes).unwrap();
+        assert_eq!(cache.imported_packages().unwrap().len(), 1);
+        cache_add_bytes(&root, "q.vipc!/imported_library-1.0.0.vip", &bytes).unwrap();
+        assert_eq!(cache.imported_packages().unwrap().len(), 2);
+        drop(cache);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn bytes_that_are_not_a_package_are_refused_naming_the_label_and_record_nothing() {
+        let (root, cache) = test_cache("import-bad-bytes");
+
+        let why = cache_add_bytes(&root, "p.vipc!/x-1.vip", b"not a zip")
+            .err()
+            .expect("a refusal");
+
+        assert!(
+            format!("{why:#}").starts_with("importing p.vipc!/x-1.vip"),
+            "{why:#}"
+        );
+        assert!(cache.imported_packages().unwrap().is_empty());
+        assert!(!root.join("content").exists());
         drop(cache);
         std::fs::remove_dir_all(root).ok();
     }
