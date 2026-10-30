@@ -447,7 +447,7 @@ fn install_one(
 ) -> Result<Option<Installed>> {
     let entry = &planned.entry;
     let roots = session.roots_for(&entry.name)?;
-    if !settle_installed(env, session, &roots, entry, opts)? {
+    if !settle_installed(env, &roots, entry, opts)? {
         return Ok(None);
     }
     env.sink.emit(Event::PackageStart {
@@ -488,7 +488,13 @@ fn install_one(
             entry.name, entry.version
         )
     })?;
-    let plan = install::plan(&roots, &spec, &mut zip)?;
+    let mut plan = install::plan(&roots, &spec, &mut zip)?;
+    // The old version goes only once the new archive has been read and
+    // planned: a refused archive leaves it installed.
+    if remove_old(env, session, &roots, entry, opts)? {
+        // What is on disk changed, and the plan's overwrites with it.
+        plan = install::plan(&roots, &spec, &mut zip)?;
+    }
     let mut pkg = Unpacking {
         entry,
         roots,
@@ -509,11 +515,9 @@ fn install_one(
 }
 
 /// Decide what an installed version of `entry` means. False: leave the package
-/// alone. True: install it, the old version's files already gone (or, on a dry
-/// run, said to go).
+/// alone. True: install it, replacing any installed version ([`remove_old`]).
 fn settle_installed(
     env: &OpEnv,
-    session: &mut InstallSession,
     roots: &Roots,
     entry: &Entry,
     opts: &InstallOptions,
@@ -550,13 +554,24 @@ fn settle_installed(
         old_files: old.files.len(),
         dry_run: opts.dry_run,
     });
-    // A venv removes the old version only once the new one is staged
-    // (`staging::land`).
-    if !opts.dry_run && session.venv().is_none() {
-        // Taking out the old version is the first file write of a replacement.
-        env.cancel.begin_unpack()?;
-        uninstall_one(env, session, &entry.name)?;
+    Ok(true)
+}
+
+/// Take out the installed version `entry` replaces, if any. True: it is gone.
+/// A venv removes it only once the new one is staged (`staging::land`).
+fn remove_old(
+    env: &OpEnv,
+    session: &mut InstallSession,
+    roots: &Roots,
+    entry: &Entry,
+    opts: &InstallOptions,
+) -> Result<bool> {
+    if opts.dry_run || session.venv().is_some() || !install::is_installed(roots, &entry.name) {
+        return Ok(false);
     }
+    // Taking out the old version is the first file write of a replacement.
+    env.cancel.begin_unpack()?;
+    uninstall_one(env, session, &entry.name)?;
     Ok(true)
 }
 
@@ -1082,6 +1097,58 @@ mod tests {
             manifest.archive_sha256.as_deref(),
             Some(scratch.sha256.as_str())
         );
+    }
+
+    #[test]
+    fn an_upgrade_to_an_archive_that_disagrees_with_its_record_leaves_the_old_version_installed() {
+        use std::io::Read;
+        let scratch = Scratch::new("tampered-upgrade");
+        let old = crate::ops::testing::vip_in(&scratch.root, "alpha", "1.0", "", &["a.txt"], false);
+        let mut one = scratch.plan(None);
+        one.entries[0].entry.url = old.to_string_lossy().into_owned();
+        one.entries[0].entry.version = Version::parse("1.0");
+        apply_plan(&scratch, &one).unwrap();
+        let roots = Roots::scratch(&scratch.root.join("dest"));
+        let kept = install::read_manifest(&roots, "alpha").unwrap();
+
+        // A built 2.0 with one member changed after the build.
+        let meta = crate::lvpkg::Meta {
+            name: "alpha".into(),
+            version: "2.0.0".into(),
+            labview: ">=2016".into(),
+            vendor: "Vendor".into(),
+            display_name: "Alpha".into(),
+            install_dir: "vi.lib/Vendor/Alpha".into(),
+            dependencies: Vec::new(),
+        };
+        let built = crate::lvpkg::write(&meta, &[("a.vi".into(), b"vi".to_vec())]).unwrap();
+        let mut src = zip::ZipArchive::new(std::io::Cursor::new(built)).unwrap();
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for i in 0..src.len() {
+            let mut member = src.by_index(i).unwrap();
+            let mut bytes = Vec::new();
+            member.read_to_end(&mut bytes).unwrap();
+            if member.name().ends_with("a.vi") {
+                bytes = b"altered".to_vec();
+            }
+            writer
+                .start_file(member.name(), zip::write::SimpleFileOptions::default())
+                .unwrap();
+            writer.write_all(&bytes).unwrap();
+        }
+        let tampered = scratch.root.join("alpha-2.0.0.lvpkg");
+        std::fs::write(&tampered, writer.finish().unwrap().into_inner()).unwrap();
+        let mut two = scratch.plan(None);
+        two.entries[0].entry.url = tampered.to_string_lossy().into_owned();
+
+        let why = format!("{:#}", apply_plan(&scratch, &two).unwrap_err());
+        assert!(why.contains("differs from RECORD"), "{why}");
+        let after = install::read_manifest(&roots, "alpha").unwrap();
+        assert_eq!(after.version, "1.0");
+        assert!(!kept.files.is_empty());
+        for file in &kept.files {
+            assert!(std::path::Path::new(file).is_file(), "{file} is gone");
+        }
     }
 
     #[test]
