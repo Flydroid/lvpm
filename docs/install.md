@@ -2,11 +2,11 @@
 
 Windows 10/11 with LabVIEW 2020 or later. Linux is built and tested in NI's
 LabVIEW Linux images (see
-[Continuous integration](../CONTRIBUTING.md#continuous-integration)).
+[Continuous integration](https://github.com/ThatsTheEnd/lvpm/blob/main/CONTRIBUTING.md#continuous-integration)).
 
 ## With the install script
 
-[scripts/install.ps1](../scripts/install.ps1) fetches the latest release,
+[scripts/install.ps1](https://github.com/ThatsTheEnd/lvpm/blob/main/scripts/install.ps1) fetches the latest release,
 verifies the zip's SHA-256 against the digest GitHub records for it (and
 against a `SHA256SUMS` file when a release ships one), extracts `lvpm.exe`
 to `%LOCALAPPDATA%\lvpm\bin`, removes Windows' mark-of-the-web from the
@@ -60,4 +60,4 @@ cargo build --release      # target\release\lvpm.exe
 cargo test
 ```
 
-Toolchain setup is in [CONTRIBUTING.md](../CONTRIBUTING.md).
+Toolchain setup is in [CONTRIBUTING.md](https://github.com/ThatsTheEnd/lvpm/blob/main/CONTRIBUTING.md).
