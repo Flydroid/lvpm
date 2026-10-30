@@ -224,3 +224,10 @@ Feature: lvpm init starts a project (S10a)
     And I run "lvpm sync" in the same folder
     Then it succeeds
     And the venv holds labview_open_source_project_lib_labview_open_source_palette in its add-on folder and no staging folder
+
+  Scenario: init is documented
+    Then docs/usage.md lists "lvpm init" and "lvpm init --from" in its command table
+    And docs/usage.md has a "## Starting a project" section containing "Dependency", "Pinned", "Included" and "lvpm venv remove"
+    And docs/usage.md does not mention "init --from vipm.toml"
+    And docs/cli.md does not list init as missing
+    And docs/vision/vipm-cli-comparison.md says .dragon is not planned

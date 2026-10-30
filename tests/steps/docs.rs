@@ -458,3 +458,78 @@ async fn readme_shows_publish(_: &mut CliWorld) {
         "README.md does not show lvpm publish"
     );
 }
+
+/// First cell of each table row in `text`, without its backticks.
+fn first_cells(text: &str) -> Vec<String> {
+    text.lines()
+        .filter_map(|line| line.strip_prefix('|'))
+        .filter_map(|row| row.split('|').next())
+        .map(|cell| cell.trim().trim_matches('`').to_string())
+        .collect()
+}
+
+#[then(regex = r#"^docs/usage\.md lists "([^"]+)" and "([^"]+)" in its command table$"#)]
+async fn usage_lists_commands(_: &mut CliWorld, a: String, b: String) {
+    let guide = repo_file("docs/usage.md");
+    let table = guide
+        .split("\n## ")
+        .nth(1)
+        .expect("usage.md has a Commands section");
+    let cells = first_cells(table);
+    for command in [a, b] {
+        assert!(
+            cells
+                .iter()
+                .any(|cell| *cell == command || cell.starts_with(&format!("{command} "))),
+            "no command-table line for {command}"
+        );
+    }
+}
+
+#[then(regex = r#"^docs/usage\.md has a "([^"]+)" section containing (".+")$"#)]
+async fn usage_section_contains(_: &mut CliWorld, heading: String, quoted: String) {
+    let guide = repo_file("docs/usage.md");
+    let (_, rest) = guide
+        .split_once(&format!("\n{heading}\n"))
+        .unwrap_or_else(|| panic!("usage.md has no {heading} section"));
+    // The section runs to the next heading of the same level; its ### parts are inside.
+    let level = heading.split(' ').next().unwrap_or("##");
+    let end = rest.find(&format!("\n{level} ")).unwrap_or(rest.len());
+    let body = &rest[..end];
+    // `"a", "b" and "c"` splits on its quotes into text at the odd positions.
+    for want in quoted.split('"').skip(1).step_by(2) {
+        assert!(body.contains(want), "{heading} does not say {want}");
+    }
+}
+
+#[then(regex = r#"^docs/usage\.md does not mention "([^"]+)"$"#)]
+async fn usage_does_not_mention(_: &mut CliWorld, text: String) {
+    assert!(
+        !repo_file("docs/usage.md").contains(&text),
+        "docs/usage.md mentions {text}"
+    );
+}
+
+#[then(regex = r#"^docs/cli\.md does not list ([a-z]+) as missing$"#)]
+async fn cli_does_not_list_as_missing(_: &mut CliWorld, command: String) {
+    let cli = repo_file("docs/cli.md");
+    let (_, rest) = cli
+        .split_once("\n## Missing\n")
+        .expect("cli.md has a Missing section");
+    let missing = rest.split("\n## ").next().unwrap_or(rest);
+    assert!(
+        !first_cells(missing).contains(&command),
+        "docs/cli.md still lists {command} as missing"
+    );
+}
+
+#[then(regex = r#"^docs/vision/vipm-cli-comparison\.md says (\S+) is not planned$"#)]
+async fn comparison_says_not_planned(_: &mut CliWorld, what: String) {
+    let comparison = repo_file("docs/vision/vipm-cli-comparison.md");
+    assert!(
+        comparison
+            .lines()
+            .any(|line| line.contains(&what) && line.contains("not planned")),
+        "vipm-cli-comparison.md has no line saying {what} is not planned"
+    );
+}

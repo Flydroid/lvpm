@@ -25,7 +25,8 @@ Status:
 |---|---|---|
 | `install <pkg>[@ver]` | `lvpm install` | have |
 | `install <file.vip / .ogp>` | `lvpm cache add <file>`, then `install` | have (two steps) |
-| `install <file.vipc / .dragon>` | `lvpm init --from <file>` | planned (M1) |
+| `install <file.vipc>` | `lvpm init --from <file.vipc>` | have |
+| `install <file.dragon>` | — | n/a (VIPM discontinued `.dragon`; not supported, not planned) |
 | `install --upgrade` | `lvpm lock --upgrade` / `--upgrade-package`; `lvpm update` | partial; `update` planned (M1) |
 | `uninstall` | `lvpm uninstall` / `--all` | have |
 | `uninstall --allow-version-mismatch` | — | open |
@@ -33,7 +34,7 @@ Status:
 | `info <pkg>` (versions, deps, files) | `lvpm info` | planned (M1) |
 | `search` | `lvpm search` | have |
 | `refresh` (`--no-cache`, `--force`) | `--refresh` flag (`lvpm refresh` is different: it rebuilds palettes and menus) | have |
-| `init` | `lvpm init` | planned (M1) |
+| `init` | `lvpm init` | have |
 | `add` / `remove` (`--dev`, `--feed-url`) | `lvpm add` / `remove` (`--dev`) | have; `--feed-url` open |
 | `lock`, `lock --check` (non-zero exit on drift) | `lvpm lock`, `lock --check` | have |
 | `sync` (make the install match the lock) | `lvpm sync` (`--locked`, `--frozen`, `--no-dev`) | have |

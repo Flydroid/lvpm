@@ -1026,8 +1026,8 @@ neither is a cross-cutting change.
   - [x] Step 3.3: embedded packages, and sync installs them
 
 #### Wave 4
-- [ ] Slice 5: document `init` and `init --from .vipc`
-  - [ ] Step 5.1: docs
+- [x] Slice 5: document `init` and `init --from .vipc`
+  - [x] Step 5.1: docs
 
 #### Wave 5
 - [ ] Slice 4: `init --from vipm.toml`

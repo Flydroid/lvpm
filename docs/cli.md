@@ -211,7 +211,6 @@ Proposed:
 
 | Command | What | Where it is planned |
 |---|---|---|
-| `init` | write an `lvpm.toml` for the project here (name, `labview` from `--labview-version` or the newest target) | new |
 | `add <pkg>[@constraint]` / `remove <pkg>` | edit `lvpm.toml` and install or uninstall in one step | roadmap, manifest |
 | `update [<pkg>]` | re-resolve and rewrite `lvpm.lock` | roadmap, lockfile |
 | `outdated` | installed versions against the newest the constraints allow | new; needs the lockfile |

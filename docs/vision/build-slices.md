@@ -547,6 +547,8 @@ comes from.
 **Depends-on:** none
 **Files:** `src/main.rs`, `src/render/edit.rs`, `crates/lvpm-core/src/events.rs`, `src/render/mod.rs`, `crates/lvpm-core/src/ops/init.rs`, `crates/lvpm-core/src/manifest_edit.rs`
 
+**Partly done.** `init` and `--from .vipc` done; `--from vipm.toml` waits on #89.
+
 Goal: start a project, or move a VIPM project over, in one command.
 
 Acceptance criteria:

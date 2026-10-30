@@ -3,18 +3,32 @@
 ## Make a folder
 
 ```console
-$ mkdir C:\Git\HelloLvpm
-$ cd C:\Git\HelloLvpm
+$ mkdir C:\Git\hello_lvpm
+$ cd C:\Git\hello_lvpm
 ```
 
-## Write lvpm.toml
+## Start the project
 
-`lvpm.toml`, the project manifest, says what the project is and what it depends on. `lvpm init`
-writes one in an empty folder; to write it by hand instead, create `lvpm.toml` with:
+```console
+$ lvpm init --labview-version 2026
+wrote C:\Git\hello_lvpm\lvpm.toml
+  labview = ">=2026"
+initialized a git repository
+  add a remote:  git remote add origin <url>
+  first push:    git add -A && git commit -m "lvpm init" && git push -u origin HEAD
+created C:\Git\hello_lvpm\.lv-venv
+  bound to       LabVIEW 2026 (64-bit)  v26.3
+next: lvpm sync
+```
+
+`lvpm init` writes `lvpm.toml`, the project manifest, which says what the
+project is and what it depends on, makes a git repository and creates the
+venv. It reads:
 
 ```toml
 [project]
 name = "hello_lvpm"
+version = "0.1.0"
 labview = ">=2026"   # the oldest LabVIEW the project is meant for
 
 [dependencies]
@@ -28,22 +42,16 @@ labview = ">=2026"   # the oldest LabVIEW the project is meant for
 Any `lvpm` command run in this folder, or below it, now works on this
 project.
 
-## Create the venv
+## The venv
 
 A venv keeps the project's packages to itself instead of putting them into
 LabVIEW's own `vi.lib`, so another project on the machine can use other
 versions.
 
-```console
-$ lvpm venv create --labview-version 2026
-created C:\Git\HelloLvpm\.lv-venv
-  bound to       LabVIEW 2026 (64-bit)  v26.3
-  VI Server port 3735
-```
-
-The venv is `.lv-venv\`, beside `lvpm.toml`, bound to LabVIEW 2026. Without
-`--labview-version` lvpm takes the manifest's `labview`. The venv ignores
-itself in git; you commit `lvpm.toml`, not the venv.
+The venv is `.lv-venv\`, beside `lvpm.toml`, bound to LabVIEW 2026. It
+ignores itself in git; you commit `lvpm.toml`, not the venv. If init said
+`no venv:` instead, fix what it names and run
+`lvpm venv create --labview-version 2026`.
 
 Check it:
 

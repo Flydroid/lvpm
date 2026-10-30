@@ -185,7 +185,7 @@ min-release-age    = "3d"         # cf. uv --exclude-newer
 - **VIPM packages:** installable today. Proposed: `lvpm convert x.vip` → `.lvpkg`,
   marked *converted*, hooks kept but disabled, and mirrored and re-signed in an internal
   feed after review.
-- **Project files:** `lvpm init --from project.vipc` (or `.dragon`) so existing
+- **Project files:** `lvpm init --from project.vipc` so existing
   projects can move over. See [vipm-cli-comparison.md](vipm-cli-comparison.md).
 - **NIPM:** drivers and toolkits are machine software. They are declared in
   `[nipm.dependencies]` and checked (**exists**). Installing them could be handed to

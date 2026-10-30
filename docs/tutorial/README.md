@@ -5,8 +5,8 @@ dependencies live in the project, and then to a package of your own that
 another project can install. Work through it in order; each page builds on
 the one before.
 
-1. [A project and its venv](project-and-venv.md): write `lvpm.toml`, create
-   the venv.
+1. [A project and its venv](project-and-venv.md): `lvpm init` writes
+   `lvpm.toml` and creates the venv.
 2. [Add a dependency, open LabVIEW](add-and-launch.md): `lvpm add`,
    `lvpm launch`.
 3. [Package and publish a library](build-and-publish.md): `lvpm build`,
