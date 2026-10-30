@@ -1,6 +1,17 @@
 # lvpm
 
+[![Release](https://github.com/ThatsTheEnd/lvpm/actions/workflows/release.yml/badge.svg?branch=main)](https://github.com/ThatsTheEnd/lvpm/actions/workflows/release.yml)
+[![Docs](https://github.com/ThatsTheEnd/lvpm/actions/workflows/docs.yml/badge.svg?branch=main)](https://thatstheend.github.io/lvpm/)
+[![Latest release](https://img.shields.io/github/v/release/ThatsTheEnd/lvpm?include_prereleases&sort=semver)](https://github.com/ThatsTheEnd/lvpm/releases)
+[![Rust](https://img.shields.io/badge/rust-stable%20%C2%B7%20edition%202024-orange?logo=rust)](Cargo.toml)
+[![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-blue)](docs/install.md)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
+
 An open-source package manager for LabVIEW.
+
+**Documentation: <https://thatstheend.github.io/lvpm/>**, with a tutorial
+from an empty folder to a published package, how-to guides and the full
+reference.
 
 lvpm installs `.vip` and `.ogp` packages, the formats VIPM and OpenG use, and
 its own `.lvpkg`, by name. It takes them from the public package directories, your own hosted
@@ -136,8 +147,8 @@ change to them is a breaking change and gets a major version.
 
 ## Learn more
 
-The documentation site, <https://thatstheend.github.io/lvpm/>, holds all of
-the below as one book, starting with a tutorial.
+The documentation site, <https://thatstheend.github.io/lvpm/>, holds the docs
+below as one book, starting with a tutorial; CONTRIBUTING.md stays in the repo.
 
 | Document | What is in it |
 | --- | --- |
