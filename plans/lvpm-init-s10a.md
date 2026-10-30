@@ -604,7 +604,7 @@ Unit level (`vipc.rs`, on zips built in the test):
       | "&amp;" in a <Name>                 | unsupported XML (entity)                       |
       | a config.xml of 2 MiB               | larger than 1 MiB                              |
 
-  Scenario: Vipc::seed applies the rules (also: a name listed twice keeps the last and counts once; Included and Dependency is skipped and not embedded)
+  Scenario: Vipc::seed applies the rules (also: a name listed twice keeps the last and counts once; Included and Dependency is skipped but embedded — amended in review)
     Given packages chosen-pinned, chosen-floating, dependency-pinned and dependency-floating
     Then seed has two deps, exact and ">=", skipped is 2, and source_labview is the target year
 
@@ -967,7 +967,8 @@ neither is a cross-cutting change.
 - **The duplicate-name rule is unspecified in the spec.** The plan applies
   the last one in the file, through `manifest_edit::set`; "added n" counts
   distinct names. A package both `Included` and `Dependency` is skipped
-  and not imported (lock pulls it in as a dependency anyway). Both are
+  but its archive is imported (amended in the final review: lock needs it
+  when nothing else has it). Both are
   inferences, unit-tested in `Vipc::seed`.
 - **Git detection is a `.git` walk, not `git rev-parse`.** A deviation from
   the spec's wording, for the reasons in the design notes.
@@ -987,10 +988,10 @@ neither is a cross-cutting change.
 
 - **Step 3.3 decisions.** `lvpm cache list` does not exist, so the
   embedded scenarios check the cache with `lvpm search --all` and an empty
-  cache directory instead. A package both `Included` and `Dependency` is not
-  imported, per the rule above; an offline project whose chosen package
-  needs such a dependency fails at lock. The archive's own name and version
-  are not compared to the `.vipc`'s `<Name>`. The three embedded scenarios
+  cache directory instead. A package both `Included` and `Dependency` is
+  imported, per the rule above. The archive's own name and version are
+  compared to the `.vipc`'s `<Name>` (added in the final review, against cache
+  poisoning). The three embedded scenarios
   end "(synthetic layout)"; AC10 stays unverified.
 
 - **Slice 3 review decisions.** A `.vipc` package version is checked with

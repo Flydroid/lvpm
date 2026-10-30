@@ -208,7 +208,8 @@ pub enum InitError {
          export a .vipc from VIPM instead"
     )]
     DragonFile { file: String },
-    /// The `--from` file cannot be read or is not a usable `.vipc`; `why` leads with the file as typed.
+    /// The `--from` file cannot be read or is not a usable `.vipc` or `vipm.toml`;
+    /// `why` leads with the file as typed.
     #[error("{why}")]
     BadSource { why: String },
     /// Anything else that went wrong: its own text.

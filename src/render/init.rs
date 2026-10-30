@@ -141,7 +141,9 @@ fn git(r: &mut Renderer, outcome: &GitOutcome) {
         ),
         GitOutcome::Failed { why } => r.line(
             Stream::Err,
-            &format!("warning: git init failed: {why}; no repository made"),
+            &super::printable(format!(
+                "warning: git init failed: {why}; no repository made"
+            )),
         ),
     }
 }

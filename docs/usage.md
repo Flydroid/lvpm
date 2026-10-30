@@ -33,7 +33,7 @@ Flags that apply to every command:
 | Flag                       | Meaning                                                                                                   |
 | -------------------------- | --------------------------------------------------------------------------------------------------------- |
 | `--labview-version <YYYY>` | Install into this LabVIEW version (see `lvpm targets`)                                                    |
-| `--project <DIR>`          | Use that project's venv instead of looking upwards from the current directory                             |
+| `--project <DIR>`          | Use that project's venv instead of looking upwards from the current directory; for `init`, the folder to write the project into |
 | `--global`                 | Use the LabVIEW installation itself, even from inside a project that has a venv                           |
 | `--prefix <DIR>`           | Install into a scratch directory instead of LabVIEW (file copy only; nothing to relink or run hooks with) |
 | `--refresh`                | Ask each index whether it changed (a conditional request) instead of trusting the cache in `%LOCALAPPDATA%\lvpm\cache` |
@@ -91,6 +91,9 @@ next: lvpm sync
   $ lvpm venv create --labview-version 2025
   ```
 
+  For the other bitness of the same year, give its installation path, which
+  init prints: `lvpm venv create --labview-version "<path>"`.
+
 ### From a .vipc
 
 `lvpm init --from <file.vipc>` also turns a VIPM configuration into
@@ -102,10 +105,11 @@ dependencies. The path is read from the working directory, not from
 | Dependency (of another package)     | Skipped, and counted: the package that needs it brings it            |
 | Pinned                              | An exact version: `demo_lib = "1.5.0.15"`                            |
 | Anything else                       | A floor: `demo_lib = ">=1.5.0.15"`                                   |
-| Included (the archive is inside)    | Imported into the cache, like `lvpm cache add`; still added as above |
+| Included (the archive is inside)    | Imported into the cache, like `lvpm cache add`, a Dependency one too; still added or skipped as above |
 
 A package marked Included whose archive is not in the `.vipc` is a warning,
-and one whose archive is not a package fails. The `.vipc`'s own LabVIEW is only
+and one whose archive is not a package, or is another package or version than
+the `.vipc` lists, fails. The `.vipc`'s own LabVIEW is only
 reported (`the .vipc targets LabVIEW 2013; lvpm.toml says >=2026`); `labview`
 comes from `--labview-version` or the installed LabVIEW, as above. Run
 `lvpm sync` next. A `.vipc` that cannot be read fails and writes nothing. A
@@ -135,8 +139,8 @@ initialized a git repository
   the file has none). `labview-version` is only reported, as a `.vipc`'s LabVIEW
   is: `labview` comes from `--labview-version` or the installed LabVIEW.
 - `[dependencies]` and `[dev-dependencies]` keep their exact versions.
-  `[nipm.dependencies]` is copied as written; lvpm reports those packages and does
-  not install them.
+  `[nipm.dependencies]` is copied as written; `lvpm sync` reports those packages
+  and does not install them.
 - What lvpm has no use for is listed on the `not used:` line, as for
   `venv create --manifest` ([the table](manifest.md#compatibility-with-vipmtoml)).
   A `vipm.toml` that cannot be converted (a floor such as `">=1.0"` where VIPM

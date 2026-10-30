@@ -25,7 +25,7 @@ Status:
 |---|---|---|
 | `install <pkg>[@ver]` | `lvpm install` | have |
 | `install <file.vip / .ogp>` | `lvpm cache add <file>`, then `install` | have (two steps) |
-| `install <file.vipc>` | `lvpm init --from <file.vipc>` | have |
+| `install <file.vipc>` | `lvpm init --from <file.vipc>`, then `lvpm sync` | have (two steps) |
 | `install <file.dragon>` | — | n/a (VIPM discontinued `.dragon`; not supported, not planned) |
 | `install --upgrade` | `lvpm lock --upgrade` / `--upgrade-package`; `lvpm update` | partial; `update` planned (M1) |
 | `uninstall` | `lvpm uninstall` / `--all` | have |

@@ -82,7 +82,7 @@ the manifest's `labview`.
 | --------- | ------ | ---------------------------------------------------------------------------------------------- |
 | `name`    | string | Shown in the install banner. Optional.                                                         |
 | `version` | string | Recorded, not acted on. Optional.                                                              |
-| `labview` | string | The **minimum** LabVIEW year the project supports, e.g. `"2025"`. Optional but recommended. |
+| `labview` | string | The **minimum** LabVIEW year the project supports, written `">=YYYY"`, for example `">=2025"`. Optional but recommended. |
 
 `labview` is a floor, not a pin:
 
@@ -266,7 +266,9 @@ $ lvpm venv create --manifest vipm.toml        # venv beside it, bound to labvie
 
 In this fork a `vipm.toml`'s packages cannot be installed yet: `install
 --manifest` is refused, and `lock` and `sync` read only `lvpm.toml`. Upstream
-installs them with `lvpm install --manifest vipm.toml`.
+installs them with `lvpm install --manifest vipm.toml`. `lvpm init --from
+vipm.toml` copies them into an `lvpm.toml`, after which `sync` installs them
+(below).
 
 `venv create --manifest` writes no `lvpm.toml` skeleton: a skeleton is
 written only when `venv create` has no manifest to read.
@@ -281,7 +283,7 @@ and the rest is named as not used, as above.
 | `vipm.toml` content                                  | lvpm                                                                                             |
 | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
 | `[project] name`, `version`                          | Read.                                                                                            |
-| `[project] labview-version = "2024"`                 | Read as `labview`: VIPM's pinned year becomes lvpm's minimum.                                   |
+| `[project] labview-version = "2024"`                 | `venv create --manifest` reads it as `labview`: VIPM's pinned year becomes lvpm's minimum. `init --from` only reports it. |
 | `[project] labview-bitness`                          | Not used. lvpm takes bitness from the selected LabVIEW installation.                            |
 | `[project] description`, `authors`, `license`, ...   | Not used.                                                                                        |
 | `[dependencies] name = "1.2.3.4"`                    | Read as an exact pin. Empty versions and operators (`>=`, `*`, ...) are rejected: VIPM documents exact versions only. |

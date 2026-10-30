@@ -70,7 +70,8 @@ pub struct Seed {
 pub struct Embedded {
     pub name: String,
     pub version: String,
-    /// Where the cache says it came from, e.g. `p.vipc!/Packages/x-1.0.vip`.
+    /// Where the cache says it came from: the `.vipc`'s resolved path, `!/` and
+    /// the entry, for example `C:\work\p.vipc!/Packages/x-1.0.vip`.
     pub label: String,
     pub bytes: Vec<u8>,
 }
@@ -327,7 +328,7 @@ fn import_embedded(
 
 /// The text of the new `lvpm.toml`: the skeleton (named and versioned as the seed
 /// says, else after the folder at the first version), then each of the seed's
-/// dependencies and its `[nipm.dependencies]`.
+/// dependencies, its `[dev-dependencies]` and its `[nipm.dependencies]`.
 fn manifest_text(root: &Path, year: Option<u32>, seed: &Seed) -> Result<String, InitError> {
     let name = seed
         .name

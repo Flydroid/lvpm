@@ -174,7 +174,8 @@ enum Cmd {
         #[arg(long, default_value_t = 120)]
         wait: u64,
     },
-    /// Start a project here: write an lvpm.toml named after the folder.
+    /// Start a project here: write an lvpm.toml named after the folder, or after a
+    /// --from vipm.toml's [project] name.
     ///
     /// `labview` is --labview-version, else the newest installed LabVIEW. Then make a git
     /// repository (left alone inside one) and bind a venv to that LabVIEW when it can. An

@@ -7,7 +7,7 @@ use crate::index::entry_from_bytes;
 use crate::lvpkg::check_name;
 use crate::ops::init::{Embedded, Seed};
 use crate::project::same_name;
-use crate::version::is_version;
+use crate::version::{Version, is_version};
 use anyhow::{Result, anyhow};
 use std::fs::File;
 use std::io::{Read, Seek};
@@ -212,10 +212,10 @@ impl Vipc {
     }
 
     /// Add to `seed` the package archives the `.vipc` at `path` holds: those of
-    /// the packages it marks `Included` that `seed` takes as dependencies (an
-    /// included `Dependency` is left to lock). A package it names with no
-    /// archive inside goes to `not_embedded`; an archive that cannot be taken
-    /// is an error, and `seed` is then not to be used.
+    /// every package it marks `Included`, a `Dependency` one too, so lock finds
+    /// it with no source listing it. A package it names with no archive inside
+    /// goes to `not_embedded`; an archive that cannot be taken is an error, and
+    /// `seed` is then not to be used.
     pub fn embed(&self, path: &Path, label: &str, seed: &mut Seed) -> Result<()> {
         self.embed_within(path, label, seed, MAX_EMBEDDED_TOTAL)
     }
@@ -223,14 +223,14 @@ impl Vipc {
     /// `embed`, refusing archives that together hold more than `total` bytes.
     fn embed_within(&self, path: &Path, label: &str, seed: &mut Seed, total: u64) -> Result<()> {
         // Like `seed`, a name listed twice counts once, as its last listing.
-        let chosen: Vec<&Package> = self.packages.iter().filter(|p| p.chosen()).collect();
-        let held: Vec<&Package> = chosen
+        let all = &self.packages;
+        let held: Vec<&Package> = all
             .iter()
             .enumerate()
             .filter(|(at, p)| {
-                p.included && !chosen[at + 1..].iter().any(|q| same_name(&q.name, &p.name))
+                p.included && !all[at + 1..].iter().any(|q| same_name(&q.name, &p.name))
             })
-            .map(|(_, p)| *p)
+            .map(|(_, p)| p)
             .collect();
         if held.is_empty() {
             return Ok(());
@@ -238,21 +238,26 @@ impl Vipc {
         let mut zip = open(path).map_err(|what| anyhow!("{label}: {what}"))?;
         let mut used = 0;
         for package in held {
-            let found = find_archive(&mut zip, package, MAX_EMBEDDED_BYTES)
+            // The total is held before reading, so no more than it is ever in memory.
+            let room = total - used;
+            let (cap, limit) = match room < MAX_EMBEDDED_BYTES {
+                true => (
+                    room,
+                    format!("the {room} bytes left of {total} for all of them"),
+                ),
+                false => (MAX_EMBEDDED_BYTES, format!("{MAX_EMBEDDED_BYTES} bytes")),
+            };
+            let found = find_archive(&mut zip, package, cap, &limit)
                 .map_err(|what| anyhow!("{label}: {what}"))?;
             let (name, version) = (package.name.clone(), package.version.clone());
             match found {
                 Some((entry, bytes)) => {
                     used += bytes.len() as u64;
-                    if used > total {
-                        return Err(anyhow!(
-                            "{label}: embedded packages are larger than {total} bytes in total"
-                        ));
-                    }
                     seed.embedded.push(Embedded {
                         name,
                         version,
-                        label: format!("{label}!/{entry}"),
+                        // The resolved path, so two `p.vipc` in different folders stay apart in the cache.
+                        label: format!("{}!/{entry}", path.display()),
                         bytes,
                     });
                 }
@@ -264,13 +269,16 @@ impl Vipc {
 }
 
 /// `package`'s `<name>-<version>.vip` in `zip`, at any depth: its entry name
-/// and its bytes, read up to `cap`. `None` when no entry has that file name;
-/// the error is what is wrong with the archive. The entry name is only looked
-/// at, never used as a path, and one with a control character never matches.
+/// and its bytes, read up to `cap` (`limit` names it in the error). `None` when
+/// no entry has that file name; the error is what is wrong with the archive,
+/// including a spec that names another package or version than the listing.
+/// The entry name is only looked at, never used as a path, and one with a
+/// control character never matches.
 fn find_archive<R: Read + Seek>(
     zip: &mut ZipArchive<R>,
     package: &Package,
     cap: u64,
+    limit: &str,
 ) -> Result<Option<(String, Vec<u8>)>, String> {
     let wanted = format!("{}-{}.vip", package.name, package.version);
     let mut found = Vec::new();
@@ -296,9 +304,17 @@ fn find_archive<R: Read + Seek>(
         .read_to_end(&mut bytes)
         .map_err(|e| not_a_package(e.to_string()))?;
     if bytes.len() as u64 > cap {
-        return Err(format!("embedded {entry} is larger than 256 MiB"));
+        return Err(format!("embedded {entry} is larger than {limit}"));
     }
-    entry_from_bytes(Path::new(&entry), &bytes).map_err(|e| not_a_package(format!("{e:#}")))?;
+    let spec =
+        entry_from_bytes(Path::new(&entry), &bytes).map_err(|e| not_a_package(format!("{e:#}")))?;
+    // The cache files it under the spec's name for every project, so it must be what was listed.
+    if !same_name(&spec.name, &package.name) || spec.version != Version::parse(&package.version) {
+        return Err(format!(
+            "embedded {entry} is {} {}, not {} {}",
+            spec.name, spec.version, package.name, package.version
+        ));
+    }
     Ok(Some((entry, bytes)))
 }
 
@@ -666,7 +682,7 @@ mod tests {
             zip.write_all(bytes).unwrap();
         }
         let mut zip = ZipArchive::new(zip.finish().unwrap()).unwrap();
-        find_archive(&mut zip, &demo_package(), cap)
+        find_archive(&mut zip, &demo_package(), cap, &format!("{cap} bytes"))
     }
 
     const CAP: u64 = 1 << 20;
@@ -727,7 +743,10 @@ mod tests {
         assert_eq!(at_cap.unwrap().map(|(_, bytes)| bytes), Some(vip));
         assert_eq!(
             over,
-            Err("embedded demo_lib-1.0.0.vip is larger than 256 MiB".into())
+            Err(format!(
+                "embedded demo_lib-1.0.0.vip is larger than {} bytes",
+                len - 1
+            ))
         );
     }
 
@@ -742,9 +761,10 @@ mod tests {
     }
 
     #[test]
-    fn embed_takes_the_included_chosen_archives_and_names_where_each_came_from() {
+    fn embed_takes_every_included_archive_and_names_where_each_came_from() {
         let dir = Dir::new("embed");
         let vip = vip_bytes("demo_lib", "1.0.0");
+        let needed = vip_bytes("needed_lib", "4.0.0");
         let packages = [
             package_xml("demo_lib-1.0.0", "true", "false", "false"),
             package_xml("absent_lib-2.0.0", "true", "false", "false"),
@@ -755,14 +775,19 @@ mod tests {
         let path = dir.vipc(&[
             ("config.xml", demo(&packages).as_bytes()),
             ("Packages/demo_lib-1.0.0.vip", &vip),
-            ("Packages/needed_lib-4.0.0.vip", &vip),
+            ("Packages/needed_lib-4.0.0.vip", &needed),
         ]);
         let vipc = read(&path, "p.vipc").unwrap();
         let mut seed = vipc.seed();
 
         vipc.embed(&path, "p.vipc", &mut seed).unwrap();
 
-        assert_eq!(seed.embedded.len(), 1);
+        assert_eq!(seed.embedded.len(), 2);
+        assert_eq!(
+            seed.embedded[1].name, "needed_lib",
+            "a Dependency is embedded too"
+        );
+        assert_eq!(seed.embedded[1].bytes, needed);
         let embedded = &seed.embedded[0];
         assert_eq!(
             (
@@ -770,7 +795,11 @@ mod tests {
                 &embedded.version[..],
                 &embedded.label[..]
             ),
-            ("demo_lib", "1.0.0", "p.vipc!/Packages/demo_lib-1.0.0.vip")
+            (
+                "demo_lib",
+                "1.0.0",
+                &format!("{}!/Packages/demo_lib-1.0.0.vip", path.display())[..]
+            )
         );
         assert_eq!(embedded.bytes, vip);
         assert_eq!(
@@ -836,9 +865,28 @@ mod tests {
             .to_string();
 
         assert_eq!(seed.embedded.len(), 1);
-        assert!(
-            err.starts_with("p.vipc: embedded packages are larger than"),
-            "{err}"
+        assert_eq!(
+            err,
+            format!(
+                "p.vipc: embedded demo_lib-1.0.0.vip is larger than the {0} bytes left of {0} for all of them",
+                vip.len() - 1
+            )
         );
+    }
+
+    #[test]
+    fn an_archive_whose_spec_names_another_package_or_version_is_refused() {
+        for (name, version) in [("other_lib", "1.0.0"), ("demo_lib", "99.0.0")] {
+            let vip = vip_bytes(name, version);
+
+            let why = found_in(&[("demo_lib-1.0.0.vip", &vip)], CAP);
+
+            assert_eq!(
+                why,
+                Err(format!(
+                    "embedded demo_lib-1.0.0.vip is {name} {version}, not demo_lib 1.0.0"
+                ))
+            );
+        }
     }
 }

@@ -289,6 +289,14 @@ mod tests {
     }
 
     #[test]
+    fn printable_shows_control_characters_but_the_line_end_as_a_question_mark() {
+        assert_eq!(
+            printable("a\u{1b}[31mb\tc\r\nd\u{7}".to_string()),
+            "a?[31mb?c?\nd?"
+        );
+    }
+
+    #[test]
     fn a_phase_starting_draws_nothing_in_the_cli() {
         let (mut renderer, out, err) = renderer();
         renderer.begin(Stream::Out, "+ alpha 2.0 ... ");

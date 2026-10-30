@@ -545,19 +545,19 @@ comes from.
 ### Slice S10a: `lvpm init` and `init --from`
 
 **Depends-on:** none
-**Files:** `src/main.rs`, `src/render/edit.rs`, `crates/lvpm-core/src/events.rs`, `src/render/mod.rs`, `crates/lvpm-core/src/ops/init.rs`, `crates/lvpm-core/src/manifest_edit.rs`
+**Files:** `src/main.rs`, `src/render/init.rs`, `crates/lvpm-core/src/events.rs`, `src/render/mod.rs`, `crates/lvpm-core/src/ops/init.rs`, `crates/lvpm-core/src/vipc.rs`, `crates/lvpm-core/src/git.rs`, `crates/lvpm-core/src/manifest_edit.rs`
 
 **Shipped** in #71: `lvpm init`, `init --from` a `.vipc` and `init --from vipm.toml`.
 
 Goal: start a project, or move a VIPM project over, in one command.
 
 Acceptance criteria:
-- [ ] `lvpm init` writes a minimal `lvpm.toml` and refuses to overwrite one.
-- [ ] `lvpm init --from project.vipc` turns each package in the `.vipc` into a dependency, then `lvpm sync` installs them.
+- [x] `lvpm init` writes a minimal `lvpm.toml` and refuses to overwrite one.
+- [x] `lvpm init --from project.vipc` turns each package in the `.vipc` into a dependency, then `lvpm sync` installs them.
 
 Demo: `lvpm init --from` an existing `.vipc` project, then `lvpm sync`.
 
-Decided: a `.dragon` is refused; a pinned package is an exact version and any other a floor (`>=`).
+Decided: a `.dragon` is refused; a pinned package is an exact version and any other a floor (`>=`); a package VIPM marks as another's dependency is skipped and counted, but its embedded archive is still imported.
 
 ### Slice S10b: `lvpm info`
 

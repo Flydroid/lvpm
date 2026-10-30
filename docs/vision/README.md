@@ -13,7 +13,7 @@ This folder is this fork's direction. The upstream author's plan stays in
 
 | Step | Command | Where it is |
 |---|---|---|
-| 1. Start a library or app | `lvpm init` | planned (M1) |
+| 1. Start a library or app | `lvpm init` | **works** (also `--from` a `.vipc` or `vipm.toml`) |
 | 2. Add dependencies | `lvpm add libA@">=1.4"` | **works** (`name@constraint`; pinning a source planned (S7c); `^` not yet) |
 | 3. Develop in an isolated env | `lvpm install` → `lvpm launch` | **works** (venv + overlay, `lvpm.lock`, exact `sync`) |
 | 4. Build packages | `lvpm build` → `.lvpkg` | proposed (M2) |
@@ -51,7 +51,8 @@ Each one is usable on its own. Ticks mean done.
 - [x] `lvpm.lock` with SHA-256, `lock --check`, `sync` (also removes extras)
 - [x] `add`, `remove` (`--dev`)
 - [x] `info`
-- [ ] `init` (incl. `--from project.vipc`), `update`
+- [x] `init` (incl. `--from project.vipc`)
+- [ ] `update`
 - [ ] The first source that lists a name wins (no merging across sources)
 - [ ] Pinning a dependency to one source (`index = "<name>"`)
 - [x] `--json`, documented exit codes
