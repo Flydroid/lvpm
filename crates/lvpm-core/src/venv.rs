@@ -13,6 +13,7 @@
 //! and `--global` says the installation itself is meant.
 
 use crate::events::{Event, EventSink};
+use crate::manifest_edit;
 use crate::paths;
 use crate::project;
 use crate::target::{self, LvTarget, Roots};
@@ -284,18 +285,13 @@ pub fn create(
     // A project that has no manifest yet gets one, pinned to the LabVIEW it
     // was just bound to — that is what the minimum means from here on.
     if proj.is_none() {
-        let name = repo
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "project".to_string());
-        std::fs::write(
-            &manifest_path,
-            format!(
-                "[project]\nname = \"{name}\"\nlabview = \">={}\"\n\n[dependencies]\n",
-                target.year()
-            ),
-        )
-        .with_context(|| format!("writing {}", manifest_path.display()))?;
+        let skeleton = manifest_edit::skeleton(
+            &manifest_edit::folder_name(&repo),
+            None,
+            Some(target.year()),
+        );
+        manifest_edit::create_file(&manifest_path, &skeleton)
+            .with_context(|| format!("writing {}", manifest_path.display()))?;
         sink.emit(Event::VenvManifestWritten {
             path: manifest_path,
         });

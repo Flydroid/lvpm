@@ -57,6 +57,7 @@ const FEATURE_FILES: &[&str] = &[
     "tests/features/build-slices/s1-lvpm-build.feature",
     "tests/features/build-slices/s2-lvpm-publish.feature",
     "tests/features/build-slices/s7a-lvpkg.feature",
+    "tests/features/build-slices/s10a-lvpm-init.feature",
     "tests/features/lvpm-venv-resave/slice-2-staged-install-with-resave.feature",
     "tests/features/sources/s13-first-source-wins.feature",
 ];
@@ -114,6 +115,8 @@ pub struct CliWorld {
     pub publish: steps::publish::PublishState,
     /// What a `.lvpkg` scenario has set up and seen.
     pub lvpkg: steps::sources::LvpkgState,
+    /// What an `lvpm init` scenario has set up and seen.
+    pub init: steps::init::InitState,
 }
 
 impl CliWorld {
@@ -142,6 +145,7 @@ impl CliWorld {
             build: Default::default(),
             publish: Default::default(),
             lvpkg: Default::default(),
+            init: Default::default(),
         }
     }
 

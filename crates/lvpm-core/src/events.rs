@@ -391,6 +391,11 @@ pub enum Event {
     /// The destination already holds exactly what the lock lists.
     SyncNothingToDo,
 
+    // ---- ops::init ----
+    /// `init` wrote the project's manifest. `labview` is the year its `labview`
+    /// states, if it has one.
+    InitManifestWritten { path: PathBuf, labview: Option<u32> },
+
     // ---- ops::query ----
     /// A package's archive is not cached and is about to be downloaded.
     ArchiveFetching { name: String, version: String },

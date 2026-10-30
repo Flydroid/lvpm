@@ -6,6 +6,7 @@ pub mod add_remove;
 pub mod build;
 pub mod env;
 pub mod hooks;
+pub mod init;
 pub mod install;
 pub mod launch_cmd;
 pub mod lock;

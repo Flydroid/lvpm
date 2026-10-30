@@ -26,6 +26,43 @@ impl DependencyTable {
     }
 }
 
+/// The manifest of a new project: `[project]` with its `name`, then `version`
+/// and `labview = ">=<year>"` when given, and an empty `[dependencies]`. Built
+/// through `toml_edit`, so a name with a quote or a backslash is still TOML.
+pub fn skeleton(name: &str, version: Option<&str>, labview_year: Option<u32>) -> String {
+    let mut project = Table::new();
+    project.insert("name", Item::Value(name.into()));
+    if let Some(version) = version {
+        project.insert("version", Item::Value(version.into()));
+    }
+    if let Some(year) = labview_year {
+        project.insert("labview", Item::Value(format!(">={year}").into()));
+    }
+    let mut doc = DocumentMut::new();
+    doc.insert("project", Item::Table(project));
+    doc.insert("dependencies", Item::Table(Table::new()));
+    doc.to_string()
+}
+
+/// The name of the project in `root`: its folder's name, or `project` for a
+/// path that ends in none (a drive root, or `..`).
+pub fn folder_name(root: &Path) -> String {
+    root.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "project".to_string())
+}
+
+/// `text` as the new file `path`. A file already there is left as it is and
+/// the error is [`ErrorKind::AlreadyExists`](std::io::ErrorKind::AlreadyExists).
+pub fn create_file(path: &Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?
+        .write_all(text.as_bytes())
+}
+
 /// `text` with `name = "<constraint>"` in `table`: a new entry is added at the
 /// end of the table (the table is appended to the file when it is missing), an
 /// existing one changes its value only, keeping its same-line comment.
@@ -196,6 +233,72 @@ mirror = \"http://host/files\"
 alpha = \"1.0\"
 beta = \">=1.0\"
 ";
+
+    #[test]
+    fn the_skeleton_without_a_version_is_what_venv_create_wrote_before_it_shared_it() {
+        assert_eq!(
+            skeleton("demo", None, Some(2026)),
+            "[project]\nname = \"demo\"\nlabview = \">=2026\"\n\n[dependencies]\n"
+        );
+    }
+
+    #[test]
+    fn the_skeleton_puts_the_version_between_the_name_and_labview_and_leaves_out_what_is_not_given()
+    {
+        assert_eq!(
+            skeleton("demo", Some("0.1.0"), Some(2023)),
+            "[project]\nname = \"demo\"\nversion = \"0.1.0\"\nlabview = \">=2023\"\n\n[dependencies]\n"
+        );
+        assert_eq!(
+            skeleton("demo", Some("0.1.0"), None),
+            "[project]\nname = \"demo\"\nversion = \"0.1.0\"\n\n[dependencies]\n"
+        );
+    }
+
+    #[test]
+    fn a_skeleton_name_with_a_quote_or_a_backslash_is_still_toml() {
+        for name in ["a \"q\" name", r"back\slash", "tab\there"] {
+            let text = skeleton(name, Some("0.1.0"), None);
+            let parsed: toml::Table = text.parse().unwrap_or_else(|why| panic!("{text}: {why}"));
+            assert_eq!(parsed["project"]["name"].as_str(), Some(name));
+        }
+    }
+
+    #[test]
+    fn a_skeleton_takes_a_dependency_like_any_manifest() {
+        let after = set(
+            &skeleton("demo", None, Some(2026)),
+            Dependencies,
+            "alpha",
+            ">=1.0",
+        )
+        .unwrap();
+        assert_eq!(
+            after,
+            "[project]\nname = \"demo\"\nlabview = \">=2026\"\n\n[dependencies]\nalpha = \">=1.0\"\n"
+        );
+    }
+
+    #[test]
+    fn a_folders_name_is_the_projects_and_a_path_with_none_is_called_project() {
+        assert_eq!(folder_name(Path::new("C:/Git/Serializer")), "Serializer");
+        assert_eq!(folder_name(Path::new("Serializer")), "Serializer");
+        assert_eq!(folder_name(Path::new("..")), "project");
+    }
+
+    #[test]
+    fn a_file_is_created_once_and_a_second_create_leaves_it_as_it_is() {
+        let dir = std::env::temp_dir().join(format!("lvpm-create-file-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("lvpm.toml");
+
+        create_file(&path, "first\n").unwrap();
+        let again = create_file(&path, "second\n").unwrap_err();
+
+        assert_eq!(again.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "first\n");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn a_new_entry_is_one_added_line_at_the_end_of_its_table() {

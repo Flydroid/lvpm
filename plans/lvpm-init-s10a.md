@@ -968,7 +968,7 @@ neither is a cross-cutting change.
 
 #### Wave 1
 - [ ] Slice 1: `lvpm init` writes the manifest
-  - [ ] Step 1.1: one skeleton, `lvpm init` writes it or refuses
+  - [x] Step 1.1: one skeleton, `lvpm init` writes it or refuses
   - [ ] Step 1.2: choosing LabVIEW and saying how to change it
 
 #### Wave 2

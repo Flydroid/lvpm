@@ -5,7 +5,7 @@
 //! any other output starts on a line of its own. One file per core module holds
 //! the wording of that module's events; this file routes events to them and
 //! owns the two streams. `query` words what a query returns instead, and the
-//! `launch`, `venv` and `viserver` files also word what their commands return.
+//! `init`, `launch`, `venv` and `viserver` files also word what their commands return.
 
 pub mod build;
 pub mod edit;
@@ -13,6 +13,7 @@ mod env;
 mod headless;
 mod hooks;
 mod index;
+pub mod init;
 mod install;
 pub mod json;
 pub mod launch;
@@ -155,6 +156,7 @@ impl Renderer {
             Event::HeadlessInstallationChosen { .. } | Event::HeadlessImpliesLocked => {
                 headless::render(self, event)
             }
+            Event::InitManifestWritten { .. } => init::render(self, event),
             Event::ArchiveFetching { .. } => query::render(self, event),
         }
     }

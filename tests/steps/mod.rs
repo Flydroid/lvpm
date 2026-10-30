@@ -10,6 +10,7 @@ pub mod destination;
 pub mod docs;
 pub mod headless;
 pub mod in_process;
+pub mod init;
 pub mod install;
 pub mod installation;
 pub mod json;

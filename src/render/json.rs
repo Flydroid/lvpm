@@ -133,6 +133,22 @@ mod tests {
     }
 
     #[test]
+    fn the_manifest_init_wrote_keeps_its_field_names_and_a_missing_labview_is_null() {
+        let written = |labview| {
+            serde_json::json!(Event::InitManifestWritten {
+                path: "proj/lvpm.toml".into(),
+                labview,
+            })
+        };
+        assert_eq!(
+            written(Some(2023)),
+            serde_json::json!({"event": "init_manifest_written", "data":
+                {"path": "proj/lvpm.toml", "labview": 2023}})
+        );
+        assert_eq!(written(None)["data"]["labview"], serde_json::Value::Null);
+    }
+
+    #[test]
     fn the_install_summary_carries_the_failed_resaves_only_when_there_are_any() {
         let done = |resave_failed: Vec<String>| {
             serde_json::json!(Event::InstallDone {

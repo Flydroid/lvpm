@@ -173,6 +173,11 @@ enum Cmd {
         #[arg(long, default_value_t = 120)]
         wait: u64,
     },
+    /// Start a project here: write an lvpm.toml named after the folder.
+    ///
+    /// `labview` is set from --labview-version. An existing lvpm.toml is never
+    /// replaced, and nothing is written unless every check passes.
+    Init,
     /// Install a package by name, or name@version. In a project, a bare
     /// install is `lvpm sync` and a named install is `lvpm add`, unless
     /// --global, --prefix or --labview-version say where it goes.
@@ -575,6 +580,10 @@ fn run(cli: &Cli) -> Result<Report> {
         Cmd::Start { wait } => {
             let started = ops::start::start(&env, *wait)?;
             Ok(Report::said(render::viserver::started(&started), "start"))
+        }
+        Cmd::Init => {
+            let done = ops::init::run(&env).map_err(|why| anyhow!(render::init::error(&why)))?;
+            Report::new(render::init::initialized(), &done)
         }
         Cmd::Install {
             package,

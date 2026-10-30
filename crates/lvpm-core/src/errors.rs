@@ -190,6 +190,23 @@ pub enum EditError {
     Other(#[from] anyhow::Error),
 }
 
+/// Why `init` wrote nothing.
+#[derive(Debug, thiserror::Error)]
+pub enum InitError {
+    /// The folder `--project` names is not there.
+    #[error("{} does not exist", .dir.display())]
+    ProjectMissing { dir: PathBuf },
+    /// The folder already has an `lvpm.toml`, which init never replaces.
+    #[error("{} already exists", .path.display())]
+    ManifestExists { path: PathBuf },
+    /// The LabVIEW version asked for is not a year: [`LockError`]'s own words.
+    #[error("{why}")]
+    BadLabview { value: String, why: LockError },
+    /// Anything else that went wrong: its own text.
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
 /// Why an install request could not be routed to a mode.
 #[derive(Debug, thiserror::Error)]
 pub enum RouteError {
