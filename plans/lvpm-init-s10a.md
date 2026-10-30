@@ -198,7 +198,7 @@ plural.
 | venv created | `created <dir>` / `  bound to       <label>  v<version>` |
 | venv skipped | `no venv: <why>` / `  later: lvpm venv create` (why: `no LabVIEW found`, `LabVIEW <YYYY> is not installed`, `<path> already has a venv`, or venv::create's own reason) |
 | `--project` missing | `error: <dir> does not exist; nothing was written` |
-| end | `next: lvpm sync`, or with no `labview`: `next: add labview = ">=YYYY" to lvpm.toml, then lvpm sync` |
+| end | `next: lvpm sync` when a venv was created; `next: lvpm venv create` when it was skipped (sync refuses a manifest with no venv); with no `labview`: `next: add labview = ">=YYYY" to lvpm.toml, then lvpm venv create` |
 
 `.lv-venv/.gitignore` (`*`, written by `venv::create`) keeps the venv out
 of `git add -A` in the push hint.
@@ -309,7 +309,7 @@ Unit level (`ops/init.rs` with fake targets, `src/render/init.rs`):
     Given no LabVIEW is installed
     When init runs with no --labview-version
     Then the manifest has no labview key, InitNoLabview is emitted and run returns Ok
-    And the rendered end line is "next: add labview = \">=YYYY\" to lvpm.toml, then lvpm sync"
+    And the rendered end line is "next: add labview = \">=YYYY\" to lvpm.toml, then lvpm venv create"
 
   Scenario: the skeleton is the venv create skeleton
     Then skeleton("demo", None, Some(2026)) is byte for byte what venv::create wrote before this change
@@ -721,7 +721,7 @@ the assumption 3.3's precondition checks):
 ### Slice 5: document `init` and `init --from .vipc`
 
 **Depends-on:** 3
-**Files:** `docs/usage.md`, `docs/cli.md`, `docs/vipm-cli-comparison.md`, `docs/vision/build-slices.md`, `tests/steps/docs.rs`, `tests/features/build-slices/s10a-lvpm-init.feature`
+**Files:** `docs/usage.md`, `docs/cli.md`, `docs/vision/vipm-cli-comparison.md`, `docs/vision/build-slices.md`, `tests/steps/docs.rs`, `tests/features/build-slices/s10a-lvpm-init.feature`
 
 Slice 5 comes before slice 4, so it can ship while #89 is open.
 
@@ -733,7 +733,7 @@ Slice 5 comes before slice 4, so it can ship while #89 is open.
     And docs/usage.md has a "## Starting a project" section containing "Dependency", "Pinned", "Included" and "lvpm venv remove"
     And docs/usage.md does not mention "init --from vipm.toml"
     And docs/cli.md does not list init as missing
-    And docs/vipm-cli-comparison.md says .dragon is not planned
+    And docs/vision/vipm-cli-comparison.md says .dragon is not planned
 ```
 
 **Steps:**
@@ -752,7 +752,7 @@ Slice 5 comes before slice 4, so it can ship while #89 is open.
 helpers. Full suite green.
 **REFACTOR**: Write the `.vipc` rules out in one place in usage.md, and
 have the rest of usage.md link there.
-**Files**: `docs/usage.md`, `docs/cli.md`, `docs/vipm-cli-comparison.md`, `docs/vision/build-slices.md`, `tests/steps/docs.rs`, `tests/features/build-slices/s10a-lvpm-init.feature`
+**Files**: `docs/usage.md`, `docs/cli.md`, `docs/vision/vipm-cli-comparison.md`, `docs/vision/build-slices.md`, `tests/steps/docs.rs`, `tests/features/build-slices/s10a-lvpm-init.feature`
 **Commit**: `docs: lvpm init and init --from .vipc (#71)`
 
 ### Slice 4: `init --from vipm.toml`
@@ -943,6 +943,14 @@ neither is a cross-cutting change.
 - **Intermittent test failures.** One run of `cargo test --workspace` on
   2026-10-30 failed one lvpm-core lib test and one test in a 5-test
   binary; three reruns passed. The failing tests were not identified.
+- **Slice 2 review, deferred.** (a) A folder with a `.lv-venv` but no
+  `lvpm.toml` ends with `next: lvpm venv create`, which refuses again;
+  `lvpm sync` would work. Fixing it needs a typed `VenvSkip`, which would
+  also move the wording into the renderer. Rare, so left as is. (b) The
+  manifest is written before git, so a re-run after a git failure gets
+  "already exists", which doesn't mention git. (c) `GitOutcome` lives in
+  `git.rs`, not `events.rs`, and `init::run` takes its git runner outside
+  `OpEnv`. (d) `installed` carries display labels in the JSON.
 - **#89 merged into main on 2026-10-30** and is merged into this branch, so slice 4 ships here. (Was: if #89 is still open,
   the first PR ships slices 1, 2, 3 and 5, and slice 4 follows.
 - **Embedded `.vipc` layout unverified.** The design looks for
@@ -986,7 +994,7 @@ neither is a cross-cutting change.
   - [x] Step 1.2: choosing LabVIEW and saying how to change it
 
 #### Wave 2
-- [ ] Slice 2: git repository and venv
+- [x] Slice 2: git repository and venv
   - [x] Step 2.1: git
   - [x] Step 2.2: venv
 

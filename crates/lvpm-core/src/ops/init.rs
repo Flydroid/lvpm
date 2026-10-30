@@ -90,7 +90,7 @@ fn installation_label(target: &LvTarget) -> String {
 /// when given, else the newest LabVIEW installed, and left out when there is none.
 /// Once the manifest is written, `git` makes the repository (the op does not know
 /// how git is run) and a venv is bound to the chosen LabVIEW when it can be.
-pub fn run(env: &OpEnv, git: Runner) -> Result<Initialized, InitError> {
+pub fn run(env: &OpEnv, runner: Runner) -> Result<Initialized, InitError> {
     let root = match &env.flags.project {
         Some(dir) => paths::resolve(&env.cwd, dir),
         None => paths::clean(&env.cwd),
@@ -130,7 +130,7 @@ pub fn run(env: &OpEnv, git: Runner) -> Result<Initialized, InitError> {
         env.sink.emit(Event::InitNoLabview);
     }
     env.sink.emit(Event::InitGit {
-        outcome: git::init(&root, git),
+        outcome: git::init(&root, runner),
     });
     let venv = make_venv(env, &root, choice.year, choice.path.as_deref());
     Ok(Initialized {
@@ -701,7 +701,7 @@ mod tests {
     }
 
     #[test]
-    fn a_manifest_that_appears_after_the_check_is_not_overwritten() {
+    fn write_new_refuses_an_existing_file_untouched() {
         let (scratch, root) = folder("init-race", "Raced");
         let path = root.join("lvpm.toml");
         std::fs::write(&path, "# mine\n").unwrap();

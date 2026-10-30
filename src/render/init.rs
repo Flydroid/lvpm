@@ -87,9 +87,11 @@ pub fn initialized(done: &Initialized) -> String {
         ),
         Err(skip) => format!("no venv: {}\n  later: lvpm venv create\n", skip.why),
     };
-    let next = match done.labview {
-        Some(_) => "next: lvpm sync\n",
-        None => "next: add labview = \">=YYYY\" to lvpm.toml, then lvpm sync\n",
+    // `lvpm sync` refuses a folder with an lvpm.toml and no venv.
+    let next = match (done.labview, &done.venv) {
+        (None, _) => "next: add labview = \">=YYYY\" to lvpm.toml, then lvpm venv create\n",
+        (Some(_), Ok(_)) => "next: lvpm sync\n",
+        (Some(_), Err(_)) => "next: lvpm venv create\n",
     };
     format!("{venv}{next}")
 }
@@ -98,13 +100,14 @@ pub fn initialized(done: &Initialized) -> String {
 /// written when that is so.
 pub fn error(error: &InitError) -> String {
     match error {
-        InitError::ProjectMissing { .. } => format!("{error}; nothing was written"),
+        InitError::ProjectMissing { .. } | InitError::BadLabview { .. } => {
+            format!("{error}; nothing was written")
+        }
         InitError::ManifestExists { .. } => format!(
             "{error}; lvpm init does not overwrite it\n  \
              this folder is already an lvpm project: lvpm add puts packages in it, \
              lvpm venv create makes its venv"
         ),
-        InitError::BadLabview { .. } => format!("{error}; nothing was written"),
         InitError::Other(cause) => format!("{cause:#}"),
     }
 }
@@ -303,7 +306,7 @@ mod tests {
     fn a_skipped_venv_gives_its_reason_and_the_bare_command_for_later() {
         assert_eq!(
             initialized(&done(Some(2025), skipped("LabVIEW 2025 is not installed"))),
-            "no venv: LabVIEW 2025 is not installed\n  later: lvpm venv create\nnext: lvpm sync\n"
+            "no venv: LabVIEW 2025 is not installed\n  later: lvpm venv create\nnext: lvpm venv create\n"
         );
     }
 
@@ -312,7 +315,7 @@ mod tests {
         assert_eq!(
             initialized(&done(None, skipped("no LabVIEW found"))),
             "no venv: no LabVIEW found\n  later: lvpm venv create\n\
-             next: add labview = \">=YYYY\" to lvpm.toml, then lvpm sync\n"
+             next: add labview = \">=YYYY\" to lvpm.toml, then lvpm venv create\n"
         );
     }
 

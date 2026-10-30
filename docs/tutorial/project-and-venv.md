@@ -9,8 +9,8 @@ $ cd C:\Git\HelloLvpm
 
 ## Write lvpm.toml
 
-`lvpm.toml`, the project manifest, says what the project is and what it depends on. There is no
-`lvpm init` yet, so write it by hand. Create `lvpm.toml` with:
+`lvpm.toml`, the project manifest, says what the project is and what it depends on. `lvpm init`
+writes one in an empty folder; to write it by hand instead, create `lvpm.toml` with:
 
 ```toml
 [project]

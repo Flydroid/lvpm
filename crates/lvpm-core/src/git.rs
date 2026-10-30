@@ -44,6 +44,15 @@ pub fn init(root: &Path, run: Runner) -> GitOutcome {
     }
     let mut command = Command::new("git");
     command.arg("init").current_dir(root);
+    // A caller's repository choice must not redirect the new one.
+    for var in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_COMMON_DIR",
+    ] {
+        command.env_remove(var);
+    }
     match run(&mut command) {
         Ok(output) if output.status.success() => GitOutcome::Initialized,
         Ok(output) => GitOutcome::Failed {
@@ -56,12 +65,12 @@ pub fn init(root: &Path, run: Runner) -> GitOutcome {
     }
 }
 
-/// What git said on stderr, else how it exited.
+/// The first line git said on stderr, so a warning stays one line; else how it exited.
 fn failure_text(output: &Output) -> String {
     let said = String::from_utf8_lossy(&output.stderr);
-    match said.trim() {
-        "" => output.status.to_string(),
-        text => text.to_string(),
+    match said.lines().map(str::trim).find(|line| !line.is_empty()) {
+        Some(line) => line.to_string(),
+        None => output.status.to_string(),
     }
 }
 
@@ -108,6 +117,14 @@ mod tests {
     /// What a fake runner was asked to run: program, arguments, folder.
     type Call = (OsString, Vec<OsString>, Option<PathBuf>);
 
+    /// The one call `init` made, which must be `git init` in `root`.
+    fn assert_git_init_in(root: &Path, calls: &[Call]) {
+        assert_eq!(
+            calls,
+            [("git".into(), vec!["init".into()], Some(root.to_path_buf()))]
+        );
+    }
+
     /// `init` on `root` with a runner that answers `answer` and keeps its calls.
     fn run_init(root: &Path, answer: impl Fn() -> io::Result<Output>) -> (GitOutcome, Vec<Call>) {
         let calls = RefCell::new(Vec::new());
@@ -149,7 +166,7 @@ mod tests {
     }
 
     #[test]
-    fn a_tree_with_no_git_has_no_work_tree_at_or_above_it() {
+    fn a_tree_with_no_git_has_no_work_tree_within_it() {
         let (tree, deep) = Tree::new("none", "a/b");
 
         // The temp directory itself is outside any repository on a sound machine.
@@ -166,9 +183,33 @@ mod tests {
         let (outcome, calls) = run_init(&root, || fake_output(0, ""));
 
         assert_eq!(outcome, GitOutcome::Initialized);
+        assert_git_init_in(&root, &calls);
+    }
+
+    #[test]
+    fn the_callers_repository_choice_is_cleared_for_git_init() {
+        let (_tree, root) = Tree::new("env", "a");
+        let cleared = RefCell::new(Vec::new());
+
+        init(&root, &|command| {
+            *cleared.borrow_mut() = command
+                .get_envs()
+                .filter(|(_, value)| value.is_none())
+                .map(|(key, _)| key.to_owned())
+                .collect::<Vec<_>>();
+            fake_output(0, "")
+        });
+
+        let mut cleared = cleared.into_inner();
+        cleared.sort();
         assert_eq!(
-            calls,
-            [("git".into(), vec!["init".into()], Some(root.clone()))]
+            cleared,
+            [
+                "GIT_COMMON_DIR",
+                "GIT_DIR",
+                "GIT_OBJECT_DIRECTORY",
+                "GIT_WORK_TREE"
+            ]
         );
     }
 
@@ -179,7 +220,7 @@ mod tests {
         let (outcome, calls) = run_init(&root, || Err(io::Error::from(ErrorKind::NotFound)));
 
         assert_eq!(outcome, GitOutcome::GitMissing);
-        assert_eq!(calls.len(), 1);
+        assert_git_init_in(&root, &calls);
     }
 
     #[test]

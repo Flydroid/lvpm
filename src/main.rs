@@ -176,8 +176,9 @@ enum Cmd {
     },
     /// Start a project here: write an lvpm.toml named after the folder.
     ///
-    /// `labview` is --labview-version, else the newest installed LabVIEW. An existing lvpm.toml is never
-    /// replaced, and nothing is written unless every check passes.
+    /// `labview` is --labview-version, else the newest installed LabVIEW. Then make a git
+    /// repository (left alone inside one) and bind a venv to that LabVIEW when it can. An
+    /// existing lvpm.toml is never replaced, and nothing is written unless every check passes.
     Init,
     /// Install a package by name, or name@version. In a project, a bare
     /// install is `lvpm sync` and a named install is `lvpm add`, unless
