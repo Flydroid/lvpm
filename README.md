@@ -12,6 +12,7 @@ VIs' links and run the packages' install hooks.
 Not affiliated with JKI or NI. Working, in active development; see
 [docs/roadmap.md](docs/roadmap.md) and [Known limitations](#known-limitations).
 
+<!-- ANCHOR: how-it-works -->
 ## How it works
 
 ```mermaid
@@ -32,6 +33,7 @@ flowchart LR
 In a project, `lvpm.toml` says what you depend on. `lvpm.lock` records the
 exact versions, so every machine and CI job gets the same packages, byte for
 byte.
+<!-- ANCHOR_END: how-it-works -->
 
 ## Install
 
@@ -103,6 +105,8 @@ is the reference and the term-by-term map from OGPT to lvpm.
 
 ## JSON output and exit codes
 
+<!-- ANCHOR: json-output -->
+
 `--json` makes every command but the diagnostics (`app-probe`, `vi-probe`,
 `vi-save`, `vi-run`) write JSON Lines to stdout. Each event is one line,
 `{"event": "<name>", "data": {...}}`, for example
@@ -128,8 +132,12 @@ The exit code is the same with or without `--json`:
 
 The event names, the result and error keys and these codes are stable: a
 change to them is a breaking change and gets a major version.
+<!-- ANCHOR_END: json-output -->
 
 ## Learn more
+
+The documentation site, <https://thatstheend.github.io/lvpm/>, holds all of
+the below as one book, starting with a tutorial.
 
 | Document | What is in it |
 | --- | --- |
@@ -138,6 +146,7 @@ change to them is a breaking change and gets a major version.
 | [docs/labview-integration.md](docs/labview-integration.md) | What an install does inside LabVIEW: relinking, install hooks, VI Server |
 | [docs/ci-docker.md](docs/ci-docker.md) | Running lvpm headless in NI's Windows container |
 | [docs/ogpm-model.md](docs/ogpm-model.md) | The OpenG package model lvpm implements, mapped term by term |
+| [docs/adr/](docs/adr/README.md) | Architecture decisions, and why |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Development setup, PR rules, releases, code layout |
 
 ## Known limitations

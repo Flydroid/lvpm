@@ -14,7 +14,7 @@ what lvpm builds. S1 built the writer, and lvpm installs its output. S1b
 tested whether VIPM installs it too. It does not.
 
 What S1b found, on VIPM 26.3.0 with LabVIEW 2026 64-bit (details in the
-[S1b spec](../specs/lvpm-vip-roundtrip-s1b.md#outcome)):
+[S1b spec](https://github.com/ThatsTheEnd/lvpm/blob/main/docs/specs/lvpm-vip-roundtrip-s1b.md#outcome)):
 
 - **VIPM checks the `ID` key in the `spec`.** It is a 32-digit hex value
   that VIPM's own package builder writes. With the `ID` missing, empty,
@@ -23,7 +23,7 @@ What S1b found, on VIPM 26.3.0 with LabVIEW 2026 64-bit (details in the
 - **lvpm cannot write that `ID`.** How it is computed is not published. The
   obvious hashes (MD5, SHA-1 and SHA-256 over the spec, the entries or the
   per-file hashes) did not reproduce any of five known IDs. The only way
-  left is to study VIPM's code, which [PROVENANCE.md](../../PROVENANCE.md)
+  left is to study VIPM's code, which [PROVENANCE.md](https://github.com/ThatsTheEnd/lvpm/blob/main/PROVENANCE.md)
   rules out.
 - **A passing install can be fake.** VIPM installs its own cached copy when
   the name and version are already known to it, whatever the file holds. The
