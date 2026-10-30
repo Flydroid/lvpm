@@ -212,6 +212,16 @@ impl<'a> OpEnv<'a> {
         )
     }
 
+    /// Where the relink VI and a staged PostUninstall hook are written. `%TEMP%`
+    /// on Windows; on Linux LabVIEW cannot open files under the private
+    /// `/tmp` a sandboxed shell may see, so the cache instead.
+    pub fn work_dir(&self) -> PathBuf {
+        match cfg!(windows) {
+            true => std::env::temp_dir(),
+            false => self.config.cache.clone(),
+        }
+    }
+
     /// The manifest a command belongs to: `explicit` (`--manifest`) names it;
     /// else the venv's `repo` when one is in effect; else `--project`'s; else
     /// the nearest `lvpm.toml` at or above the working directory. None is fine
@@ -223,15 +233,28 @@ impl<'a> OpEnv<'a> {
     ) -> Result<Option<(PathBuf, Project)>> {
         let path = match (explicit, repo, &self.flags.project) {
             (Some(p), _, _) => Some(self.cwd.join(p)),
-            (None, Some(r), _) => Some(r.join(project::FILE_NAME)),
+            // A venv created with `--manifest` may have no `lvpm.toml` beside it.
+            (None, Some(r), _) => Some(r.join(project::FILE_NAME)).filter(|p| p.is_file()),
             (None, None, Some(dir)) => {
                 Some(self.cwd.join(dir).join(project::FILE_NAME)).filter(|p| p.is_file())
             }
             (None, None, None) => project::find_manifest(&self.cwd),
         };
         match path {
-            Some(p) => Ok(Some((paths::resolve(&self.cwd, &p), project::read(&p)?))),
+            Some(p) => Ok(Some((
+                paths::resolve(&self.cwd, &p),
+                self.read_manifest(&p)?,
+            ))),
             None => Ok(None),
+        }
+    }
+
+    /// Read a manifest file. A `vipm.toml` goes through the VIPM conversion; it
+    /// is only ever reached through `--manifest`, never discovered.
+    pub fn read_manifest(&self, path: &Path) -> Result<Project> {
+        match crate::vipm_interop::is_toml(path) {
+            true => crate::vipm_interop::read_toml(path, self.sink),
+            false => project::read(path),
         }
     }
 

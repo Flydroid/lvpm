@@ -185,6 +185,24 @@ Branches must also be up to date before merging. An admin sets this in the repos
 image row never changes the required checks.
 The design is in [the CI spec](docs/specs/lvpm-ci-pipeline.md).
 
+### Documentation site
+
+`docs/` is also an [mdBook](https://rust-lang.github.io/mdBook/):
+[docs/SUMMARY.md](docs/SUMMARY.md) is its table of contents.
+[docs.yml](.github/workflows/docs.yml) builds it and checks its links on every
+PR (an advisory check, not part of `ci-ok`) and deploys it to GitHub Pages
+from `main`. It drops `docs/vision`, `specs` and `manual` from the output, so
+a new internal folder under `docs/` goes on that list. A new page that belongs in the
+book needs a line in `SUMMARY.md`; a link from a book page to a file outside
+the book (specs, vision, files outside `docs/`) is a full GitHub URL. To build
+it locally, with the versions the workflow pins:
+
+```console
+cargo install --locked mdbook@0.5.4 mdbook-mermaid@0.17.1
+mdbook-mermaid install .
+mdbook serve --open        # target/book
+```
+
 ### Release failed
 
 Failed runs show as red **Release** runs on `main` under

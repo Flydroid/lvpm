@@ -109,10 +109,10 @@ fn say_if_still_listed(env: &OpEnv, package: &str) {
 }
 
 /// Where the PostUninstall hook is copied to run from: a file directly in the
-/// temp directory, whatever the record's package name holds. The name comes
+/// `dir` (`OpEnv::work_dir`), whatever the record's package name holds. The name comes
 /// from a file on disk, so anything but letters, digits, `_`, `-` and `.` (a
 /// separator, a drive or stream colon) is replaced.
-fn staged_hook_path(package: &str) -> PathBuf {
+fn staged_hook_path(dir: &Path, package: &str) -> PathBuf {
     let name: String = package
         .chars()
         .map(
@@ -122,7 +122,7 @@ fn staged_hook_path(package: &str) -> PathBuf {
             },
         )
         .collect();
-    std::env::temp_dir().join(format!("lvpm-{name}-PostUninstall.vi"))
+    dir.join(format!("lvpm-{name}-PostUninstall.vi"))
 }
 
 /// Remove one package and run its uninstall hooks. Returns the file count, so
@@ -162,8 +162,9 @@ pub fn uninstall_one(env: &OpEnv, session: &mut InstallSession, package: &str) -
     // hook VI itself, so it runs from a copy that outlives the uninstall.
     let post = match &before.post_uninstall_vi {
         Some(hook) if hooks => {
-            let tmp = staged_hook_path(&before.name);
-            match std::fs::copy(hook, &tmp) {
+            let dir = env.work_dir();
+            let tmp = staged_hook_path(&dir, &before.name);
+            match std::fs::create_dir_all(&dir).and_then(|_| std::fs::copy(hook, &tmp)) {
                 Ok(_) => Some(tmp),
                 Err(e) => {
                     env.sink.emit(Event::PostUninstallNotStaged {
@@ -289,7 +290,7 @@ mod tests {
             "stream:name",
             "..",
         ] {
-            let staged = staged_hook_path(name);
+            let staged = staged_hook_path(&temp, name);
             assert_eq!(staged.parent(), Some(temp.as_path()), "{name}: {staged:?}");
             let file = staged.file_name().unwrap().to_string_lossy();
             assert!(
@@ -298,7 +299,7 @@ mod tests {
             );
         }
         assert_eq!(
-            staged_hook_path("oglib_error").file_name().unwrap(),
+            staged_hook_path(&temp, "oglib_error").file_name().unwrap(),
             "lvpm-oglib_error-PostUninstall.vi"
         );
     }

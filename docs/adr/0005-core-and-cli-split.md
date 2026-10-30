@@ -10,9 +10,9 @@ Accepted
 
 The lockfile work split lvpm into a library and a front end, so a TUI,
 `--json` and tests can drive the same operations
-([lvpm-tui.md](../specs/lvpm-tui.md), AC-K1 to AC-K6). The rule is built and
+([lvpm-tui.md](https://github.com/ThatsTheEnd/lvpm/blob/main/docs/specs/lvpm-tui.md), AC-K1 to AC-K6). The rule is built and
 enforced, but it is written down only in that spec and restated in
-[build-slices.md](../vision/build-slices.md). Slices should cite one place.
+[build-slices.md](https://github.com/ThatsTheEnd/lvpm/blob/main/docs/vision/build-slices.md). Slices should cite one place.
 
 Upstream ([Flydroid/lvpm](https://github.com/Flydroid/lvpm)) has the same goal
 with a different shape. Its `docs/refactor-main.md` (PR #15) splits a

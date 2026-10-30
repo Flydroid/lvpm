@@ -26,6 +26,14 @@ pub(super) fn render(r: &mut Renderer, event: &Event) {
             Stream::Err,
             &format!("starting {labview} on the venv and waiting for VI Server on port {port}..."),
         ),
+        Event::VenvLabviewStillStarting { port } => r.line(
+            Stream::Err,
+            &format!("waiting for the LabVIEW still starting on this venv (VI Server port {port})..."),
+        ),
+        Event::PortInTimeWait { port } => r.line(
+            Stream::Err,
+            &format!("waiting for port {port} to leave TIME_WAIT, or LabVIEW would start without VI Server..."),
+        ),
         _ => unreachable!("routed here by Renderer::render: {event:?}"),
     }
 }

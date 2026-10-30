@@ -33,9 +33,10 @@ use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::path::Path;
 use std::time::Duration;
 
-/// Read a `key=value` token out of a target's `LabVIEW.ini`.
+/// Read a `key=value` token out of a target's `LabVIEW.ini` (`labview.conf`
+/// on Linux — see [`LvTarget::ini`]).
 fn ini_token(target: &LvTarget, key: &str) -> Option<String> {
-    let text = std::fs::read_to_string(target.path.join("LabVIEW.ini")).ok()?;
+    let text = std::fs::read_to_string(target.ini()).ok()?;
     for line in text.lines() {
         let line = line.trim();
         if let Some(rest) = line.strip_prefix(key)
@@ -57,17 +58,26 @@ pub(crate) fn vi_server_port(target: &LvTarget) -> u16 {
         .unwrap_or(3363)
 }
 
+/// Whether LabVIEW serves VI Server over TCP when its ini says nothing: on for
+/// Windows; off on Linux, where a 2026 Q3 started on an ini without the key
+/// never listens (NI's Linux container image sets it for that reason).
+#[cfg(windows)]
+const VI_SERVER_DEFAULT: bool = true;
+#[cfg(target_os = "linux")]
+const VI_SERVER_DEFAULT: bool = false;
+
 /// Fail early, and legibly, when a target cannot accept a VI Server client.
 pub fn check_vi_server(target: &LvTarget) -> Result<u16> {
     let enabled = ini_token(target, "server.tcp.enabled")
         .map(|v| v.eq_ignore_ascii_case("true"))
-        // Absent means LabVIEW's own default, which is on.
-        .unwrap_or(true);
+        // Absent means LabVIEW's own default.
+        .unwrap_or(VI_SERVER_DEFAULT);
     if !enabled {
         bail!(
-            "VI Server is disabled for {} (server.tcp.enabled=False in LabVIEW.ini).\n\
-             Enable it in Tools >> Options >> VI Server.",
-            target.label()
+            "VI Server is disabled for {} (server.tcp.enabled is not True in {}).\n\
+             Enable it in Tools >> Options >> VI Server, or add server.tcp.enabled=True there.",
+            target.label(),
+            target.ini().display()
         );
     }
     Ok(vi_server_port(target))
@@ -107,10 +117,15 @@ pub fn ensure_vi_server(
         return Ok(port);
     }
 
-    let exe = target.path.join("LabVIEW.exe");
+    let exe = target.exe();
     if !exe.is_file() {
-        bail!("no LabVIEW.exe in {}", target.path.display());
+        bail!(
+            "no {} in {}",
+            exe.file_name().unwrap_or_default().to_string_lossy(),
+            target.path.display()
+        );
     }
+    crate::launch::wait_port_released(port, sink);
     sink.emit(Event::LabviewStarting {
         labview: target.label(),
         port,
@@ -1038,15 +1053,27 @@ impl<'a> Reader<'a> {
             let n = body.take(1)?[0] as usize;
             parts.push(String::from_utf8_lossy(body.take(n)?).into_owned());
         }
-        // A drive letter comes back as a bare component: "C" is "C:".
-        if kind == 0
-            && let Some(first) = parts.first_mut()
-            && first.len() == 1
-            && first.chars().all(|c| c.is_ascii_alphabetic())
+        #[cfg(windows)]
         {
-            first.push(':');
+            // A drive letter comes back as a bare component: "C" is "C:".
+            if kind == 0
+                && let Some(first) = parts.first_mut()
+                && first.len() == 1
+                && first.chars().all(|c| c.is_ascii_alphabetic())
+            {
+                first.push(':');
+            }
+            Ok(parts.join("\\"))
         }
-        Ok(parts.join("\\"))
+        // One root and no drives: "/usr/local" comes back as "usr", "local"
+        // and must be rooted again, or it reads as a relative path.
+        #[cfg(target_os = "linux")]
+        {
+            Ok(match kind {
+                0 => format!("/{}", parts.join("/")),
+                _ => parts.join("/"),
+            })
+        }
     }
 
     /// Decode the value at table entry `idx`. `depth` bounds the recursion: a
@@ -1158,6 +1185,8 @@ pub struct Connection {
 /// encoder serves both the wire protocol and any future offline path rewriting:
 /// `"PTH0" | u32 byte length | u32 component count | pascal components`, with an
 /// absolute Windows path contributing its drive letter as the first component.
+/// A Linux path is the same record without one: `/usr/local` is `usr`,
+/// `local` (verified against LabVIEW 2026 Q3 on Linux).
 pub(crate) fn encode_pth0(path: &Path) -> Result<Vec<u8>> {
     let s = path.to_string_lossy().replace('/', "\\");
     let mut parts: Vec<String> = Vec::new();
@@ -1736,12 +1765,25 @@ mod tests {
         assert_eq!(got.to_string(), r#"["Hello 1", "Hello 2"]"#);
     }
 
+    /// A Windows path as this platform spells the same place: unchanged on
+    /// Windows; elsewhere the drive goes and the separators turn, so the round
+    /// trips below check the decoder the platform actually runs.
+    fn native(windows_path: &str) -> String {
+        if cfg!(windows) {
+            return windows_path.to_string();
+        }
+        let rest = windows_path
+            .split_once(':')
+            .map_or(windows_path, |(_, r)| r);
+        rest.replace('\\', "/")
+    }
+
     /// `encode_pth0` is already pinned against a capture, so decoding is
     /// checked by round-tripping the very record LabVIEW's own client sent.
     #[test]
     fn decodes_a_pth0_record() {
-        let path = r"C:\Git\lvpm\tools\Set VI Server Logging.vi";
-        let encoded = encode_pth0(Path::new(path)).unwrap();
+        let path = native(r"C:\Git\lvpm\tools\Set VI Server Logging.vi");
+        let encoded = encode_pth0(Path::new(&path)).unwrap();
         assert_eq!(Reader::new(&encoded).pth0().unwrap(), path);
 
         // "Not A Path" carries kind 2 and no components.
@@ -1754,6 +1796,21 @@ mod tests {
                 .pth0()
                 .is_err()
         );
+    }
+
+    /// What LabVIEW 2026 Q3 on Linux answered for `Application Directory.vi`:
+    /// the same record as on Windows, minus a drive. Read back as `usr\local\...`
+    /// it would name a relative path under the working directory.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn decodes_a_linux_pth0_record_as_a_rooted_path() {
+        let rec = b"PTH0\x00\x00\x00\x13\x00\x00\x00\x03\x03usr\x05local\x04x.vi";
+        assert_eq!(Reader::new(rec).pth0().unwrap(), "/usr/local/x.vi");
+        let root = b"PTH0\x00\x00\x00\x04\x00\x00\x00\x00";
+        assert_eq!(Reader::new(root).pth0().unwrap(), "/");
+        let relative = b"PTH0\x00\x00\x00\x09\x00\x01\x00\x01\x04x.vi";
+        assert_eq!(Reader::new(relative).pth0().unwrap(), "x.vi");
+        assert_eq!(encode_pth0(Path::new("/usr/local/x.vi")).unwrap(), rec);
     }
 
     /// The action-info variant a hook VI's `Variant` control receives: named
@@ -1772,7 +1829,7 @@ mod tests {
                 ),
                 (
                     "Files Installed".into(),
-                    LvValue::array(vec![LvValue::Path(r"C:\lv\vi.lib\a.vi".into())]).unwrap(),
+                    LvValue::array(vec![LvValue::Path(native(r"C:\lv\vi.lib\a.vi"))]).unwrap(),
                 ),
             ],
         };
@@ -1790,8 +1847,12 @@ mod tests {
     #[test]
     fn round_trips_an_array_of_paths() {
         let v = LvValue::array(vec![
-            LvValue::Path(r"C:\Program Files\National Instruments\LabVIEW 2026\vi.lib\a.vi".into()),
-            LvValue::Path(r"C:\Program Files\National Instruments\LabVIEW 2026\vi.lib\b.vi".into()),
+            LvValue::Path(native(
+                r"C:\Program Files\National Instruments\LabVIEW 2026\vi.lib\a.vi",
+            )),
+            LvValue::Path(native(
+                r"C:\Program Files\National Instruments\LabVIEW 2026\vi.lib\b.vi",
+            )),
         ])
         .unwrap();
         let flat = variant(&v).unwrap();

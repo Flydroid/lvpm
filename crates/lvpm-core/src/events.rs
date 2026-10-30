@@ -61,6 +61,13 @@ pub enum Event {
     /// A LabVIEW is being started on a venv. `labview` is the installation's
     /// label, such as "LabVIEW 2026 (64-bit)".
     VenvLabviewStarting { labview: String, port: u16 },
+    /// A LabVIEW on this venv is still starting — its process is alive, its
+    /// VI Server port not yet open — so lvpm waits for it instead of starting
+    /// a second one beside it.
+    VenvLabviewStillStarting { port: u16 },
+    /// The VI Server port is held in TIME_WAIT by a closed connection; LabVIEW
+    /// on Linux started now would never listen, so lvpm waits up to 65 s.
+    PortInTimeWait { port: u16 },
 
     // ---- viserver ----
     /// A LabVIEW is being started on an installation, to get its VI Server.
@@ -73,6 +80,16 @@ pub enum Event {
     /// A headless machine's project has a manifest and no venv, so the
     /// installation itself is used. `repo` is the project's directory.
     HeadlessInstallationChosen { repo: PathBuf, labview: String },
+
+    // ---- vipm_interop ----
+    /// A `vipm.toml` was read and converted. `unused` names the fields lvpm
+    /// has no use for; `labview` is VIPM's pinned year, read as a minimum.
+    VipmManifestConverted {
+        path: PathBuf,
+        unused: Vec<String>,
+        labview: Option<String>,
+        dev_dependencies: usize,
+    },
 
     // ---- ops::install ----
     /// The install reads its packages from a project manifest. `name` and

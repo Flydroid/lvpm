@@ -161,7 +161,13 @@ pub fn hook_action_info(
 ) -> LvValue {
     let paths: Vec<LvValue> = files
         .iter()
-        .map(|f| LvValue::Path(f.replace('/', "\\")))
+        .map(|f| {
+            LvValue::Path(if cfg!(windows) {
+                f.replace('/', "\\")
+            } else {
+                f.clone()
+            })
+        })
         .collect();
     let files_installed =
         LvValue::array(paths).unwrap_or_else(|_| LvValue::empty_array(viserver::TD_PATH));

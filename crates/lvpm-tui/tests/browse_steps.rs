@@ -165,6 +165,7 @@ async fn project_with_venv(world: &mut TuiWorld) {
     venv::create(
         &project,
         Some("2025"),
+        None,
         Path::new(".venv"),
         &world.targets,
         &RecordingSink::default(),

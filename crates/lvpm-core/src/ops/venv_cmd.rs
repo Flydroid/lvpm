@@ -4,21 +4,34 @@
 //! asks the user, and says what the answer was to [`remove`] (AC-K6).
 
 use super::env::OpEnv;
+use crate::paths;
 use crate::venv::{self, Venv};
 use crate::{install, launch};
 use anyhow::{Result, bail};
 use serde::Serialize;
+use std::path::Path;
 
 /// Create the venv of the project the command is run in, or of `--project`,
 /// and bind it to a LabVIEW: `--labview-version`, else the manifest's.
-pub fn create(env: &OpEnv) -> Result<Venv> {
+/// `manifest` (an `lvpm.toml` or a `vipm.toml`) places the venv beside it
+/// instead of the project's own.
+pub fn create(env: &OpEnv, manifest: Option<&Path>) -> Result<Venv> {
     let start = match &env.flags.project {
         Some(project) => env.cwd.join(project),
         None => env.cwd.clone(),
     };
+    let explicit = match manifest {
+        Some(p) => {
+            let p = paths::resolve(&env.cwd, p);
+            let proj = env.read_manifest(&p)?;
+            Some((p, proj))
+        }
+        None => None,
+    };
     venv::create(
         &start,
         env.flags.labview_version.as_deref(),
+        explicit,
         &env.config.venv_dir,
         &env.targets,
         env.sink,
@@ -35,6 +48,8 @@ pub struct VenvStatus {
     pub not_relinked: usize,
     /// A LabVIEW is answering on the venv's VI Server port.
     pub running: bool,
+    /// Not answering yet, but a LabVIEW lvpm started for this venv is alive.
+    pub starting: bool,
 }
 
 /// The venv a command run here would use, if there is one.
@@ -43,10 +58,12 @@ pub fn status(env: &OpEnv) -> Result<Option<VenvStatus>> {
         return Ok(None);
     };
     let installed = install::list_installed(&venv.store())?;
+    let running = launch::is_listening(venv.port);
     Ok(Some(VenvStatus {
         installed: installed.len(),
         not_relinked: installed.iter().filter(|m| !m.relinked).count(),
-        running: launch::is_listening(venv.port),
+        running,
+        starting: !running && launch::is_running(&venv),
         venv,
     }))
 }
@@ -139,7 +156,7 @@ mod tests {
         env.flags.project = Some(repo.clone());
         env.flags.labview_version = Some("2026".into());
 
-        let created = create(&env).unwrap();
+        let created = create(&env, None).unwrap();
         assert_eq!(created.dir, repo.join(".lv-venv"));
         assert!(!elsewhere.join(".lv-venv").exists());
 

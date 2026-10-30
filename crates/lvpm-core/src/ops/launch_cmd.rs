@@ -26,10 +26,10 @@ pub fn launch(env: &OpEnv, lvproj: Option<&Path>) -> Result<Launched> {
         bail!("launch needs a venv: run it inside a project that has one, or pass --project <DIR>");
     };
     let venv = crate::venv::ensure_port(&venv, env.sink)?;
-    if launch::is_listening(venv.port) {
+    if launch::is_running(&venv) {
         bail!(
-            "a LabVIEW is already running on this venv (VI Server port {}) — open the project from \
-             that window, or close it and launch again",
+            "a LabVIEW is already running or starting on this venv (VI Server port {}) — open the \
+             project from that window, or close it and launch again",
             venv.port
         );
     }
@@ -42,7 +42,7 @@ pub fn launch(env: &OpEnv, lvproj: Option<&Path>) -> Result<Launched> {
         None => None,
     };
     let ini = launch::write_ini(&venv)?;
-    launch::spawn(&venv, &ini, lvproj.as_deref())?;
+    launch::spawn(&venv, &ini, lvproj.as_deref(), env.sink)?;
     Ok(Launched { venv, ini, lvproj })
 }
 

@@ -12,6 +12,14 @@ use std::path::{Path, PathBuf};
 pub const ABSENT: &str = "(absent)\n";
 /// More than this is not something a characterization scenario produces.
 const MAX_ENTRIES: usize = 10_000;
+/// What a LabVIEW started on a venv leaves in its `.lvpm/`: its own LabVIEW
+/// Data, temp and cache folders and its pid, which differ from run to run.
+const LABVIEW_RUNTIME: [&str; 4] = [
+    ".lvpm/data",
+    ".lvpm/temp",
+    ".lvpm/objcache",
+    ".lvpm/labview.pid",
+];
 
 /// The listing of `root`, with paths relative to `base` and `/` separators.
 pub fn list_files(root: &Path, base: &Path, normalise: impl Fn(&str) -> String) -> String {
@@ -39,6 +47,9 @@ fn list(root: &Path, base: &Path, file_line: impl Fn(&Path, &str) -> String) -> 
             root.display()
         );
         let shown = shown_path(&path, base);
+        if LABVIEW_RUNTIME.iter().any(|r| shown.ends_with(r)) {
+            continue;
+        }
         if path.is_dir() {
             lines.push(format!("{shown}/"));
             pending.extend(children(&path));

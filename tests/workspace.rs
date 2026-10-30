@@ -39,9 +39,17 @@ fn recorded_test_names() -> BTreeSet<String> {
     RECORDED_UNIT_TESTS
         .lines()
         .filter_map(|line| line.strip_suffix(": test"))
+        .filter(|name| cfg!(windows) || !WINDOWS_ONLY.contains(name))
         .map(str::to_owned)
         .collect()
 }
+
+/// Recorded tests that became `cfg(windows)` with the Linux port; each has a
+/// Linux counterpart beside it.
+const WINDOWS_ONLY: [&str; 2] = [
+    "relink::tests::folders_reach_labview_with_native_separators", // folders_reach_linux_labview_as_they_are
+    "relink::tests::summarize_log_counts_and_relativises", // summarize_log_relativises_linux_paths
+];
 
 /// `cargo metadata` for the workspace, dependency graph included.
 fn metadata() -> Value {

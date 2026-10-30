@@ -88,6 +88,34 @@ impl Venv {
     pub(crate) fn ini_path(&self) -> PathBuf {
         self.dir.join(".lvpm").join("labview.ini")
     }
+
+    /// The compiled-object cache of a LabVIEW on this venv. Its own, because
+    /// the shared one is a single SQLite file: a second instance on it gets
+    /// SQLITE_BUSY on every insert, and the venv's compiled code would mix
+    /// with the primary IDE's.
+    pub(crate) fn objcache_dir(&self) -> PathBuf {
+        self.dir.join(".lvpm").join("objcache")
+    }
+
+    /// The `LabVIEW Data` folder of a LabVIEW on this venv — autosave,
+    /// `ExtraVILib`, probes, crash reports — so one instance never offers to
+    /// recover another's files. Fresh: the user's own customisations there
+    /// (icon templates, right-click plugins) are not carried over.
+    pub(crate) fn data_dir(&self) -> PathBuf {
+        self.dir.join(".lvpm").join("data")
+    }
+
+    /// `TEMP`/`TMP` of a LabVIEW on this venv. LabVIEW names its log after
+    /// version and user only (`LabVIEW_64_<ver>_<user>_cur.txt`), so two
+    /// instances on the shared `%TEMP%` would write into the same file.
+    pub(crate) fn temp_dir(&self) -> PathBuf {
+        self.dir.join(".lvpm").join("temp")
+    }
+
+    /// The process id of the LabVIEW lvpm last started on this venv.
+    pub(crate) fn pid_path(&self) -> PathBuf {
+        self.dir.join(".lvpm").join("labview.pid")
+    }
 }
 
 /// What the nearest project at or above a directory amounts to.
@@ -192,18 +220,34 @@ pub(crate) fn load(repo: &Path, venv_dir: &Path, targets: &[LvTarget]) -> Result
 /// the `targets`: `labview_version` if given, else the manifest's own — which is
 /// the project's *minimum*, so a newer IDE may be chosen over it, never an
 /// older one. Installs nothing; that is `lvpm install`. `start` is an absolute
-/// path: the caller took it from the directory the command ran in.
+/// path: the caller took it from the directory the command ran in. An explicit
+/// `manifest` (already read) places the venv beside it instead.
 pub fn create(
     start: &Path,
     labview_version: Option<&str>,
+    manifest: Option<(PathBuf, project::Project)>,
     venv_dir: &Path,
     targets: &[LvTarget],
     sink: &dyn EventSink,
 ) -> Result<Venv> {
     let start = paths::clean(start);
-    let repo = match project::find_manifest(&start) {
-        Some(m) => m.parent().map(Path::to_path_buf).unwrap_or(start),
-        None => start,
+    let (repo, manifest_path, proj) = match manifest {
+        Some((path, proj)) => {
+            let repo = path.parent().map(Path::to_path_buf).unwrap_or(start);
+            (repo, path, Some(proj))
+        }
+        None => {
+            let repo = match project::find_manifest(&start) {
+                Some(m) => m.parent().map(Path::to_path_buf).unwrap_or(start),
+                None => start,
+            };
+            let path = repo.join(project::FILE_NAME);
+            let proj = match path.is_file() {
+                true => Some(project::read(&path)?),
+                false => None,
+            };
+            (repo, path, proj)
+        }
     };
     let dir = repo.join(venv_dir);
     if binding_path(&dir).is_file() {
@@ -213,11 +257,6 @@ pub fn create(
         );
     }
 
-    let manifest_path = repo.join(project::FILE_NAME);
-    let proj = match manifest_path.is_file() {
-        true => Some(project::read(&manifest_path)?),
-        false => None,
-    };
     let min_lv = proj.as_ref().and_then(|p| p.labview.as_deref());
     // Read before anything is chosen, so a `labview` that is no year is refused
     // whichever way the installation is picked.
@@ -227,8 +266,12 @@ pub fn create(
     let target =
         target::select_for_project(targets, labview_version, min_year)?.ok_or_else(|| {
             anyhow!(
-                "which LabVIEW? pass --labview-version <YYYY>, or set labview in {}\n\
+                "which LabVIEW? pass --labview-version <YYYY>, or set {} in {}\n\
                  hint: `lvpm targets` lists what is installed",
+                match crate::vipm_interop::is_toml(&manifest_path) {
+                    true => "labview-version",
+                    false => "labview",
+                },
                 manifest_path.display()
             )
         })?;
@@ -275,13 +318,17 @@ pub fn create(
             .map(|d| d.as_secs())
             .unwrap_or(0),
     };
-    std::fs::write(binding_path(&dir), serde_json::to_string_pretty(&b)?)?;
-    Ok(Venv {
+    let v = Venv {
         repo,
         dir,
         target,
         port,
-    })
+    };
+    // The venv's own ini is copied from the target's at its first LabVIEW
+    // start (`launch::write_ini`), not here, so a venv can be bound to an
+    // installation whose ini nobody has written yet.
+    std::fs::write(binding_path(&v.dir), serde_json::to_string_pretty(&b)?)?;
+    Ok(v)
 }
 
 /// Delete the venv — payload, store, binding, all of it.
@@ -433,6 +480,7 @@ mod tests {
         let v = create(
             &root,
             Some("2026"),
+            None,
             Path::new(".lv-venv"),
             &[labview_2026()],
             &NullSink,
@@ -505,6 +553,7 @@ mod tests {
             let why = create(
                 &repo,
                 Some("2026"),
+                None,
                 Path::new(".lv-venv"),
                 &[labview_2026()],
                 &NullSink,
@@ -525,6 +574,7 @@ mod tests {
         let v = create(
             &repo,
             Some("2026"),
+            None,
             Path::new(".given-venv"),
             &targets,
             &NullSink,
@@ -538,7 +588,7 @@ mod tests {
         assert_eq!(found.unwrap().dir, v.dir);
 
         let none = scratch_dir("create-none");
-        let why = create(&none, Some("2026"), Path::new(".v"), &[], &NullSink).unwrap_err();
+        let why = create(&none, Some("2026"), None, Path::new(".v"), &[], &NullSink).unwrap_err();
         assert_eq!(why.to_string(), "no LabVIEW installations detected");
         assert!(!none.join(".v").exists());
 
