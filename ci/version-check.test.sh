@@ -56,12 +56,12 @@ expect 1 "unreadable base fails" "could not read main:Cargo.toml"
 mode=--release
 setup 0.2.1 v0.2.1; pr 0.3.0; expect 0 "release of an untagged version passes" "v0.3.0 is not tagged yet"
 setup 0.3.0; expect 0 "release without a base comparison passes"
-setup 0.2.1 v0.3.0; pr 0.3.0; expect 1 "release of an existing tag fails" "tag v0.3.0 already exists" "Raise the version above 0.3.0 in a new PR."
-setup 0.2.1 v0.4.0; pr 0.3.0; expect 1 "release below the highest tag fails" 0.3.0 v0.4.0 "in a new PR."
+setup 0.2.1 v0.3.0; pr 0.3.0; expect 1 "release of an existing tag fails" "tag v0.3.0 already exists" "The next release PR must carry a version above 0.3.0."
+setup 0.2.1 v0.4.0; pr 0.3.0; expect 1 "release below the highest tag fails" 0.3.0 v0.4.0 "next release PR"
 setup 0.2.1 v0.2.1; pr 0.3.0 0.2.1 0.3.0; expect 1 "release with a stale lock fails" "lvpm 0.2.1"
 : > "$GITHUB_STEP_SUMMARY"
 setup 0.2.1 v0.3.0; pr 0.3.0; expect 1 "release failure is written to the job summary"
-if grep -qF "tag v0.3.0 already exists" "$GITHUB_STEP_SUMMARY" && grep -qF "in a new PR." "$GITHUB_STEP_SUMMARY"
+if grep -qF "tag v0.3.0 already exists" "$GITHUB_STEP_SUMMARY" && grep -qF "next release PR" "$GITHUB_STEP_SUMMARY"
 then echo "ok   job summary holds the failure and the next action"
 else echo "FAIL job summary: $(cat "$GITHUB_STEP_SUMMARY")"; failures=$((failures+1)); fi
 mode=--print-version

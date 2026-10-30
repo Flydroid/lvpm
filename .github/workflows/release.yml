@@ -1,6 +1,9 @@
 name: Release
 
-# Every merge to main releases the version in Cargo.toml. The release is a
+# A merge to main releases the version in Cargo.toml if it is not tagged yet,
+# which is the case after merging release-please's release PR
+# (release-please.yml); a merge whose version is already
+# tagged stops at guard. The release is a
 # draft until every asset is uploaded, so a failed run leaves at most a draft,
 # which install.ps1 skips and a re-run replaces. No tests run here: the PR's
 # required ci-ok check already ran them on this exact tree.
@@ -34,6 +37,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
+      release: ${{ steps.check.outputs.release }}
       version: ${{ steps.check.outputs.version }}
       prerelease: ${{ steps.check.outputs.prerelease }}
     steps:
@@ -42,11 +46,18 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
           persist-credentials: false
-      - name: Check the version is not released yet
+      - name: Decide whether this merge releases
         id: check
         run: |
-          bash ci/version-check.sh --release
           version=$(bash ci/version-check.sh --print-version)
+          # Only a merged release PR raises the version; every other merge stops here.
+          if [ "$GITHUB_EVENT_NAME" = push ] && git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            echo "v$version is already released; nothing to release until the release PR is merged." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          bash ci/version-check.sh --release
+          echo "release=true" >> "$GITHUB_OUTPUT"
           prerelease=$(bash ci/version-check.sh --print-prerelease "$version")
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
@@ -54,6 +65,7 @@ jobs:
 
   build:
     needs: [guard]
+    if: needs.guard.outputs.release == 'true'
     uses: ./.github/workflows/build.yml
 
   package:
@@ -104,12 +116,41 @@ jobs:
       - name: Publish the release
         run: gh release edit "$TAG" --draft=false
 
+  # release-please (skip-github-release) refuses to open the next release PR
+  # while a merged one is still labelled pending. Its own job, so a failure
+  # here is re-run alone, after the release is already public.
+  label-release-pr:
+    name: label release PR
+    needs: [guard, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      PENDING: 'autorelease: pending'
+      TAGGED: 'autorelease: tagged'
+      TITLE: 'chore(main): release ${{ needs.guard.outputs.version }}'
+    steps:
+      - name: Mark the merged release PR as tagged
+        run: |
+          gh label create "$TAGGED" --force
+          # REST, not `gh pr edit`: its GraphQL query fails on some gh versions.
+          prs=$(gh pr list --state merged --label "$PENDING" --json number,title --jq ".[] | select(.title == \"$TITLE\") | .number")
+          for pr in $prs; do
+            gh api -X POST "repos/$GH_REPO/issues/$pr/labels" -f "labels[]=$TAGGED" >/dev/null
+            gh api -X DELETE "repos/$GH_REPO/issues/$pr/labels/$(jq -rn --arg l "$PENDING" '$l|@uri')" >/dev/null
+          done
+          [ -n "$prs" ] || echo "::warning::No merged PR titled '$TITLE' carries '$PENDING'. If one is still pending, move its label by hand, or release-please opens no next release PR."
+
   # Reusable-workflow caller jobs cannot add steps, so this one job reports a
   # failed or cancelled job anywhere in the run.
   release-report:
     name: release report
     if: always() && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled'))
-    needs: [guard, build, package, publish]
+    needs: [guard, build, package, publish, label-release-pr]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -119,10 +160,12 @@ jobs:
           VERSION: ${{ needs.guard.outputs.version }}
         run: |
           job=$(jq -r 'to_entries | map(select(.value.result == "failure" or .value.result == "cancelled")) | .[0].key // "unknown"' <<<"$NEEDS")
-          if [ "$job" = guard ]; then
-            next="the version is already released or below the highest tag; raise the version in a new PR (see guard's summary)."
+          if [ "$job" = label-release-pr ]; then
+            next="v${VERSION} is published; only the release PR's label failed. Re-run the failed jobs, or move the merged release PR from 'autorelease: pending' to 'autorelease: tagged' by hand."
+          elif [ "$job" = guard ]; then
+            next="the version is below the highest tag (see guard's summary); fix the release PR's version."
           else
-            next="if publish failed at \"Check the version is still not released\", a newer version is already released: raise the version in a new PR. Otherwise re-run the failed jobs; a leftover draft release is replaced. See the \"Release failed\" runbook in CONTRIBUTING.md."
+            next="if publish failed at \"Check the version is still not released\", a newer version is already released: merge the next release PR. Otherwise re-run the failed jobs; a leftover draft release is replaced. See the \"Release failed\" runbook in CONTRIBUTING.md."
           fi
           echo "Release v${VERSION:-<unknown>} failed in $job: $next" | tee -a "$GITHUB_STEP_SUMMARY"
           echo "::error::Release v${VERSION:-<unknown>} failed in $job"

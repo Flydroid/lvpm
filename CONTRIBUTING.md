@@ -111,55 +111,64 @@ Only PRs that followed the agentic dev-team workflow (`/specs`, then
 A PR without them is closed without review. CI does not check this rule;
 maintainers apply it when they review.
 
-### Raise the version in every PR
+### Give the PR a conventional-commit title
 
-Every merge to `main` publishes a release, so every PR must raise
-`[workspace.package] version` in `Cargo.toml` above `main`'s, and
-`Cargo.lock` must agree. The PR's `version` check fails otherwise.
+Do not touch the version in `Cargo.toml`. PRs are squash-merged, and
+[release-please](https://github.com/googleapis/release-please) reads the
+squashed titles to pick the next version. The `conventional title` check
+fails on a title it cannot read; fixing the title re-runs only that check.
 
-- **patch** (0.4.0 → 0.4.1): fixes, docs, CI and anything else that does not
-  change what lvpm does.
-- **minor** (0.4.0 → 0.5.0): new behavior, commands or flags.
-- **major** (0.4.0 → 1.0.0): a breaking change to commands, `lvpm.toml` or
-  `lvpm.lock`. While the major version is 0, breaking changes raise the
+- `fix:`, `perf:`, `revert:`: patch (0.4.0 → 0.4.1).
+- `docs:`, `test:`, `ci:`, `chore:`, `refactor:`, `build:`, `style:`: release
+  nothing on their own.
+- `feat: ...`: new behavior, commands or flags, minor (0.4.0 → 0.5.0).
+- `feat!: ...` or a `BREAKING CHANGE:` footer: a breaking change to commands,
+  `lvpm.toml` or `lvpm.lock`. While the major version is 0, this raises the
   minor version.
 
-Edit the version in `Cargo.toml`, then update the lock file:
-
-```sh
-cargo update -w
-```
+A scope is optional: `feat(sources): ...`.
 
 ### Main moved while my PR was open
 
-Branch protection should require only the `ci-ok` check, and branches must be
-up to date with `main` before they merge (an admin sets this in the repository
-settings). When another PR merges first:
-
-1. Rebase on `main` (or press **Update branch** on the PR).
-2. If `main`'s version is now equal to or above yours, the `version` check
-   fails with `version <yours> is not above origin/main's <main's>`. Raise
-   your version above it and run `cargo update -w` again.
-3. Push. CI runs again on the updated branch.
+Branch protection should require the `ci-ok` and `conventional title` checks,
+and branches must be up to date with `main` before they merge (an admin sets
+this in the repository settings). When another PR merges first, rebase on
+`main` (or press **Update branch** on the PR) and push. Versions no longer
+collide, so nothing else needs to change.
 
 ## Releases
 
 ### How releases are made
 
-Every merge to `main` publishes the version in `Cargo.toml` as release
-`v<version>`, holding the Windows zip, the Linux tar.gz and `SHA256SUMS`.
-Each PR must raise the version (see [Raise the version in every PR](#raise-the-version-in-every-pr)).
-Releases run one at a time. If merges land faster than releases finish, a
-waiting release can be replaced by a newer one, so a version in between is
-never released; the next release has the higher version. A replaced run
-never starts, so it reports nothing: check the Releases list if a version is
-missing. The
+After every merge to `main`, [release-please.yml](.github/workflows/release-please.yml)
+opens or updates one release PR, `chore(main): release <version>`, which
+raises the version in `Cargo.toml` and `Cargo.lock` and adds the merged
+titles to `CHANGELOG.md`. Merging that PR publishes the version as release
+`v<version>`, holding the Windows zip, the Linux tar.gz and `SHA256SUMS`;
+once the version is tagged, every other merge stops at release.yml's guard
+and releases nothing.
+
+release-please needs a repository secret `RELEASE_PLEASE_TOKEN`: a token with
+contents and pull-requests write. The default token will not do, because a PR
+it opens runs no CI.
+
+To release a different version than release-please picked, add a
+`Release-As: X.Y.Z` footer to a merged commit, or edit the version in the
+release PR itself (`Cargo.toml`, `Cargo.lock` and
+`.release-please-manifest.json` together). A new crate must be added to
+`extra-files` in `release-please-config.json`, or its version is not raised.
+
+Releases run one at a time. A merge that lands while the release PR's run is
+still waiting replaces that run; the newer run releases the same version from
+the newer commit, so the release also contains that merge, but its title is
+not in that version's `CHANGELOG.md` entry and does not raise the version. The
 workflow is [release.yml](.github/workflows/release.yml); the design is in
 [the CI spec](docs/specs/lvpm-ci-pipeline.md).
 
 ### Continuous integration
 
-Every PR runs [pr.yml](.github/workflows/pr.yml): the version check, `cargo
+Every PR runs [pr-title.yml](.github/workflows/pr-title.yml) and
+[pr.yml](.github/workflows/pr.yml): `cargo
 test` on Windows and Linux, the release build and packaging, the CI lint
 checks, and the CLI smoke flow (targets, search, `lock --check`, install,
 list, uninstall) inside NI's LabVIEW images:
@@ -170,9 +179,9 @@ list, uninstall) inside NI's LabVIEW images:
 | `nationalinstruments/labview:2026q3-linux` | Linux | 2026 | |
 | `nationalinstruments/labview:2026q3-windows` | Windows | 2026 | the `@labview` acceptance scenarios |
 
-Branch protection on `main` must require the `ci-ok` check, which passes only
-when every other job passed, and must require branches to be up to date before
-merging. An admin sets this in the repository settings. Adding a job or an
+Branch protection on `main` must require two checks: `ci-ok`, which passes
+only when every other job in `pr.yml` passed, and `conventional title`.
+Branches must also be up to date before merging. An admin sets this in the repository settings. Adding a job or an
 image row never changes the required checks.
 The design is in [the CI spec](docs/specs/lvpm-ci-pipeline.md).
 
@@ -186,11 +195,20 @@ Failed runs show as red **Release** runs on `main` under
 2. If **guard** says `tag v<version> already exists`, open the
    [Releases](https://github.com/ThatsTheEnd/lvpm/releases) list first. A
    published `v<version>` with 3 assets means the release is done and there
-   is nothing to fix. Otherwise the version is taken: raise it in a new PR.
+   is nothing to fix. Otherwise the version is taken: fix the version in the
+   next release PR (a `Release-As: X.Y.Z` footer sets it). (A merge that is not the release PR never shows this; guard
+   stops it quietly. It appears on a manual run of an already released
+   version.)
 3. If **publish** failed at "Check the version is still not released", a
-   newer version was released after this run started: raise the version in a
-   new PR.
-4. For any other job, re-run the failed jobs, but not while another Release
+   newer version was released after this run started: merge the next release
+   PR.
+4. If only **label release PR** failed, the release is out, but release-please
+   opens no new release PR until the merged one is labelled
+   `autorelease: tagged`. Re-run the failed jobs, or swap its
+   `autorelease: pending` label for `autorelease: tagged` by hand. Use
+   **Re-run failed jobs**, not **Re-run all jobs**: a full re-run stops at
+   guard, because the tag now exists, and skips the label job.
+5. For any other job, re-run the failed jobs, but not while another Release
    run is in progress. A draft release left by the failed run is deleted and
    created again, and the installer never picks a draft.
 

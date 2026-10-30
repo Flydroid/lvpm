@@ -2,7 +2,8 @@
 # Fails unless the PR's workspace version is a plain MAJOR.MINOR.PATCH above
 # both <base-ref>'s version and the highest vX.Y.Z tag, and Cargo.lock agrees.
 # --release (on main, before a release) skips the base comparison and also
-# fails if tag v<version> already exists.
+# fails if tag v<version> already exists. PRs no longer raise the version
+# (release-please's release PR does); the <base-ref> mode is kept for local use.
 # Usage: version-check.sh <base-ref> | --release | --print-version | --print-prerelease <version>
 set -euo pipefail
 
@@ -18,7 +19,7 @@ esac
 fail() { # fail <message> [<version to raise above>]
   local lines=("version check failed: $1")
   if [ -n "${2:-}" ] && [ -n "$release" ]; then
-    lines+=("Nothing was tagged or published. Raise the version above $2 in a new PR.")
+    lines+=("Nothing was tagged or published. The next release PR must carry a version above $2.")
   elif [ -n "${2:-}" ]; then
     lines+=("Raise \`[workspace.package] version\` in Cargo.toml above $2, then run \`cargo update -w\`.")
   fi

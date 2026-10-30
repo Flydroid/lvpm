@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Checks the release workflow is wired safely: build and publish need guard,
+# build runs only when guard decides to release,
 # publish runs only on main outside a dry run and re-checks the version first,
 # a running release is never cancelled, the release is created as a draft and
 # made public only as the last gh call, nothing else tags, no tests run, and
@@ -20,6 +21,7 @@ job_key() { tr -d '\r' < "$file" | awk -v job="$1" -v key="$2" '
 for job in build publish; do
   [[ "$(job_key "$job" needs)" =~ (^|[^a-z-])guard([^a-z-]|$) ]] || report_violation "job '$job' must need guard."
 done
+[ "$(job_key build if)" = "needs.guard.outputs.release == 'true'" ]   || report_violation "job 'build' must have 'if: needs.guard.outputs.release == '''true'''' (only when guard decides to release)."
 report_if=$(job_key release-report if)
 [[ "$report_if" == *"'failure'"* && "$report_if" == *"'cancelled'"* ]] \
   || report_violation "job 'release-report' must run when a job failed or was cancelled."

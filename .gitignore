@@ -4,5 +4,7 @@
 *.log
 *.pcapng
 /*.json
+!/release-please-config.json
+!/.release-please-manifest.json
 
 __pycache__/

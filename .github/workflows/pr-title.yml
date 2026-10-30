@@ -1,0 +1,26 @@
+name: PR title
+
+# PRs are squash-merged, so the title becomes the commit release-please reads:
+# feat raises the minor version, fix the patch, `!` or BREAKING CHANGE the
+# minor while the major is 0. A title it cannot parse releases nothing.
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  title:
+    name: conventional title
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check the title is a conventional commit
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: bash ci/pr-title.sh "$TITLE"

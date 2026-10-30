@@ -16,6 +16,7 @@ expect() { # expect <0|1> <name> <sed script or empty> [<substring>]
 
 expect 0 "the real workflow passes" '' "release lint passed"
 expect 1 "build without guard fails" '/^  build:/,/^  [a-z]/s/needs: \[guard\]/needs: []/' "job 'build' must need guard"
+expect 1 "build without the release gate fails" "/^    if: needs.guard.outputs.release == 'true'/d" "job 'build' must have"
 expect 1 "publish without guard fails" 's/needs: \[guard, package\]/needs: [package]/' "job 'publish' must need guard"
 expect 1 "create without --draft fails" 's/gh release create "$TAG" --draft/gh release create "$TAG"/' "must pass --draft"
 expect 1 "an upload after publishing fails" '$a\      - run: gh release upload "$TAG" extra' "last gh release call"

@@ -139,8 +139,8 @@ records) and make it first-class. An earlier Python prototype,
 
 ## Packaging and distribution (from idea.txt)
 
-- **One-command install of a released `lvpm.exe`** — done: every merge to
-  `main` publishes a release with the Windows zip, a Linux tar.gz and
+- **One-command install of a released `lvpm.exe`** — done: merging the
+  release PR (release-please) publishes a release with the Windows zip, a Linux tar.gz and
   `SHA256SUMS` (see "What is automated" below), and `install.ps1` installs it.
   The original idea, kept for the reasoning: a GitHub Release per tag
   carrying `lvpm.exe` (built by CI, so the relink VI embedded in it is the one
@@ -187,11 +187,13 @@ records) and make it first-class. An earlier Python prototype,
 
 **What is automated** ([spec](specs/lvpm-ci-pipeline.md)):
 
-- PR checks: the version-bump gate, `cargo test` on Windows and Linux, the
-  release build of both binaries, packaging, an installer check, and the
-  `ci/` lints. `ci-ok` is meant to be the one required check (an admin sets it).
-- The release: every merge to `main` publishes `v<version>` with the Windows
-  zip, the Linux tar.gz and `SHA256SUMS`.
+- PR checks: a conventional-commit title, `cargo test` on Windows and Linux,
+  the release build of both binaries, packaging, an installer check, and the
+  `ci/` lints. `ci-ok` and `conventional title` are the required checks (an
+  admin sets them).
+- The release: release-please keeps one release PR that raises the version;
+  merging it publishes `v<version>` with the Windows zip, the Linux tar.gz and
+  `SHA256SUMS`.
 
 **What is still manual:** relink, MassCompile and Caraya (steps 2, 4 and 5
 below).

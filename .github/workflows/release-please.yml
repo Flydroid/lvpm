@@ -1,0 +1,40 @@
+name: Release PR
+
+# Keeps one open release PR that raises the version in Cargo.toml and
+# Cargo.lock and writes CHANGELOG.md from the conventional-commit titles merged
+# since the last release. Merging it is what releases: release.yml then sees an
+# untagged version and publishes it. release-please creates no tag or release
+# itself (skip-github-release); release.yml does both.
+# It also runs after each Release run: a merge that lands while the merged
+# release PR is still labelled pending opens nothing, so it is retried once
+# release.yml has moved the label to tagged.
+on:
+  push:
+    branches: [main]
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+    branches: [main]
+
+concurrency:
+  group: release-please
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  release-pr:
+    name: release PR
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # A PR opened with GITHUB_TOKEN triggers no workflows, so its ci-ok would
+      # never run: the token must be a PAT or app token with contents and
+      # pull-requests write.
+      - uses: googleapis/release-please-action@8b8fd2cc23b2e18957157a9d923d75aa0c6f6ad5 # v4.4.1
+        with:
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          skip-github-release: true
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json

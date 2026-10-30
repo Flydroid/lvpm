@@ -3,6 +3,8 @@
 
 **Format:** dev-team specs 14.0.1 · **Status:** gate passed · **Date:** 2026-10-25
 
+> **Superseded in part (2026-10-30):** PRs no longer raise the version, and the PR `version` job (C1, AC-V1–V5, AC-D2) is gone. release-please (`.github/workflows/release-please.yml`) keeps one release PR that raises the version and writes `CHANGELOG.md` from squash-merged conventional PR titles; `pr-title.yml` checks those titles. Only an untagged version on main releases: merging the release PR makes one, and release.yml's guard stops every merge once the version is tagged. Branch protection requires `ci-ok` and `conventional title`. The release design below is otherwise unchanged. See `CONTRIBUTING.md` → Releases.
+
 ## Intent Description
 
 lvpm has no CI. A pull request to `main` is merged on trust, and a release is built by hand on a workstation. This change adds two GitHub Actions workflows to `ThatsTheEnd/lvpm`.

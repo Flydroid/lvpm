@@ -1,3 +1,6 @@
+
+> **Superseded in part (2026-10-30):** the PR `version` job and "raise the version in every PR" are gone; release-please's release PR raises the version. See the note in `docs/specs/lvpm-ci-pipeline.md`.
+
 # Plan: CI pipeline (PR checks, LabVIEW container E2E, release on main)
 
 **Created**: 2026-10-25

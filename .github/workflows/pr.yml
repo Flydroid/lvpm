@@ -12,22 +12,6 @@ permissions:
   contents: read
 
 jobs:
-  version:
-    name: version
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-          fetch-depth: 0
-          fetch-tags: true
-          persist-credentials: false
-      - name: Self-test the version check
-        run: bash ci/version-check.test.sh
-      - name: Check the version is raised
-        run: bash ci/version-check.sh origin/main
-
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -192,12 +176,14 @@ jobs:
           done
           exit $status
 
-  # Branch protection should require only ci-ok (an admin sets it; see the
-  # spec), so adding a job or a matrix row never changes the required checks.
+  # Branch protection requires ci-ok and pr-title.yml's conventional title
+  # (an admin sets it; see CONTRIBUTING.md). ci-ok aggregates this workflow, so
+  # adding a job or a matrix row never changes the required checks; the title
+  # check stays apart so a title edit does not re-run this workflow.
   ci-ok:
     name: ci-ok
     if: always()
-    needs: [version, test, build, package, e2e, lint]
+    needs: [test, build, package, e2e, lint]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
