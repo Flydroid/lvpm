@@ -24,13 +24,14 @@ under [#57](https://github.com/ThatsTheEnd/lvpm/issues/57), and its
 `Depends-on` line became "blocked by" links. All of them are on the
 [lvpm mission](https://github.com/users/ThatsTheEnd/projects/2) board. A slice
 that was built differently from what is written here has the `deviation`
-label, and its closing comment says how. `scripts/status.ps1` shows which
+label, and its PR says how. `scripts/status.ps1` shows which
 worktree is working on what, and which slices can be built next.
 
 1. The issues were created on 2026-10-27 with `/issues-from-plan`. A slice
    added here later gets its own sub-issue of #57, with the same "blocked by"
    links.
-2. Ship one slice at a time: `/ship <issue URL>`. `/specs` turns the slice
+2. Ship one slice at a time: set its board card to In Progress (the
+   command is in [CLAUDE.md](../../CLAUDE.md)), then `/ship <issue URL>`. `/specs` turns the slice
    into intent, architecture notes and acceptance criteria and asks the
    questions listed under "Decide in `/specs`". The PR says `Closes #<issue>`.
 3. After each merge, run the slice's demo by hand and adjust the next

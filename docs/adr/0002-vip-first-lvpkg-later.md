@@ -18,7 +18,7 @@ writes `.lvpkg` only. S7a has landed: `lvpm build` writes a `.lvpkg` and the
   `install.rs`). It has no scoped names, 4-part versions, no hashes or
   signature inside, and optional install hooks (`[Script VIs]`).
 - **`.lvpkg`**: lvpm's own format, designed in
-  [distribution-design.md](../vision/distribution-design.md) and not built
+  [distribution-design.md](https://github.com/ThatsTheEnd/lvpm/blob/main/docs/vision/distribution-design.md) and not built
   yet. A deterministic zip with `package.toml`, `RECORD` (a SHA-256 per file)
   and a CycloneDX SBOM. Only lvpm will read it.
 
@@ -47,7 +47,7 @@ VIPM's current `spec` format (`File Format = "vip"`, `Format Version =
 3. **What VIPM requires is learned by black-box probing** (S1b): published
    spec files, VIPM-built reference archives, and `.vip` variants installed in
    VIPM. Nothing is decompiled or disassembled, as
-   [PROVENANCE.md](../../PROVENANCE.md) requires.
+   [PROVENANCE.md](https://github.com/ThatsTheEnd/lvpm/blob/main/PROVENANCE.md) requires.
 4. **Until S7a, `.vip` gaps are covered outside the file.**
    - Scoped dependency names use `[distribution.vip.dependency-names]`.
    - The signature is a detached attestation (S6).

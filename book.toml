@@ -1,0 +1,21 @@
+# The documentation site: `mdbook-mermaid install . && mdbook build`, output in target/book.
+[book]
+title = "lvpm"
+description = "An open-source package manager for LabVIEW"
+authors = ["lvpm contributors"]
+language = "en"
+src = "docs"
+
+[build]
+build-dir = "target/book"
+create-missing = false
+
+[preprocessor.mermaid]
+command = "mdbook-mermaid"
+
+[output.html]
+site-url = "/lvpm/"
+git-repository-url = "https://github.com/ThatsTheEnd/lvpm"
+edit-url-template = "https://github.com/ThatsTheEnd/lvpm/edit/main/docs/{path}"
+# Written by `mdbook-mermaid install .`, not committed.
+additional-js = ["mermaid.min.js", "mermaid-init.js"]
