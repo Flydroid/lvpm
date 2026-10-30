@@ -84,7 +84,9 @@ planned.
 - **One manifest template.** `manifest_edit::skeleton(name, version:
   Option<&str>, labview_year: Option<u32>) -> String` builds the text with
   `toml_edit`, so a name with a quote or a backslash still gives valid
-  TOML. `venv::create` calls it with `version: None`. A unit test pins
+  TOML. `version: None` writes no `version` line, which is what
+  `venv::create` writes today; init always passes one (`0.1.0` or the
+  source's). `venv::create` calls it with `version: None`. A unit test pins
   that call to today's exact bytes, and the `venv create` tests do not
   change. A folder name is written as it is, apart from TOML escaping.
   Whether lock accepts every folder name is not checked (see Risks).
@@ -92,12 +94,16 @@ planned.
   - With `--labview-version`, the year must parse with `labview_year`,
     or init fails naming the flag and writes nothing. It is then written
     even when that LabVIEW is not installed, and the venv step says so.
-  - Without the flag, the first of `env.targets` is chosen (`detect`
-    sorts newest first). With no targets, `labview` is left out.
-  - `retarget_year: Option<u32>` is the next distinct year below the
-    chosen one among the installations. It is typed data in the event,
-    next to the display labels. The "to target another one" lines appear
-    only when it is `Some`.
+  - Without the flag, the newest installation is chosen (`detect` sorts
+    newest first); between two bitnesses of that year, 64-bit wins. A
+    `--from` file's own LabVIEW is never used. With no targets, `labview`
+    is left out.
+  - `retarget: Option<Retarget>` is the next installation after the
+    chosen one in that order. `Retarget::Year(y)` when its year differs,
+    `Retarget::Path(p)` when it is the other bitness of the chosen year
+    (`target::select` accepts a path). It is typed data in the event, next
+    to the display labels. The "to target another one" lines appear only
+    when it is `Some`; the "edit `labview`" line only for `Year`.
 - **`vipc.rs` (new).** `vipc::read(path) -> Result<Vipc>` reads
   `config.xml` through `.take(1 MiB)`. A larger entry is refused.
   - **Scan.** A small scan reads the single `<Target>`'s `<Version>` and
@@ -106,8 +112,11 @@ planned.
   - **Refused, naming the file:** a file that is not a zip; a zip
     without `config.xml`; a config.xml with no `<Target>` or more than one;
     a missing flag tag; a flag that is no bool; a `<Name>` with no `-`; a
-    `Version` that is not `N.N`; any comment, CDATA or `&` inside the
-    scanned region. The reader refuses what it does not understand rather
+    `Version` that is not `N.N` (two-digit major, one or more minor digits,
+    nothing else: `13.0` yes; `13.0.1`, `v13.0`, `2013.0` no); any comment,
+    CDATA or `&` inside the `<Target>` element (the scanned region; text
+    outside it is never looked at); a name part that `lvpkg::check_name`
+    rejects. The reader refuses what it does not understand rather
     than guessing.
   - **Name and year.** The name is split at the last `-`, and the tail
     must parse as an lvpm version (else refused, so lock never sees a bad
@@ -130,7 +139,10 @@ planned.
 - **`git.rs` (new).** `inside_work_tree(root) -> Option<PathBuf>` walks
   up from the root looking for a `.git` entry, a directory or a file. It
   spawns nothing, so a "dubious ownership" failure can never lead to a
-  nested repository.
+  nested repository. This replaces the spec's `git rev-parse
+  --is-inside-work-tree` (logged in Risks): the walk also counts a broken
+  `.git` and one git refuses for `safe.directory`, and both mean "leave
+  git alone". It ignores `GIT_DIR`.
   - **Running git.** `init(root, run: &dyn Fn(&mut Command) ->
     io::Result<Output>)` runs `git init` with `current_dir(root)` and
     captured output, so no git text reaches the terminal or the JSON
@@ -142,7 +154,7 @@ planned.
   bare `lvpm venv create`: it reads `labview` from the manifest init just
   wrote, so a year in the hint would only repeat it. The CLI words the result after `run` returns, as `venv::created`
   does. Events carry only what happens mid-run:
-  - `InitManifestWritten { path, labview, installed, retarget_year,
+  - `InitManifestWritten { path, labview, installed, retarget,
     source_labview, source_kind }`
   - `InitNoLabview`
   - `InitDependenciesAdded { from, added, skipped }`
@@ -168,13 +180,14 @@ plural.
 | When | Text |
 |---|---|
 | manifest written | `wrote <path>` / `  labview = ">=<YYYY>"` |
-| several years installed | `  found LabVIEW <labels, comma separated>` / `  to target another one: edit `labview` in lvpm.toml, then` / `    lvpm venv remove` / `    lvpm venv create --labview-version <retarget_year>` |
+| several installations | `  found LabVIEW <labels, comma separated>` / `  to target another one:` / (`Year` only) `    edit labview in lvpm.toml` / `    lvpm venv remove` / `    lvpm venv create --labview-version <year, or "<path>">` |
 | no LabVIEW | `warning: no LabVIEW found; lvpm.toml has no `labview`. Add labview = ">=YYYY" before `lvpm lock`` |
 | source LabVIEW differs | `  the .vipc targets LabVIEW <YYYY>; lvpm.toml says >=<YYYY>` (`the vipm.toml targets` for TOML; with no `labview`, the part after `;` is left out) |
 | deps added | `added <n> dependenc(y/ies) from <file>` / `  <name> <constraint>` per line / `  skipped <n> package(s) VIPM marked as a dependency of another` (only when n > 0) |
 | embedded | `  imported <name> <version> from <file>` / `warning: <name> <version> is marked Included but is not inside <file>` / `warning: could not import <name> <version> into the cache: <why>; add it later with lvpm cache add <archive>` |
 | existing manifest | `error: <path> already exists; lvpm init does not overwrite it` / `  this folder is already an lvpm project: lvpm add puts packages in it, lvpm venv create makes its venv` |
 | bad flag | `error: --labview-version <value>: <labview_year's reason>; nothing was written` |
+| vipm.toml unreadable | `error: <file>: <read_toml's reason>; nothing was written` |
 | bad `--from` | `error: <file>: cannot be read: <io error>; nothing was written` · `error: <file>: not a zip file; nothing was written` · `error: <file>: config.xml is missing; nothing was written` · `error: <file>: config.xml: <what>; nothing was written` (what: `no <Target>`, `more than one <Target>`, `<Version> <value> is not N.N`, `package <Name>: no version (expected name-version)`, `package <Name>: <tail> is not a version`, `package <name>: <Flag> is missing`, `package <name>: <Flag> is not true or false`, `unsupported XML (<construct>)`, `larger than 1 MiB`) · `error: <file>: embedded <entry> is not a package: <why>; nothing was written` · `error: <file>: embedded <entry> is larger than 256 MiB; nothing was written` · `error: <file>: more than one <name>-<version>.vip inside; nothing was written` |
 | `.dragon` | `error: <file>: .dragon files are not supported and not planned (VIPM discontinued the format); export a .vipc from VIPM instead` |
 | git initialized | `initialized a git repository` / `  add a remote:  git remote add origin <url>` / `  first push:    git add -A && git commit -m "lvpm init" && git push -u origin HEAD` |
@@ -261,8 +274,13 @@ Unit level (`ops/init.rs` with fake targets, `src/render/init.rs`):
   Scenario: the newest is chosen and another year is offered
     Given LabVIEW 2026, 2025 and 2024 are installed
     When init runs with no --labview-version
-    Then labview is ">=2026" and retarget_year is 2025
+    Then labview is ">=2026" and retarget is year 2025
     And the rendered lines equal the table's, ending "lvpm venv create --labview-version 2025"
+
+  Scenario: a --from file's LabVIEW is not used without the flag
+    Given LabVIEW 2026 and 2025 are installed and a seed with source_labview 2013
+    When init runs with no --labview-version
+    Then labview is ">=2026"
 
   Scenario: --labview-version overrides the newest
     Given LabVIEW 2026 and 2025 are installed
@@ -277,13 +295,14 @@ Unit level (`ops/init.rs` with fake targets, `src/render/init.rs`):
   Scenario: one installation prints no hint
     Given only LabVIEW 2026 is installed
     When init runs
-    Then retarget_year is none and the rendered output has no "found LabVIEW" or "to target another one" line
+    Then retarget is none and the rendered output has no "found LabVIEW" or "to target another one" line
 
-  Scenario: two bitnesses of one year offer no other year
-    Given LabVIEW 2026 64-bit and 2026 32-bit are installed
+  Scenario: two bitnesses of one year offer the other by path
+    Given LabVIEW 2026 32-bit and 2026 64-bit are installed, 32-bit listed first
     When init runs
-    Then labview is ">=2026", retarget_year is none
-    And the rendered output names both installations and has no "to target another one" line
+    Then labview is ">=2026", the 64-bit one is chosen, and retarget is the 32-bit one's path
+    And the rendered output names both installations, has no "edit `labview`" line
+    And ends "    lvpm venv create --labview-version \"<32-bit path>\""
 
   Scenario: no LabVIEW, the manifest has no labview
     Given no LabVIEW is installed
@@ -324,12 +343,12 @@ now share into one helper.
 #### Step 1.2: choosing LabVIEW and saying how to change it
 
 **Complexity**: standard
-**IMPLEMENT**: Choose the LabVIEW and compute `retarget_year` as the
+**IMPLEMENT**: Choose the LabVIEW and compute `retarget` as the
 design notes describe. Emit `InitNoLabview`. Render the hint lines, the
 warning and the conditional `next:` line.
 **TEST**: Every slice 1 unit scenario except the skeleton ones. Add the
 `@labview` scenario. Full suite green.
-**REFACTOR**: Take the choice and `retarget_year` from one pass over the
+**REFACTOR**: Take the choice and `retarget` from one pass over the
 sorted list.
 **Files**: `crates/lvpm-core/src/ops/init.rs`, `crates/lvpm-core/src/events.rs`, `src/render/init.rs`, `tests/features/build-slices/s10a-lvpm-init.feature`, `tests/steps/init.rs`
 **Commit**: `feat(init): labview is the newest installed, with a hint when there are several (#71)`
@@ -371,7 +390,7 @@ sorted list.
     Given a folder feed with the pilot packages
     When I run "lvpm init --labview-version 2026" in an empty folder
     Then the folder has a venv bound to LabVIEW 2026
-    And "lvpm add labview_open_source_project_lib_labview_open_source_palette" installs it into that venv
+    And "lvpm add labview_open_source_project_lib_labview_open_source_palette" installs it into that venv, read with the existing venv-content step
 ```
 
 Unit level (`git.rs` with an injected runner; `ops/init.rs` with fake targets and a temp dir):
@@ -583,7 +602,7 @@ Unit level (`vipc.rs`, on zips built in the test):
       | "&amp;" in a <Name>                 | unsupported XML (entity)                       |
       | a config.xml of 2 MiB               | larger than 1 MiB                              |
 
-  Scenario: Vipc::seed applies the rules
+  Scenario: Vipc::seed applies the rules (also: a name listed twice keeps the last and counts once; Included and Dependency is skipped and not embedded)
     Given packages chosen-pinned, chosen-floating, dependency-pinned and dependency-floating
     Then seed has two deps, exact and ">=", skipped is 2, and source_labview is the target year
 
@@ -688,6 +707,14 @@ the assumption 3.3's precondition checks):
     When I run "lvpm init --from Serializer.vipc --labview-version 2026" in its folder
     And I run "lvpm sync"
     Then the venv holds the serializer and its two dependencies, read with the existing venv-content step
+
+  @labview @interactive-labview
+  Scenario: sync installs an embedded package with no feed
+    Given a VIPM configuration "p.vipc" that embeds labview_open_source_project_lib_labview_open_source_palette 1.0.2.7
+    And no folder feed
+    When I run "lvpm init --from p.vipc --labview-version 2026" in its folder
+    And I run "lvpm sync"
+    Then the venv holds labview_open_source_project_lib_labview_open_source_palette 1.0.2.7, read with the existing venv-content step
 ```
 
 ### Slice 5: document `init` and `init --from .vipc`
@@ -796,7 +823,7 @@ build = "x"
   Scenario: a vipm.toml that does not parse writes nothing
     Given a vipm.toml holding "[project"
     When I run "lvpm init --from vipm.toml --labview-version 2023" in its folder
-    Then it fails with "vipm.toml"
+    Then it fails with "vipm.toml: " followed by the converter's reason
     And the output says "nothing was written"
     And the folder has no lvpm.toml, no .git and no .lv-venv
     And the vipm.toml is byte for byte what it was
@@ -838,7 +865,7 @@ branch after rebasing on `main`. If it does not, stop: #89 has not landed.
 Add the `is_toml` arm to the `--from` match. It calls `read_toml`, which
 reports the unused fields itself, and takes the raw `nipm.dependencies`
 table from the same text with `toml_edit`. Both go into a `Seed`. Add the
-manifest.md and usage.md lines, and mark S10a done on the board.
+manifest.md and usage.md lines, replace slice 5's "does not mention \"init --from vipm.toml\"" step with a positive one, and mark S10a done on the board.
 **TEST**: The slice 4 scenarios. After reading #89, replace "names
 \"tool.vipm\" as not used" with the converter's exact line, and check
 whether it lists `[nipm.dependencies]` as unused (init carries that table,
@@ -886,7 +913,7 @@ neither is a cross-cutting change.
 - [ ] The S10a `@labview` scenarios run once here with `LVPM_TEST_LABVIEW=1`; the PR records the result
 - [ ] The #71 demo runs: `lvpm init --from C:\Projects\Serializer\Serializer.vipc`, then `lvpm sync`, with the output in the PR
 - [ ] AC10 is checked against a real `.vipc` with an embedded package, or the PR records it as unverified
-- [ ] The PR's AC table marks AC15 and AC16 deferred if slice 4 is not in it
+- [ ] The PR's AC table marks AC15, AC16 and AC17's manifest.md part deferred if slice 4 is not in it (moot now: #89 merged into main on 2026-10-30, so slice 4 ships in this PR)
 - [ ] `/code-review` on the branch diff
 - [ ] Docs updated (slices 5 and 4)
 
@@ -902,7 +929,7 @@ neither is a cross-cutting change.
 
 ## Risks & Open Questions
 
-- **#89 not merged.** Slice 4 needs `vipm_interop`. If #89 is still open,
+- **#89 merged into main on 2026-10-30** and is merged into this branch, so slice 4 ships here. (Was: if #89 is still open,
   the first PR ships slices 1, 2, 3 and 5, and slice 4 follows.
 - **Embedded `.vipc` layout unverified.** The design looks for
   `<name>-<version>.vip` at any depth. Step 3.3's precondition checks that
@@ -915,8 +942,15 @@ neither is a cross-cutting change.
   refuses some folder names (spaces, dots), the user edits `name`. A
   scenario is worth adding if this shows up.
 - **The duplicate-name rule is unspecified in the spec.** The plan applies
-  the last one in the file, through `manifest_edit::set`, and reports
-  each line once. This is an inference.
+  the last one in the file, through `manifest_edit::set`; "added n" counts
+  distinct names. A package both `Included` and `Dependency` is skipped
+  and not imported (lock pulls it in as a dependency anyway). Both are
+  inferences, unit-tested in `Vipc::seed`.
+- **Git detection is a `.git` walk, not `git rev-parse`.** A deviation from
+  the spec's wording, for the reasons in the design notes.
+- **AC10 sync needs LabVIEW.** Installing is only checked by the
+  `@labview` "embedded package with no feed" scenario; default CI stops
+  at lock and `cache list`. Run once here before the PR.
 - **Gherkin persistence.** The plan follows S7a's precedent: the build
   writes `tests/features/build-slices/s10a-lvpm-init.feature` directly,
   the one file the spec names. `plan_gherkin_export.py` would write
