@@ -146,14 +146,14 @@ and to the command table in docs/usage.md; those are one-line conflicts, not
 collisions, and the notes above leave them out.
 
 S1b closed on 2026-10-29 without its round trips: VIPM refuses lvpm's `.vip`, so S7a moved up to wave 3 and
-replaces the `.vip` writer ([ADR 6](../adr/0006-lvpkg-only-vip-read-only.md)).
+replaced the `.vip` writer ([ADR 6](../adr/0006-lvpkg-only-vip-read-only.md)); S7a has landed.
 
 Pinned sources (S7c) land before OCI feeds (S7b) on purpose: no org registry
 should sit next to a public feed without a way to pin a package to it.
 
 Not sliced yet, with the milestone they belong to:
 - the `ppl` kind (M2) and `lvpm convert` (M4): add slices after S7a. The M2
-  `.lvpkg` box is ticked by whichever of S7a and S9 merges second.
+  `.lvpkg` box is ticked by S9 now that S7a has landed.
 - `lvpm tree` (M2): the dependency view on top of S5's linker reader.
 - OIDC Trusted Publishing and Notation signatures (M3, design 5.2 and 5.3).
 - `[policy] min-release-age` and yanking (design 4 and 5.7).
@@ -206,6 +206,8 @@ whether the pilot sources S1, S5 and S9 use are pinned by commit SHA or
 committed as a trimmed fixture copy.
 
 ### Slice S1: `lvpm build` writes a `.vip`
+
+**Shipped.** S7a replaced its `.vip` writer with a `.lvpkg` one (ADR 6). The text below is as planned.
 
 **Depends-on:** S0
 **Files:** `src/main.rs`, `src/render/build.rs`, `crates/lvpm-core/src/events.rs`, `src/render/mod.rs`, `crates/lvpm-core/src/project.rs`, `crates/lvpm-core/src/spec.rs`, `crates/lvpm-core/src/lvlib.rs`, `crates/lvpm-core/src/ops/build.rs`, `tests/features/build-slices/`
@@ -320,10 +322,10 @@ Goal: the open-source loop without any registry of your own.
 In scope:
 - `libX = { github = "owner/repo", version = ">=1.2" }` in `lvpm.toml`: a direct
   source for that one package, never looked up in `[sources]` (ADR 4, decision 6).
-- Versions come from release tags; the release file is `*.lvpkg` (once S7a reads it), with `*.vip` as a fallback for releases VIPM built.
+- Versions come from release tags; the release file is `*.lvpkg` (S7a has landed, so lvpm reads it), with `*.vip` as a fallback for releases VIPM built.
 - The lock's `source` field names the GitHub feed; the file's SHA-256 is pinned on first lock.
 - A CI template that runs `lvpm build` on a tag and uploads the `.lvpkg` with `gh release upload`.
-  It ships with whichever of S4 and S7a merges second: until S7a, `lvpm build` writes a `.vip` that is not to be distributed (ADR 6).
+  S7a has landed, so `lvpm build` writes a `.lvpkg` and the template can ship with S4 (ADR 6).
 
 Out of scope: attestations (S6), the community index (S8).
 
@@ -402,6 +404,12 @@ Demo: switch pilot A's policy on; an unsigned fork's release is refused.
 Decide in `/specs`: verify with the `gh` CLI or a Rust Sigstore library.
 
 ### Slice S7a: `.lvpkg` format
+
+**Landed.** `lvpm build` writes the `.lvpkg`, lvpm installs it from every feed,
+and the `.vip` writer is deleted. It differs from the text below in two
+ways: a tampered `.lvpkg` in a package folder is ignored with a warning, not
+refused (a hosted feed and `cache add` refuse it), and `install-dir` is
+stricter than S1's. The text below is the slice as it was planned.
 
 **Depends-on:** S1
 **Files:** `crates/lvpm-core/src/ops/build.rs`, `crates/lvpm-core/src/lvpkg.rs`, `crates/lvpm-core/src/project.rs`, `crates/lvpm-core/src/index.rs`, `crates/lvpm-core/src/install.rs`, `crates/lvpm-core/src/ops/publish.rs`, `tests/features/build-slices/`
@@ -518,8 +526,8 @@ SBOM. It reuses S1's `build` command.
 
 In scope:
 - `lvpm build` runs a named `.lvproj` build spec through LabVIEW in the project's venv.
-- A CycloneDX SBOM from `lvpm.lock`, shipped next to the build, and inside each `.lvpkg` `lvpm build` writes (whichever of S7a and S9 merges second adds that part).
-- README milestone "`lvpm build`: `source` kind, `.lvpkg` format, SBOM" is ticked once S7a and S9 have both merged.
+- A CycloneDX SBOM from `lvpm.lock`, shipped next to the build, and inside each `.lvpkg` `lvpm build` writes (S7a has landed, so S9 adds that part).
+- README milestone "`lvpm build`: `source` kind, `.lvpkg` format, SBOM" is ticked once S9 has merged; S7a has landed.
 
 Out of scope: PPL packages (not sliced yet).
 

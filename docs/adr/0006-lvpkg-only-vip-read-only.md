@@ -64,14 +64,14 @@ with an error that says the file is broken.
   changes from "write `.vip` for VIPM users" to "read `.vip`".
 - S1b closes without its round trips. Its milestone ("`.vip` output, verified
   by a round-trip install in VIPM") is dropped.
-- S7a is the next build slice. It depends only on S1. The SBOM inside a
-  `.lvpkg` moves to S9; whichever of S7a and S9 merges second adds it.
-- `lvpm publish` (S2) copies the `.lvpkg` once S7a lands. GitHub release
-  lookup (S4) takes `*.lvpkg` first and `*.vip` as a fallback, so existing
-  VIPM releases stay installable. S4's CI template ships only once S7a has
-  merged, so it never uploads an lvpm-built `.vip`.
-- Until S7a merges, `lvpm build` still writes a `.vip`. It is for lvpm only
-  and is not to be distributed. No lvpm-built `.vip` has been released, so
-  nothing needs migrating.
-- The probe runner (`tests/vipm_probe.rs`) stays dev-only and `#[ignore]`.
-  Its "accepted" verdict is not proof for a reused version (see above).
+- S7a has landed. It depended only on S1. The SBOM inside a `.lvpkg` moves to
+  S9, which now adds it.
+- `lvpm publish` (S2) copies the `.lvpkg`. GitHub release lookup (S4) takes
+  `*.lvpkg` first and `*.vip` as a fallback, so existing VIPM releases stay
+  installable. S4's CI template can ship now that S7a has merged, so it never
+  uploads an lvpm-built `.vip`.
+- `lvpm build` no longer writes a `.vip`. No lvpm-built `.vip` was ever
+  released, so nothing needed migrating.
+- The `.vip` writer (`spec::write`) and the probe runner
+  (`tests/vipm_probe.rs`) were deleted by S7a. Git history keeps them; their
+  "accepted" verdict was not proof for a reused version (see above).

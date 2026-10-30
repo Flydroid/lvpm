@@ -542,6 +542,7 @@ mod tests {
             target_dir: target_dir.to_string(),
             replace_mode: "Always".to_string(),
             files: f(files),
+            entry_prefix: format!("File Group {index}/"),
         }
     }
 

@@ -14,6 +14,7 @@ pub mod index;
 pub mod install;
 pub mod launch;
 pub mod lvlib;
+pub mod lvpkg;
 mod paths;
 pub mod project;
 pub mod refresh;

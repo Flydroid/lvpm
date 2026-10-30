@@ -2,8 +2,8 @@
 
 An open-source package manager for LabVIEW.
 
-lvpm installs `.vip` and `.ogp` packages, the formats VIPM and OpenG use, by
-name. It takes them from the public package directories, your own hosted
+lvpm installs `.vip` and `.ogp` packages, the formats VIPM and OpenG use, and
+its own `.lvpkg`, by name. It takes them from the public package directories, your own hosted
 indexes, or local folders. It installs them either into a LabVIEW installation
 or into a project's own venv, so two projects on one machine can use
 different versions of the same library. Then it has LabVIEW fix the installed
@@ -80,7 +80,7 @@ To package your own library, add a `[distribution]` table to `lvpm.toml`
 ([Building a package](docs/usage.md#building-a-package)), then:
 
 ```console
-$ lvpm build                                # dist/<name>-<version>.vip, no LabVIEW needed
+$ lvpm build                                # dist/<name>-<version>.lvpkg, no LabVIEW needed
 $ lvpm publish --to D:/feeds/packages        # copy it into a folder feed, never replacing
 ```
 
@@ -161,10 +161,10 @@ change to them is a breaking change and gets a major version.
   manifest and shown by `lvpm list`. No warning yet when a global copy of a
   venv package shadows it.
 
-- `lvpm build` packages one library's members as a `.vip` for lvpm only:
-  no build hooks, no probes or templates from outside the library. VIPM
-  refuses it, so don't hand it to VIPM users. lvpm's own `.lvpkg` format
-  replaces it ([ADR 6](docs/adr/0006-lvpkg-only-vip-read-only.md)).
+- `lvpm build` packages one library's members as a `.lvpkg`, lvpm's own
+  format: no build hooks, no probes or templates from outside the library.
+  VIPM cannot read it, so don't hand it to VIPM users
+  ([ADR 6](docs/adr/0006-lvpkg-only-vip-read-only.md)).
 
 [docs/roadmap.md](docs/roadmap.md) has what is planned.
 

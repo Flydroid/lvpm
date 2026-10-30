@@ -473,6 +473,11 @@ fn file_modified(metadata: &std::fs::Metadata) -> Option<String> {
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(bytes);
+    finish_hex(h)
+}
+
+/// A finished hash as lower-case hex.
+pub(crate) fn finish_hex(h: Sha256) -> String {
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 

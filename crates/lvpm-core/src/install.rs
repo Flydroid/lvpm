@@ -153,7 +153,9 @@ pub fn open_archive(vip_bytes: Vec<u8>) -> Result<Archive> {
 /// out.
 const MAX_SPEC_BYTES: u64 = 1024 * 1024;
 
-/// The archive's `spec` member, read and parsed.
+/// The archive's spec, read and checked: by content, a root `package.toml`
+/// makes it a `.lvpkg` (its `RECORD` is checked), a root `spec` a `.vip` or
+/// `.ogp`. The file's extension plays no part.
 pub fn read_spec(zip: &mut Archive) -> Result<Spec> {
     // Almost always literally "spec" at the archive root.
     let idx = (0..zip.len()).find(|i| {
@@ -161,8 +163,15 @@ pub fn read_spec(zip: &mut Archive) -> Result<Spec> {
             .map(|f| f.name().eq_ignore_ascii_case("spec"))
             .unwrap_or(false)
     });
-    let Some(idx) = idx else {
-        bail!("no `spec` member in .vip archive");
+    let is_lvpkg = zip.file_names().any(|n| n == crate::lvpkg::PACKAGE_TOML);
+    let idx = match (is_lvpkg, idx) {
+        (true, None) => return crate::lvpkg::read(zip),
+        (true, Some(_)) => bail!(
+            "the archive holds both package.toml and spec; a .lvpkg has the first and a .vip the \
+             second, so it is refused as ambiguous"
+        ),
+        (false, Some(idx)) => idx,
+        (false, None) => bail!("the archive has neither package.toml (a .lvpkg) nor spec (a .vip)"),
     };
     let mut buf = Vec::new();
     zip.by_index(idx)?
@@ -173,6 +182,20 @@ pub fn read_spec(zip: &mut Archive) -> Result<Spec> {
     }
     // spec files are latin-1-ish; lossy is fine for the fields we read.
     crate::spec::parse(&String::from_utf8_lossy(&buf))
+}
+
+/// A package entry's content, at most `cap` bytes. The size in the
+/// entry's header is the archive's claim, so nothing is allocated from it.
+fn read_entry(src: zip::read::ZipFile<'_, std::io::Cursor<Vec<u8>>>, cap: u64) -> Result<Vec<u8>> {
+    let name = src.name().to_string();
+    let mut buf = Vec::new();
+    src.take(cap + 1)
+        .read_to_end(&mut buf)
+        .with_context(|| format!("reading entry {name:?}"))?;
+    if buf.len() as u64 > cap {
+        bail!("entry {name:?} is larger than {cap} bytes");
+    }
+    Ok(buf)
 }
 
 /// Work out every file this package would write, without touching disk.
@@ -311,9 +334,7 @@ pub(crate) fn unpack_to(
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating {}", parent.display()))?;
         }
-        let mut src = zip.by_index(w.zip_index)?;
-        let mut buf = Vec::with_capacity(src.size() as usize);
-        src.read_to_end(&mut buf)?;
+        let buf = read_entry(zip.by_index(w.zip_index)?, crate::lvpkg::MAX_ENTRY_BYTES)?;
         std::fs::write(&dest, &buf).with_context(|| format!("writing {}", dest.display()))?;
         written.push(w.dest.to_string_lossy().replace('\\', "/"));
     }
@@ -398,14 +419,13 @@ pub fn extract_hook(
     zip: &mut Archive,
     member: &str,
 ) -> Result<Option<PathBuf>> {
-    let Ok(mut src) = zip.by_name(member) else {
+    let Ok(src) = zip.by_name(member) else {
         return Ok(None);
     };
     let dir = roots.hooks_dir();
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let dest = dir.join(format!("{package}-{member}"));
-    let mut buf = Vec::with_capacity(src.size() as usize);
-    src.read_to_end(&mut buf)?;
+    let buf = read_entry(src, crate::lvpkg::MAX_ENTRY_BYTES)?;
     std::fs::write(&dest, &buf).with_context(|| format!("writing {}", dest.display()))?;
     Ok(Some(dest))
 }
@@ -576,14 +596,30 @@ mod tests {
     }
 
     #[test]
-    fn an_archive_with_no_spec_member_is_refused() {
+    fn an_entry_is_read_up_to_its_cap_and_no_further() {
+        let mut zip = archive_with_spec(&[b'x'; 10]);
+        assert_eq!(
+            read_entry(zip.by_name("spec").unwrap(), 10).unwrap().len(),
+            10
+        );
+        let why = read_entry(zip.by_name("spec").unwrap(), 9)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(why, "entry \"spec\" is larger than 9 bytes");
+    }
+
+    #[test]
+    fn an_archive_with_neither_package_toml_nor_spec_is_refused_naming_both() {
         let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
         writer
-            .start_file("other", zip::write::SimpleFileOptions::default())
+            .start_file("a.vi", zip::write::SimpleFileOptions::default())
             .unwrap();
         let mut zip = open_archive(writer.finish().unwrap().into_inner()).unwrap();
         let why = read_spec(&mut zip).unwrap_err().to_string();
-        assert_eq!(why, "no `spec` member in .vip archive");
+        assert_eq!(
+            why,
+            "the archive has neither package.toml (a .lvpkg) nor spec (a .vip)"
+        );
     }
 
     /// A record for `files`, with the hook VIs it is given, installed nowhere.

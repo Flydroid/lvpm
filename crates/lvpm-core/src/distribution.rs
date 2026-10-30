@@ -3,21 +3,17 @@
 //! ```toml
 //! [distribution]
 //! top-level-library = "HSE Logger.lvlib"  # relative to lvpm.toml, inside its folder
-//! kinds   = ["source"]                    # the only kind this version builds
-//! formats = ["vip"]                       # the only format this version writes
-//!
-//! [distribution.vip]
-//! name         = "hse_lib_hse_logger"     # default: [project] name
+//! kinds        = ["source"]               # the only kind this version builds
 //! vendor       = "Hampel Software Engineering"
 //! display-name = "HSE Logger"
 //! install-dir  = "vi.lib/Hampel Software Engineering/HSE Logger"  # default: vi.lib/<vendor>/<display-name>
-//!
-//! [distribution.vip.dependency-names]     # scoped name -> VIPM name
-//! "@hexagon/lib-a" = "hexagon_lib_a"
 //! ```
+//!
+//! The package name is `[project] name`.
 
-use crate::project::{Constraint, Project};
-use crate::spec::{FileGroup, Spec};
+use crate::lockfile::constraint_text;
+use crate::lvpkg;
+use crate::project::Project;
 use anyhow::{Result, bail};
 use std::path::{Component, Path, PathBuf};
 
@@ -26,9 +22,9 @@ use std::path::{Component, Path, PathBuf};
 pub struct Distribution {
     /// `top-level-library`, below the project folder.
     pub library: PathBuf,
-    /// The package name: `[distribution.vip] name`, else `[project] name`.
+    /// The package name: `[project] name`.
     pub name: String,
-    /// `[project] version` in four parts.
+    /// `[project] version`, as written: three or four numbers.
     pub version: String,
     pub vendor: String,
     pub display_name: String,
@@ -36,18 +32,19 @@ pub struct Distribution {
     pub install_dir: String,
     /// `[project] labview`'s year.
     pub labview: u32,
-    /// `[dependencies]` as `Requires` entries, in file order.
-    pub requires: Vec<String>,
+    /// `[dependencies]` as the manifest writes them, in file order: name, constraint.
+    pub dependencies: Vec<(String, String)>,
 }
 
-const DISTRIBUTION_KEYS: &[&str] = &["top-level-library", "kinds", "formats", "vip"];
-const VIP_KEYS: &[&str] = &[
-    "name",
+const DISTRIBUTION_KEYS: &[&str] = &[
+    "top-level-library",
+    "kinds",
     "vendor",
     "display-name",
     "install-dir",
-    "dependency-names",
 ];
+
+const ADR_6: &str = "ADR 6, docs/adr/0006-lvpkg-only-vip-read-only.md";
 
 /// `p`'s `[distribution]`, checked against the project folder `root`. Each
 /// error names the full key it is about.
@@ -57,149 +54,105 @@ pub fn validate(p: &Project, root: &Path) -> Result<Distribution> {
             "lvpm.toml has no [distribution] table: lvpm build needs one naming the top-level-library"
         );
     };
+    if dist.contains_key("formats") {
+        bail!(
+            "distribution.formats was removed ({ADR_6}): lvpm build always writes a .lvpkg. Delete the line."
+        );
+    }
+    if let Some(vip) = dist.get("vip") {
+        let found = match vip {
+            toml::Value::Table(t) if t.is_empty() => "(empty table)".to_string(),
+            toml::Value::Table(t) => t.keys().map(String::as_str).collect::<Vec<_>>().join(", "),
+            _ => "(not a table)".to_string(),
+        };
+        bail!(
+            "[distribution.vip] was removed ({ADR_6}). Move vendor, display-name and install-dir into \
+             [distribution]; the package name is [project] name; icon and dependency-names are gone. \
+             Found: {found}"
+        );
+    }
     unknown_keys("distribution", dist, DISTRIBUTION_KEYS)?;
     only(dist, "kinds", "source")?;
-    only(dist, "formats", "vip")?;
-
-    let empty = toml::Table::new();
-    let vip = match dist.get("vip") {
-        None => &empty,
-        Some(toml::Value::Table(t)) => t,
-        Some(v) => bail!("distribution.vip: expected a table, got {}", v.type_str()),
-    };
-    unknown_keys("distribution.vip", vip, VIP_KEYS)?;
 
     let library = top_level_library(dist, root)?;
-    let vendor = required(vip, "distribution.vip", "vendor")?;
-    let display_name = required(vip, "distribution.vip", "display-name")?;
+    let vendor = required(dist, "distribution", "vendor")?;
+    let display_name = required(dist, "distribution", "display-name")?;
     // The default goes through the same check: a vendor of `..\x` must not leave vi.lib.
-    let install_dir = match string(vip, "distribution.vip", "install-dir")? {
+    let install_dir = match string(dist, "distribution", "install-dir")? {
         Some(d) => d,
         None => format!("vi.lib/{vendor}/{display_name}"),
-    }
-    .replace('\\', "/")
-    .trim_matches('/')
-    .to_string();
-    if install_dir.is_empty()
-        || install_dir.contains(':')
-        || install_dir.split('/').any(|s| s == "..")
-    {
-        bail!(
-            "distribution.vip.install-dir = {install_dir:?}: must be a relative path below the LabVIEW folder, \
-             like \"vi.lib/Vendor/Lib\""
-        );
-    }
-
-    let name = match string(vip, "distribution.vip", "name")? {
-        Some(n) => n,
-        None => match &p.name {
-            Some(n) if n.contains('@') => bail!(
-                "distribution.vip.name: the project name {n:?} is scoped, which VIPM cannot name a package; \
-                 set [distribution.vip] name"
-            ),
-            Some(n) => n.clone(),
-            None => bail!("project.name: lvpm build needs the package name"),
-        },
     };
-    // The name becomes the file name in dist/: nothing that leaves the folder.
-    if name.contains("..")
-        || !name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "_-.".contains(c))
-    {
-        bail!(
-            "distribution.vip.name = {name:?}: a package name takes letters, digits, '_', '-' and '.', \
-             like \"vendor_lib_name\""
-        );
-    }
+    // A trailing slash is harmless; anything else that leaves the LabVIEW folder is not.
+    let install_dir = install_dir.trim_end_matches('/').to_string();
+    lvpkg::check_install_dir(&install_dir)?;
+
+    let name = match &p.name {
+        Some(n) if n.starts_with('@') => bail!(
+            "project.name = {n:?}: scoped package names are not supported yet; use an unscoped name"
+        ),
+        Some(n) => n.clone(),
+        None => bail!("project.name: lvpm build needs the package name"),
+    };
+    lvpkg::check_name(&name)?;
     let Some(version) = &p.version else {
         bail!("project.version: lvpm build needs the package version");
     };
-    let version = four_parts(version)?;
+    check_version(version)?;
     let Some(labview) = &p.labview else {
         bail!("project.labview: lvpm build needs the oldest LabVIEW, like labview = \">=2016\"");
     };
     let labview = crate::project::labview_year(labview)?;
 
-    let names = match vip.get("dependency-names") {
-        None => &empty,
-        Some(toml::Value::Table(t)) => t,
-        Some(v) => bail!(
-            "distribution.vip.dependency-names: expected a table, got {}",
-            v.type_str()
-        ),
-    };
-    let requires: Vec<String> = p
-        .dependencies
-        .iter()
-        .map(|(dep, c)| {
-            let vip_name = match names.get(dep) {
-                Some(toml::Value::String(s)) => s.clone(),
-                Some(v) => bail!(
-                    "distribution.vip.dependency-names: {dep:?} expected a string, got {}",
-                    v.type_str()
-                ),
-                None if dep.contains('@') => bail!(
-                    "distribution.vip.dependency-names: the dependency {dep:?} is scoped and has no VIPM name here"
-                ),
-                None => dep.clone(),
-            };
-            // An exact version is written as a minimum, like the published
-            // pilots: a library pinning exact versions makes consumers unsolvable.
-            Ok(match c {
-                Constraint::Exact(v) | Constraint::AtLeast(v) => format!("{vip_name}>={}", v.raw),
-                Constraint::Any => vip_name,
-            })
-        })
-        .collect::<Result<_>>()?;
     for (key, value) in [
-        ("distribution.vip.vendor", &vendor),
-        ("distribution.vip.display-name", &display_name),
-        ("distribution.vip.install-dir", &install_dir),
+        ("distribution.vendor", &vendor),
+        ("distribution.display-name", &display_name),
+        ("distribution.install-dir", &install_dir),
     ] {
         spec_safe(key, value)?;
     }
-    for r in &requires {
-        spec_safe("dependencies", r)?;
-        if r.contains(',') {
-            bail!("dependencies: {r:?} holds a ',', which would split the package's Requires list");
+    for (dep, c) in &p.dependencies {
+        let item = lvpkg::requires_item(dep, c);
+        spec_safe("dependencies", &item)?;
+        if item.contains(',') {
+            bail!(
+                "dependencies: {item:?} holds a ',', which would split the package's Requires list"
+            );
         }
     }
+    let dependencies = p
+        .dependencies
+        .iter()
+        .map(|(dep, c)| (dep.clone(), constraint_text(c)))
+        .collect();
 
     Ok(Distribution {
         library,
         name,
-        version,
+        version: version.clone(),
         vendor,
         display_name,
         install_dir,
         labview,
-        requires,
+        dependencies,
     })
 }
 
 impl Distribution {
-    /// The package file's name, `<name>-<version>.vip`.
+    /// The package file's name, `<name>-<version>.lvpkg`.
     pub fn file_name(&self) -> String {
-        format!("{}-{}.vip", self.name, self.version)
+        format!("{}-{}.lvpkg", self.name, self.version)
     }
 
-    /// The spec for a package holding `files`, each below the LabVIEW folder.
-    pub fn spec(&self, files: Vec<String>) -> Spec {
-        Spec {
+    /// What goes into the package's `package.toml`.
+    pub fn meta(&self) -> lvpkg::Meta {
+        lvpkg::Meta {
             name: self.name.clone(),
             version: self.version.clone(),
-            display_name: Some(self.display_name.clone()),
-            description: Default::default(),
-            file_groups: vec![FileGroup {
-                index: 0,
-                target_dir: "<application>".into(),
-                replace_mode: "Always".into(),
-                files,
-            }],
-            script_vis: Vec::new(),
-            requires: (!self.requires.is_empty()).then(|| self.requires.join(",")),
-            lv_gate: Some(format!("LabVIEW>={}.0", self.labview - 2000)),
+            labview: format!(">={}", self.labview),
+            vendor: self.vendor.clone(),
+            display_name: self.display_name.clone(),
+            install_dir: self.install_dir.clone(),
+            dependencies: self.dependencies.clone(),
         }
     }
 }
@@ -275,15 +228,14 @@ fn top_level_library(dist: &toml::Table, root: &Path) -> Result<PathBuf> {
     Ok(path.to_path_buf())
 }
 
-/// `2.1.0` → `2.1.0.0`; four numeric parts stay as they are.
-fn four_parts(v: &str) -> Result<String> {
+/// Three or four numeric parts.
+fn check_version(v: &str) -> Result<()> {
     let parts: Vec<&str> = v.split('.').collect();
     let numeric = parts
         .iter()
         .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
     match parts.len() {
-        3 if numeric => Ok(format!("{v}.0")),
-        4 if numeric => Ok(v.to_string()),
+        3 | 4 if numeric => Ok(()),
         _ => bail!("project.version = {v:?}: a package version is 3 or 4 numbers, like \"1.2.3\""),
     }
 }
@@ -313,36 +265,56 @@ c = "*"
 
 [distribution]
 top-level-library = "Lib.lvlib"
-
-[distribution.vip]
 vendor = "Vendor"
 display-name = "Demo Lib"
-
-[distribution.vip.dependency-names]
-"@hexagon/lib-a" = "hexagon_lib_a"
 "#;
 
     fn check(text: &str) -> Result<Distribution> {
         validate(&crate::project::parse(text).unwrap(), &root())
     }
 
+    fn error(text: &str) -> String {
+        format!("{:#}", check(text).unwrap_err())
+    }
+
     #[test]
-    fn a_complete_manifest_gives_names_version_install_dir_and_requires() {
+    fn a_complete_manifest_gives_names_version_install_dir_and_dependencies_as_written() {
         let d = check(GOOD).unwrap();
-        assert_eq!(d.file_name(), "demo_lib-1.2.3.0.vip");
+        assert_eq!(d.file_name(), "demo_lib-1.2.3.lvpkg");
         assert_eq!(d.install_dir, "vi.lib/Vendor/Demo Lib");
-        assert_eq!(d.requires, ["a>=1.0", "b>=2.0", "c", "hexagon_lib_a>=3.0"]);
+        let written = [
+            ("a", "1.0"),
+            ("b", ">=2.0"),
+            ("c", "*"),
+            ("@hexagon/lib-a", "3.0"),
+        ];
+        assert_eq!(
+            d.dependencies,
+            written.map(|(n, c)| (n.to_string(), c.to_string()))
+        );
         assert_eq!(d.library, Path::new("Lib.lvlib"));
+    }
+
+    #[test]
+    fn meta_is_what_package_toml_holds() {
+        let m = check(GOOD).unwrap().meta();
+        assert_eq!(
+            (m.name.as_str(), m.version.as_str(), m.labview.as_str()),
+            ("demo_lib", "1.2.3", ">=2016")
+        );
+        assert_eq!(
+            (m.vendor.as_str(), m.display_name.as_str()),
+            ("Vendor", "Demo Lib")
+        );
+        assert_eq!(m.install_dir, "vi.lib/Vendor/Demo Lib");
+        assert_eq!(m.dependencies.len(), 4);
     }
 
     #[test]
     fn each_problem_names_its_key() {
         let cases = [
             (
-                GOOD.replace(
-                    "[distribution]\ntop-level-library = \"Lib.lvlib\"\n",
-                    "[distribution]\n",
-                ),
+                GOOD.replace("top-level-library = \"Lib.lvlib\"\n", ""),
                 "distribution.top-level-library",
             ),
             (
@@ -358,83 +330,66 @@ display-name = "Demo Lib"
                 "distribution.top-level-library",
             ),
             (
+                GOOD.replace("\"Lib.lvlib\"", r#""Sub\\Lib.lvlib""#),
+                "distribution.top-level-library",
+            ),
+            (
                 GOOD.replace("vendor = \"Vendor\"\n", ""),
-                "distribution.vip.vendor",
+                "distribution.vendor",
             ),
             (
                 GOOD.replace("display-name = \"Demo Lib\"\n", ""),
-                "distribution.vip.display-name",
+                "distribution.display-name",
             ),
             (
                 GOOD.replace("top-level-library", "kinds = [\"ppl\"]\ntop-level-library"),
                 "distribution.kinds",
             ),
             (
-                GOOD.replace(
-                    "top-level-library",
-                    "formats = [\"lvpkg\"]\ntop-level-library",
-                ),
-                "distribution.formats",
-            ),
-            (
                 GOOD.replace("top-level-library", "colour = \"red\"\ntop-level-library"),
                 "distribution.colour",
-            ),
-            (
-                GOOD.replace("vendor =", "icon = \"i.bmp\"\nvendor ="),
-                "distribution.vip.icon",
             ),
             (GOOD.replace("\"1.2.3\"", "\"1.2\""), "project.version"),
             (GOOD.replace("\"1.2.3\"", "\"1.a.3\""), "project.version"),
             (
-                GOOD.replace("\"demo_lib\"", "\"@scope/lib\""),
-                "distribution.vip.name",
-            ),
-            (
-                GOOD.replace("\"@hexagon/lib-a\" = \"hexagon_lib_a\"", ""),
-                "distribution.vip.dependency-names",
-            ),
-        ];
-        let bad_dir = |d: &str| GOOD.replace("vendor =", &format!("install-dir = {d:?}\nvendor ="));
-        let more = [
-            (
-                GOOD.replace("\"Lib.lvlib\"", r#""Sub\\Lib.lvlib""#),
-                "distribution.top-level-library",
-            ),
-            (bad_dir("../x"), "distribution.vip.install-dir"),
-            (bad_dir("/"), "distribution.vip.install-dir"),
-            (bad_dir("C:/x"), "distribution.vip.install-dir"),
-            (
-                GOOD.replace("\"Demo Lib\"", r#""..\\..\\x""#),
-                "distribution.vip.install-dir",
-            ),
-            (
-                GOOD.replace(
-                    "vendor =",
-                    "name = \"x/../../pkg\"
-vendor =",
-                ),
-                "distribution.vip.name",
+                GOOD.replace("\"demo_lib\"", "\"x/../../pkg\""),
+                "project.name",
             ),
             (
                 GOOD.replace("\"Demo Lib\"", r#""Demo\"\n[Script VIs]""#),
-                "distribution.vip.display-name",
+                "distribution.display-name",
             ),
-            (GOOD.replace("\"hexagon_lib_a\"", "\"a,b\""), "dependencies"),
+            (GOOD.replace("3.0", "3,0"), "dependencies"),
         ];
-        for (i, (text, key)) in cases.into_iter().chain(more).enumerate() {
-            let e = format!("{:#}", check(&text).unwrap_err());
+        for (i, (text, key)) in cases.into_iter().enumerate() {
+            let e = error(&text);
             assert!(e.contains(key), "case {i}, {key}: {e}");
         }
-        let unknown = GOOD.replace("vendor =", "icon = \"i.bmp\"\nvendor =");
-        let e = format!("{:#}", check(&unknown).unwrap_err());
-        assert!(e.contains("a later version adds it"), "{e}");
-        let e = format!("{:#}", check("[project]\nname = \"x\"").unwrap_err());
-        assert!(e.contains("[distribution]"), "{e}");
+        let e = error(&GOOD.replace("vendor =", "icon = \"i.bmp\"\nvendor ="));
+        assert!(
+            e.contains("distribution.icon") && e.contains("a later version adds it"),
+            "{e}"
+        );
+        assert!(error("[project]\nname = \"x\"").contains("[distribution]"));
     }
 
     #[test]
-    fn install_dir_overrides_and_four_parts_stay() {
+    fn a_bad_install_dir_names_its_key() {
+        let with = |d: &str| GOOD.replace("vendor =", &format!("install-dir = {d:?}\nvendor ="));
+        for dir in [
+            "../x", "a/../x", "/", "/x", "C:/x", r"a\b", r"..\..\x", ".", "a/./b", "a//b",
+            "a/.. /x",
+        ] {
+            let e = error(&with(dir));
+            assert!(e.contains("distribution.install-dir"), "{dir}: {e}");
+        }
+        // the default goes through the same check
+        let e = error(&GOOD.replace("\"Demo Lib\"", r#""..\\..\\x""#));
+        assert!(e.contains("distribution.install-dir"), "{e}");
+    }
+
+    #[test]
+    fn install_dir_overrides_and_the_version_stays_as_written() {
         let d = check(
             &GOOD
                 .replace(
@@ -446,12 +401,67 @@ vendor =",
         .unwrap();
         assert_eq!(d.install_dir, "vi.lib/Other/Place");
         assert_eq!(d.version, "2.1.0.5");
-        let d = check(&GOOD.replace(
-            "vendor =",
-            r#"install-dir = 'vi.lib\Other\Place\'
-vendor ="#,
-        ))
-        .unwrap();
-        assert_eq!(d.install_dir, "vi.lib/Other/Place");
+    }
+
+    #[test]
+    fn formats_is_removed_whatever_it_holds() {
+        for value in ["[\"vip\"]", "[\"lvpkg\"]", "\"vip\""] {
+            let e = error(&GOOD.replace("vendor =", &format!("formats = {value}\nvendor =")));
+            assert!(
+                e.contains(
+                    "distribution.formats was removed (ADR 6, docs/adr/0006-lvpkg-only-vip-read-only.md): \
+                     lvpm build always writes a .lvpkg. Delete the line."
+                ),
+                "{value}: {e}"
+            );
+        }
+    }
+
+    #[test]
+    fn distribution_vip_is_removed_and_lists_every_key_in_file_order() {
+        let removed = "[distribution.vip] was removed (ADR 6, docs/adr/0006-lvpkg-only-vip-read-only.md). \
+                       Move vendor, display-name and install-dir into [distribution]; the package name \
+                       is [project] name; icon and dependency-names are gone. Found: ";
+        for (vip, found) in [
+            ("vendor = \"V\"\n", "vendor"),
+            ("", "(empty table)"),
+            (
+                "[distribution.vip.dependency-names]\na = \"b\"\n",
+                "dependency-names",
+            ),
+            (
+                "vendor = \"V\"\ndisplay-name = \"D\"\nname = \"n\"\nicon = \"i.bmp\"\n",
+                "vendor, display-name, name, icon",
+            ),
+        ] {
+            let e = error(&format!("{GOOD}\n[distribution.vip]\n{vip}"));
+            assert!(e.contains(&format!("{removed}{found}")), "{found}: {e}");
+        }
+        let e = error(&GOOD.replace("vendor =", "vip = \"x\"\nvendor ="));
+        assert!(e.contains(&format!("{removed}(not a table)")), "{e}");
+    }
+
+    #[test]
+    fn formats_is_reported_before_vip_and_both_before_unknown_keys() {
+        let both = format!("{GOOD}\nformats = [\"vip\"]\ncolour = \"red\"\n[distribution.vip]\n");
+        assert!(error(&both).contains("distribution.formats was removed"));
+        let vip = format!("{GOOD}\n[distribution.vip]\n");
+        let vip = vip.replace("vendor =", "colour = \"red\"\nvendor =");
+        assert!(error(&vip).contains("[distribution.vip] was removed"));
+    }
+
+    #[test]
+    fn a_scoped_project_name_is_refused() {
+        let e = error(&GOOD.replace("\"demo_lib\"", "\"@scope/lib\""));
+        assert!(
+            e.contains(
+                "project.name = \"@scope/lib\": scoped package names are not supported yet; \
+                 use an unscoped name"
+            ),
+            "{e}"
+        );
+        // an '@' inside a name is just a bad character, not a scope
+        let e = error(&GOOD.replace("\"demo_lib\"", "\"lib@2\""));
+        assert!(e.contains("a package name takes letters"), "{e}");
     }
 }

@@ -21,7 +21,7 @@
 | `lvpm start`                                         | Start the selected LabVIEW and wait until its VI Server answers                                                                              |
 | `lvpm venv create` / `status` / `remove`             | Manage the project's venv (see [Per-project dependencies](#per-project-dependencies-venvs))                                                  |
 | `lvpm launch [<lvproj>]`                             | Start a LabVIEW on the project's venv                                                                                                        |
-| `lvpm build`                                         | Package the project's library as `dist/<name>-<version>.vip`, from `[distribution]` ([Building a package](#building-a-package))              |
+| `lvpm build`                                         | Package the project's library as `dist/<name>-<version>.lvpkg`, from `[distribution]` ([Building a package](#building-a-package))              |
 | `lvpm publish --to <folder>`                         | Copy the built package into a folder feed; a published file is never replaced ([Publishing a package](#publishing-a-package))                |
 | `lvpm vi-probe` / `lvpm vi-run` / `lvpm vi-save` / `lvpm app-probe` | VI Server primitives, for diagnosis (see [VI Server](labview-integration.md#vi-server))                                                                            |
 
@@ -264,31 +264,24 @@ resave (2/2) oglib_string ... already saved in LabVIEW 2026, skipped
 
 ## Building a package
 
-`lvpm build` packages one LabVIEW library as a `.vip` that `lvpm install`
-installs. It needs no LabVIEW. VIPM refuses this `.vip`, so it is for lvpm
-only; a later release writes lvpm's own `.lvpkg` instead and drops `formats`
-and `[distribution.vip]` ([ADR 6](adr/0006-lvpkg-only-vip-read-only.md)). Describe the package in
-`lvpm.toml`:
+`lvpm build` packages one LabVIEW library as a `.lvpkg`, lvpm's own package
+format. It needs no LabVIEW. `lvpm install` reads a `.lvpkg` from every feed
+it reads a `.vip` or `.ogp` from. VIPM does not read a `.lvpkg`; it is for
+lvpm users ([ADR 6](adr/0006-lvpkg-only-vip-read-only.md)). Describe the
+package in `lvpm.toml`:
 
 ```toml
 [project]
-name    = "hse_lib_hse_logger"   # the package name, unless [distribution.vip] name is set
-version = "2.2.2.114"            # 3 or 4 numeric parts; 2.2.2 is written as 2.2.2.0
+name    = "hse_lib_hse_logger"   # the package name; a scoped name ("@org/x") is refused for now
+version = "2.2.2.114"            # 3 or 4 numeric parts; written as it is here
 labview = ">=2016"               # becomes the package's LabVIEW gate
 
 [distribution]
 top-level-library = "Source/HSE-Logger/hse-logger.lvlib"  # required; relative to lvpm.toml
-kinds   = ["source"]             # optional; only ["source"] for now
-formats = ["vip"]                # optional; only ["vip"] for now
-
-[distribution.vip]
-name         = "hse_lib_hse_logger"          # optional; required when [project] name is scoped
+kinds        = ["source"]                    # optional; only ["source"] for now
 vendor       = "Hampel Software Engineering" # required
 display-name = "HSE Logger"                  # required
 install-dir  = "vi.lib/Hampel Software Engineering/HSE Logger"  # optional; this is the default
-
-[distribution.vip.dependency-names]          # required for each scoped dependency
-"@hexagon/lib-a" = "hexagon_lib_a"
 ```
 
 - The package holds the library's members as the `.lvlib` lists them: its
@@ -297,34 +290,96 @@ install-dir  = "vi.lib/Hampel Software Engineering/HSE Logger"  # optional; this
   does not list is left out. Every member must be on disk and inside the
   library's folder.
 - Members install below `install-dir` with the layout they have below the
-  library's folder.
-- `[dependencies]` become the package's `Requires`: `"1.0"` and `">=1.0"`
-  both as `name>=1.0`, `"*"` as the bare name.
-- The package is written to `dist/<name>-<version>.vip`. The same sources
-  give the same bytes. A failed build names the key or file at fault and
-  leaves an earlier package in `dist/` as it was.
-- Any other key under `[distribution]` or `[distribution.vip]` is an error
-  that names the key.
+  library's folder. Without `install-dir` that is
+  `vi.lib/<vendor>/<display-name>`.
+- `[dependencies]` are written into the package as they are in `lvpm.toml`.
+- The package is written to `dist/<name>-<version>.lvpkg`. The same sources
+  give the same bytes. An existing file of that name is replaced; a `.vip`
+  from an earlier build is left where it is. A failed build names the key
+  or file at fault and leaves an earlier package in `dist/` as it was.
+- Any other key under `[distribution]` is an error that names the key.
 - Paths in `[distribution]` use forward slashes and stay inside their
   folder: `top-level-library` inside the project, `install-dir` below the
   LabVIEW folder. A listed member that is a link to a file outside the
   library's folder is refused; links inside an auto-populating folder are
   skipped.
-- The package name takes letters, digits, `_`, `-` and `.`. A quote or line
-  break in `vendor`, `display-name` or a dependency name is refused, since
-  it would end up in the package's spec.
+- `install-dir` is refused if it starts with `/`, has a `\` or a `:`, has an
+  empty segment, a segment that is only dots, or a segment that ends in a dot
+  or a space. It is refused too if a segment is a Windows device name
+  (`CON`, `PRN`, `AUX`, `NUL`, `COM0` to `COM9`, `LPT0` to `LPT9` and their `¹²³` forms, `CONIN$`
+  or `CONOUT$`, in any case and with or without an extension). Windows
+  would drop or reinterpret those, so the files would not land where the
+  package says. Trailing `/` characters are dropped.
+- The default `install-dir` goes through the same check. A `vendor` that ends
+  in a dot, like `"Acme Inc."`, therefore needs an `install-dir` of its own:
+  `install-dir = "vi.lib/Acme Inc/Lib"`.
+- The package name takes letters, digits, `_`, `-` and `.`, but not `..`. A quote or line
+  break in `vendor` or `display-name` is refused.
+
+### Installing a .lvpkg
+
+A `.lvpkg` lists the SHA-256 of every file in it (`RECORD`), and lvpm checks
+the list before it writes anything. A file that is missing from the list, a
+listed file the archive lacks, or a hash that disagrees makes the package
+fail, and the message names the file. What happens next depends on where the
+package came from:
+
+- In a package folder (`sources.local`), the file is ignored with a warning
+  that names the bad entry. If nothing else provides the package, the
+  install fails because the package is not found.
+- From a hosted feed, or with `lvpm cache add`, the file is refused and
+  nothing is written.
+
+A package folder, `lvpm cache add` and a hosted `index.vipr` all take a
+`.lvpkg` beside a `.vip`. lvpm tells the format from what is inside the
+archive, not from its extension; the extension only picks which files a
+package folder and `lvpm cache add` look at.
+
+### Upgrading from [distribution.vip]
+
+`formats` and the `[distribution.vip]` table are gone: lvpm writes a
+`.lvpkg` only, and a manifest that still has either fails and names the key.
+`vendor`, `display-name` and `install-dir` moved up into `[distribution]`.
+The package name is `[project] name`; `name`, `icon` and `dependency-names` in the
+old table have no replacement, since a scoped name is refused for now.
+
+Before:
+
+```toml
+[distribution]
+top-level-library = "Source/HSE-Logger/hse-logger.lvlib"
+formats = ["vip"]
+
+[distribution.vip]
+vendor       = "Hampel Software Engineering"
+display-name = "HSE Logger"
+install-dir  = "vi.lib/Hampel Software Engineering/HSE Logger"
+```
+
+After:
+
+```toml
+[distribution]
+top-level-library = "Source/HSE-Logger/hse-logger.lvlib"
+vendor       = "Hampel Software Engineering"
+display-name = "HSE Logger"
+install-dir  = "vi.lib/Hampel Software Engineering/HSE Logger"
+```
+
+Check `install-dir` against the rules above when you move it: an old one
+that VIPM accepted may now be refused.
 
 ## Publishing a package
 
 `lvpm publish --to <folder>` copies the package `lvpm build` wrote for the
-current manifest, `dist/<name>-<version>.vip`, into a folder feed. Another
+current manifest, `dist/<name>-<version>.lvpkg`, into a folder feed. Another
 project that lists that folder in `sources.local` then locks and installs
 it.
 
 ```console
 $ lvpm build
 $ lvpm publish --to D:/feeds/packages
-published D:\feeds\packages\demo_lib-1.2.3.0.vip
+published D:\feeds\packages\demo_lib-1.2.3.lvpkg
 ```
 
 - `--to` is required. The folder must exist; a relative path is read from
@@ -356,7 +411,7 @@ sections with a `Package.URL`, unchanged since `openg.ogpd` in 2004; `.vipr`
 adds an MD5 per entry. Anything they lack can come from an index folder of
 your own, named in the manifest's `[sources]`. A `[sources]` entry is an
 `http://` or `https://` folder holding an `index.vipr`. Local directories of
-`.vip` files are configured globally with `lvpm config set sources.local`
+`.vip`, `.ogp` and `.lvpkg` files are configured globally with `lvpm config set sources.local`
 instead; lvpm reads their specs and package files directly. These local
 directories reuse cached spec metadata when file size and modification time
 match; installation still reads their original archives unless imported.
@@ -375,7 +430,7 @@ reached, the command fails and names that source. `lvpm search` and
 `lvpm info` show only the versions that source lists. To take a package from
 another source, list that source earlier.
 
-Use `lvpm cache add` to import a `.vip` or `.ogp`, or all such files directly
+Use `lvpm cache add` to import a `.vip`, `.ogp` or `.lvpkg`, or all such files directly
 inside a directory, into the shared content-addressed cache:
 
 ```powershell
@@ -423,7 +478,7 @@ empty value counts as unset. Precedence, highest first:
 | Variable | Default | What it sets |
 | --- | --- | --- |
 | `LVPM_CONFIG_CACHE` | `%LOCALAPPDATA%\lvpm\cache` (Linux: `$XDG_CACHE_HOME/lvpm/cache`, else `~/.cache/lvpm/cache`) | Where the cache DB, feed bodies, and imported package archives live |
-| `LVPM_CONFIG_SOURCES_LOCAL` | Empty | Local `.vip` directories; separate paths with `;` on Windows or `:` on Linux |
+| `LVPM_CONFIG_SOURCES_LOCAL` | Empty | Local package directories (`.vip`, `.ogp`, `.lvpkg`); separate paths with `;` on Windows or `:` on Linux |
 | `LVPM_CONFIG_VENV_DIR` | `.lv-venv` | Project-relative venv directory (or an absolute path) |
 
 ```powershell

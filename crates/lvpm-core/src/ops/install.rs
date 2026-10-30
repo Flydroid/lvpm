@@ -22,7 +22,7 @@ use crate::spec::Spec;
 use crate::target::Roots;
 use crate::version::Version;
 use crate::{install, relink};
-use anyhow::{Result, bail, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
@@ -482,7 +482,12 @@ fn install_one(
         }
         Err(why) => return Err(why),
     };
-    let spec = install::read_spec(&mut zip)?;
+    let spec = install::read_spec(&mut zip).with_context(|| {
+        format!(
+            "the archive of {} {} could not be read",
+            entry.name, entry.version
+        )
+    })?;
     let plan = install::plan(&roots, &spec, &mut zip)?;
     let mut pkg = Unpacking {
         entry,

@@ -1,6 +1,5 @@
 //! Shared by the `acceptance` target (cucumber steps) and `support_unit`
 //! (the unit tests of this code). Each target uses a different subset.
-//! `vipm_probe` declares `mod support` too, so these unit tests run in both targets.
 #![allow(dead_code, unused_imports)]
 
 pub use lvpm_testkit::{events, feed, fixtures};

@@ -29,8 +29,7 @@ use support::golden::{Mode, Output};
 use support::sandbox::{LABVIEW_YEAR, Sandbox};
 use support::selection::{
     Env, GLOBAL_TAG, INTERACTIVE_TAG, LABVIEW_TAG, PENDING_TAG_PREFIX, PILOT_A_ENV_VAR,
-    PILOT_B_ENV_VAR, PILOT_B_SOURCE_TAG, PILOT_SOURCE_TAG, Selection, UNSAFE_TAG,
-    pilot_not_run_line, select,
+    PILOT_SOURCE_TAG, Selection, UNSAFE_TAG, pilot_not_run_line, select,
 };
 
 /// The features the harness runs, relative to the package root. Later slices
@@ -57,7 +56,7 @@ const FEATURE_FILES: &[&str] = &[
     "tests/features/build-slices/s0-pilot-loop.feature",
     "tests/features/build-slices/s1-lvpm-build.feature",
     "tests/features/build-slices/s2-lvpm-publish.feature",
-    "tests/features/build-slices/s1b-vip-in-vipm.feature",
+    "tests/features/build-slices/s7a-lvpkg.feature",
     "tests/features/lvpm-venv-resave/slice-2-staged-install-with-resave.feature",
     "tests/features/sources/s13-first-source-wins.feature",
 ];
@@ -113,6 +112,8 @@ pub struct CliWorld {
     pub build: steps::build::BuildState,
     /// What an `lvpm publish` scenario has set up and seen.
     pub publish: steps::publish::PublishState,
+    /// What a `.lvpkg` scenario has set up and seen.
+    pub lvpkg: steps::sources::LvpkgState,
 }
 
 impl CliWorld {
@@ -140,6 +141,7 @@ impl CliWorld {
             pilots: Default::default(),
             build: Default::default(),
             publish: Default::default(),
+            lvpkg: Default::default(),
         }
     }
 
@@ -176,7 +178,6 @@ struct ScenarioCounts {
     pending_not_run: usize,
     interactive_not_run: usize,
     pilot_source_not_run: usize,
-    pilot_b_source_not_run: usize,
 }
 
 /// Whatever a scenario started on its venv is stopped, whether it passed or not.
@@ -214,15 +215,12 @@ fn run_feature(
     let counted_interactive = interactive_not_run.clone();
     let pilot_source_not_run = Arc::new(AtomicUsize::new(0));
     let counted_pilot_source = pilot_source_not_run.clone();
-    let pilot_b_source_not_run = Arc::new(AtomicUsize::new(0));
-    let counted_pilot_b_source = pilot_b_source_not_run.clone();
     let env = Env {
         test_labview: env_flag(TEST_LABVIEW_ENV_VAR),
         only_labview: env_flag(ONLY_LABVIEW_ENV_VAR),
         headless_labview: env_flag(HEADLESS_LABVIEW_ENV_VAR),
         global_busy,
         pilot_a: std::env::var_os(PILOT_A_ENV_VAR).is_some(),
-        pilot_b: std::env::var_os(PILOT_B_ENV_VAR).is_some(),
     };
     let writer = futures::executor::block_on(
         CliWorld::cucumber()
@@ -249,7 +247,6 @@ fn run_feature(
                     Selection::NeedsLabview => (&counted_labview, false),
                     Selection::Interactive => (&counted_interactive, false),
                     Selection::NeedsPilotSource => (&counted_pilot_source, false),
-                    Selection::NeedsPilotBSource => (&counted_pilot_b_source, false),
                 };
                 counter.fetch_add(1, Ordering::SeqCst);
                 runs
@@ -271,7 +268,6 @@ fn run_feature(
         pending_not_run: pending_not_run.load(Ordering::SeqCst),
         interactive_not_run: interactive_not_run.load(Ordering::SeqCst),
         pilot_source_not_run: pilot_source_not_run.load(Ordering::SeqCst),
-        pilot_b_source_not_run: pilot_b_source_not_run.load(Ordering::SeqCst),
     };
     (counts, outcome)
 }
@@ -312,7 +308,6 @@ fn run_features() {
     let mut failures = Vec::new();
     let (mut labview_not_run, mut unsafe_not_run, mut pending_not_run) = (0, 0, 0);
     let (mut labview_ran, mut interactive_not_run, mut pilot_source_not_run) = (0, 0, 0);
-    let mut pilot_b_source_not_run = 0;
     for feature in FEATURE_FILES {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(feature);
         let (counts, outcome) = run_feature(path, mode, global_busy.is_some());
@@ -322,7 +317,6 @@ fn run_features() {
         pending_not_run += counts.pending_not_run;
         interactive_not_run += counts.interactive_not_run;
         pilot_source_not_run += counts.pilot_source_not_run;
-        pilot_b_source_not_run += counts.pilot_b_source_not_run;
         if let Err(why) = outcome {
             failures.push(format!("{feature}: {why}"));
         }
@@ -352,17 +346,6 @@ fn run_features() {
         println!(
             "{}",
             pilot_not_run_line(pilot_source_not_run, PILOT_SOURCE_TAG, PILOT_A_ENV_VAR, "A")
-        );
-    }
-    if pilot_b_source_not_run > 0 {
-        println!(
-            "{}",
-            pilot_not_run_line(
-                pilot_b_source_not_run,
-                PILOT_B_SOURCE_TAG,
-                PILOT_B_ENV_VAR,
-                "B"
-            )
         );
     }
     if pending_not_run > 0 {

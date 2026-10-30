@@ -223,50 +223,197 @@ async fn the_section_shows_the_quoted_example(world: &mut CliWorld, example: Str
     }
 }
 
-/// Every key `[distribution]` and `[distribution.vip]` accept.
+/// Every key `[distribution]` accepts.
 const DISTRIBUTION_KEYS: &[&str] = &[
     "top-level-library",
     "kinds",
-    "formats",
-    "name",
     "vendor",
     "display-name",
     "install-dir",
-    "dependency-names",
 ];
 
+/// The usage guide's heading for the note on moving off `[distribution.vip]`.
+const UPGRADE_HEADING: &str = "### Upgrading from [distribution.vip]";
+
+fn repo_file(path: &str) -> String {
+    std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(path))
+        .unwrap_or_else(|why| panic!("read {path}: {why}"))
+        .replace("\r\n", "\n")
+}
+
+/// The fenced `toml` blocks of `text`.
+fn toml_blocks(text: &str) -> Vec<&str> {
+    text.split("```toml\n")
+        .skip(1)
+        .map(|block| block.split("```").next().unwrap_or_default())
+        .collect()
+}
+
+/// The keys at the start of lines of `[table]` in a TOML snippet.
+fn keys_of_table(snippet: &str, table: &str) -> Vec<String> {
+    let mut in_table = false;
+    let mut keys = Vec::new();
+    for line in snippet.lines() {
+        if line.starts_with('[') {
+            in_table = line.trim_end() == format!("[{table}]");
+        } else if in_table && let Some((key, _)) = line.split_once('=') {
+            keys.push(key.trim().to_string());
+        }
+    }
+    keys
+}
+
 #[then(
-    "docs/usage.md has a command-table line for lvpm build and documents the [distribution] keys"
+    "docs/usage.md has a command-table line for lvpm build, names the .lvpkg output, and documents vendor, display-name and install-dir under [distribution]"
 )]
 async fn usage_documents_build(_: &mut CliWorld) {
-    let guide = usage_guide();
+    let guide = repo_file("docs/usage.md");
+    let row = guide
+        .lines()
+        .find(|line| {
+            line.split('|')
+                .nth(1)
+                .is_some_and(|cell| cell.trim() == "`lvpm build`")
+        })
+        .expect("no command-table line for lvpm build");
     assert!(
-        guide.contains("| `lvpm build` |"),
-        "no command-table line for lvpm build"
+        row.contains(".lvpkg"),
+        "the lvpm build row does not name .lvpkg: {row}"
     );
     let section = guide
         .split_once("## Building a package")
-        .map(|(_, rest)| rest.split(" ## ").next().unwrap_or(rest))
-        .expect("usage.md has a Building a package section");
+        .expect("usage.md has a Building a package section")
+        .1;
+    assert!(
+        section.contains("dist/<name>-<version>.lvpkg"),
+        "the Building section does not name the .lvpkg output"
+    );
+    // The first example, which comes before the upgrade note.
+    let example = toml_blocks(section)[0];
+    let documented = keys_of_table(example, "distribution");
     let missing: Vec<_> = DISTRIBUTION_KEYS
         .iter()
-        .filter(|key| {
-            !section.contains(&format!(" {key} =")) && !section.contains(&format!(".{key}]"))
-        })
+        .filter(|key| !documented.iter().any(|d| d == *key))
         .collect();
     assert!(
         missing.is_empty(),
-        "[distribution] keys not documented: {missing:?}"
+        "[distribution] keys not documented: {missing:?} (found {documented:?})"
     );
 }
 
-#[then("README.md shows lvpm build")]
-async fn readme_shows_build(_: &mut CliWorld) {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("README.md");
-    let text = std::fs::read_to_string(&path).expect("read README.md");
+#[then("docs/usage.md mentions [distribution.vip] only in its upgrade note")]
+async fn usage_mentions_vip_only_in_the_upgrade_note(_: &mut CliWorld) {
+    let guide = repo_file("docs/usage.md");
+    let (before, rest) = guide
+        .split_once(UPGRADE_HEADING)
+        .expect("usage.md has no upgrade note");
+    // The note runs to the next heading.
+    let end = rest.find("\n#").map_or(rest.len(), |i| i + 1);
+    let (note, after) = rest.split_at(end);
+    for (name, text) in [("before", before), ("after", after)] {
+        assert!(
+            !text.contains("[distribution.vip"),
+            "usage.md mentions [distribution.vip] {name} the upgrade note"
+        );
+    }
+    let snippets = toml_blocks(note);
+    assert_eq!(
+        snippets.len(),
+        2,
+        "the upgrade note holds a before and an after"
+    );
     assert!(
-        text.contains("$ lvpm build"),
-        "README.md does not show lvpm build"
+        snippets[0].contains("[distribution.vip]") && snippets[0].contains("formats"),
+        "the before snippet does not show the old keys:\n{}",
+        snippets[0]
+    );
+    assert!(
+        !snippets[1].contains("distribution.vip") && !snippets[1].contains("formats"),
+        "the after snippet still shows an old key:\n{}",
+        snippets[1]
+    );
+    assert!(
+        keys_of_table(snippets[1], "distribution").contains(&"vendor".to_string()),
+        "the after snippet does not hold vendor under [distribution]"
+    );
+}
+
+#[then("README.md shows lvpm build writing a .lvpkg")]
+async fn readme_shows_build(_: &mut CliWorld) {
+    let text = repo_file("README.md");
+    assert!(
+        text.lines()
+            .any(|line| line.starts_with("$ lvpm build") && line.contains(".lvpkg")),
+        "README.md does not show lvpm build writing a .lvpkg"
+    );
+}
+
+#[then("ADR 1's example has no formats and no [distribution.vip]")]
+async fn adr_1_example_is_current(_: &mut CliWorld) {
+    let adr = repo_file("docs/adr/0001-manifest-project-and-distribution.md");
+    let example = toml_blocks(&adr)
+        .into_iter()
+        .find(|block| block.contains("[distribution]\n"))
+        .expect("ADR 1 has a [distribution] example");
+    assert!(
+        keys_of_table(example, "distribution").contains(&"vendor".to_string()),
+        "ADR 1's example does not hold vendor under [distribution]:\n{example}"
+    );
+    for gone in ["formats", "[distribution.vip"] {
+        assert!(
+            !example.contains(gone),
+            "ADR 1's example still has {gone}:\n{example}"
+        );
+    }
+}
+
+#[then(
+    "no tracked file outside the history names the .vip writer, the VIPM probe or the S1b feature"
+)]
+async fn nothing_names_the_deleted_writer(_: &mut CliWorld) {
+    // Built from parts, so that this file does not name them itself.
+    let needles = [
+        ["spec", "::", "write"].concat(),
+        ["vipm", "_probe"].concat(),
+        ["s1b-vip", "-in-vipm"].concat(),
+    ];
+    // The history: the specs, plans and ADRs that tell what happened, and the
+    // tooling's own append-only logs.
+    let history = ["docs/specs/", "plans/", "docs/adr/", "metrics/", ".claude/"];
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let listed = std::process::Command::new("git")
+        .args(["ls-files", "-z"])
+        .current_dir(root)
+        .output()
+        .expect("run git ls-files");
+    assert!(listed.status.success(), "git ls-files failed");
+    let listed = String::from_utf8(listed.stdout).expect("file names are UTF-8");
+    let files: Vec<_> = listed.split('\0').filter(|f| !f.is_empty()).collect();
+    assert!(
+        files.contains(&"docs/usage.md"),
+        "git ls-files does not list the repository"
+    );
+    let mut hits = Vec::new();
+    for file in files
+        .iter()
+        .filter(|file| !history.iter().any(|h| file.starts_with(h)))
+    {
+        // A file the index lists but the work tree no longer has names nothing.
+        let Ok(bytes) = std::fs::read(root.join(file)) else {
+            continue;
+        };
+        let text = String::from_utf8_lossy(&bytes);
+        hits.extend(
+            needles
+                .iter()
+                .filter(|needle| text.contains(needle.as_str()))
+                .map(|needle| format!("{file}: {needle}")),
+        );
+    }
+    assert!(
+        hits.is_empty(),
+        "the deleted writer is still named:\n{}",
+        hits.join("\n")
     );
 }
 

@@ -64,7 +64,7 @@ reference VIPM install produces: identical files, identical places.
 
 ## .vip writing
 
-lvpm does not write `.vip` for VIPM; S1's `.vip` is for lvpm only until S7a removes the writer ([ADR 6](docs/adr/0006-lvpkg-only-vip-read-only.md)).
+lvpm does not write `.vip` for VIPM; S1 wrote a `.vip` for lvpm only, and S7a removed that writer ([ADR 6](docs/adr/0006-lvpkg-only-vip-read-only.md)).
 Whether VIPM installs the `.vip` that S1's `lvpm build` writes was tested only
 through documented `vipm` commands (`install -y`, `uninstall`, `info`,
 `--version`) and VIPM's own package builder, against VIPM 26.3.0. lvpm's builds,

@@ -218,7 +218,7 @@ pub(crate) fn is_local_url(url: &str) -> bool {
     !url.starts_with("http://") && !url.starts_with("https://")
 }
 
-/// Index every `.vip` in a local package directory from each package's spec.
+/// Index every `.vip` and `.lvpkg` in a local package directory from each package's spec.
 fn scan_local_repo(
     cache: &Cache,
     dir: &Path,
@@ -226,15 +226,18 @@ fn scan_local_repo(
     out: &mut Vec<Entry>,
     sink: &dyn EventSink,
 ) -> Result<()> {
-    let mut vips: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
         .with_context(|| format!("reading repo directory {}", dir.display()))?
         .flatten()
         .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("vip")))
+        .filter(|p| {
+            p.extension()
+                .is_some_and(|x| x.eq_ignore_ascii_case("vip") || x.eq_ignore_ascii_case("lvpkg"))
+        })
         .collect();
-    vips.sort();
+    files.sort();
 
-    for path in vips {
+    for path in files {
         let metadata = std::fs::metadata(&path)?;
         if !refresh && let Some(entry) = cache.local_entry(&path, &metadata)? {
             out.push(local_entry(
@@ -244,7 +247,7 @@ fn scan_local_repo(
             ));
             continue;
         }
-        match entry_from_vip(&path) {
+        match entry_from_file(&path) {
             Ok(entry) => {
                 let after = std::fs::metadata(&path)?;
                 if metadata.len() == after.len()
@@ -268,7 +271,7 @@ fn scan_local_repo(
     Ok(())
 }
 
-fn entry_from_vip(path: &Path) -> Result<Entry> {
+fn entry_from_file(path: &Path) -> Result<Entry> {
     let bytes = std::fs::read(path)?;
     entry_from_bytes(path, &bytes)
 }
@@ -301,7 +304,7 @@ pub struct Import {
     pub reused: bool,
 }
 
-/// Import one .vip/.ogp archive or all immediate package files in a directory.
+/// Import one .vip/.ogp/.lvpkg archive or all immediate package files in a directory.
 /// Matching file stats and an existing import blob skip archive reads unless
 /// `refresh` is set. New imports store bytes before recording metadata and hashes.
 /// Files changed during reading and invalid archives fail the command; imports
@@ -310,7 +313,9 @@ pub struct Import {
 pub fn cache_add(cache_dir: &Path, source: &Path, refresh: bool) -> Result<Vec<Import>> {
     let is_package = |path: &Path| {
         path.extension().is_some_and(|extension| {
-            extension.eq_ignore_ascii_case("vip") || extension.eq_ignore_ascii_case("ogp")
+            ["vip", "ogp", "lvpkg"]
+                .iter()
+                .any(|ext| extension.eq_ignore_ascii_case(ext))
         })
     };
     let mut files = if source.is_dir() {
@@ -323,7 +328,7 @@ pub fn cache_add(cache_dir: &Path, source: &Path, refresh: bool) -> Result<Vec<I
     } else {
         anyhow::ensure!(
             source.is_file() && is_package(source),
-            "cache add expects a .vip/.ogp file or package directory: {}",
+            "cache add expects a .vip, .ogp or .lvpkg file or package directory: {}",
             source.display()
         );
         vec![source.to_path_buf()]

@@ -9,8 +9,8 @@ the slices can be built now. If the meeting changes it, a new ADR supersedes
 this one.
 
 Amended by [ADR 6](0006-lvpkg-only-vip-read-only.md) on 2026-10-29: `formats`
-and `[distribution.vip]` (decisions 2 and 4, and the example) go away when S7a
-lands; lvpm writes `.lvpkg` only.
+and `[distribution.vip]` (decisions 2 and 4, and the example) went away when
+S7a landed; lvpm writes `.lvpkg` only. The example below is the current one.
 
 ## Context
 
@@ -81,11 +81,7 @@ labview = ">=2021"
 
 [distribution]
 top-level-library = "src/Motion.lvlib"   # membership defines the payload
-kinds   = ["source"]
-formats = ["vip"]
-
-[distribution.vip]                       # only what VIPM needs and lvpm cannot derive
-name         = "hexagon_lib_motion"
+kinds        = ["source"]
 vendor       = "Hexagon"
 display-name = "Motion Library"
 ```

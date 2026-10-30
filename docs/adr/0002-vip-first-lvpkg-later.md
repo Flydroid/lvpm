@@ -6,7 +6,8 @@ Date: 2026-10-26
 
 Superseded by [ADR 6](0006-lvpkg-only-vip-read-only.md) on 2026-10-29: VIPM refuses
 lvpm's `.vip` (it checks a package `ID` lvpm cannot compute), so lvpm
-writes `.lvpkg` only.
+writes `.lvpkg` only. S7a has landed: `lvpm build` writes a `.lvpkg` and the
+`.vip` writer is deleted.
 
 ## Context
 

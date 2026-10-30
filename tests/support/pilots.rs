@@ -134,6 +134,8 @@ pub fn labviewcli() -> PathBuf {
 pub const PILOT_A_COMMIT: &str = "f7cc16a391faa1e982b54ae22d2f43c9df1ef581";
 /// Pilot A as its vendor published it.
 pub const PILOT_A_ARCHIVE: &str = "hse_lib_hse_logger-2.2.2.114.vip";
+/// What `lvpm build` names pilot A's package.
+pub const PILOT_A_BUILT: &str = "hse_lib_hse_logger-2.2.2.114.lvpkg";
 /// The folder of pilot A's checkout that its build copies.
 pub const PILOT_A_SUBTREE: &str = "Source";
 /// Pilot A's `lvpm.toml`: its repository has none, and this is what it would hold.
@@ -144,16 +146,9 @@ labview = ">=2016"
 
 [distribution]
 top-level-library = "Source/HSE-Logger/hse-logger.lvlib"
-
-[distribution.vip]
 vendor = "Hampel Software Engineering"
 display-name = "HSE Logger"
 "#;
-
-/// Pilot B's pinned commit; README.md beside the build-slice features names it.
-pub const PILOT_B_COMMIT: &str = "723d7a672b5f0eafa9f98ea63629ba5855d50227";
-/// Pilot B as its vendor published it.
-pub const PILOT_B_ARCHIVE: &str = "labview_open_source_lib_serializer-1.2.1.16.vip";
 
 /// The checkout the variable `env_var` names, once its HEAD is `commit` and
 /// nothing in its `subtree` (the folder a build copies) is modified or
@@ -230,32 +225,6 @@ fn checkout_at(
     Ok(path)
 }
 
-/// The package names of a `Requires` value (`a>=1.0,b`), without their bounds.
-pub fn requires_names(requires: &str) -> Vec<String> {
-    requires
-        .split(',')
-        .map(|part| part.trim().split(['<', '>', '=', ' ']).next().unwrap_or(""))
-        .filter(|name| !name.is_empty())
-        .map(String::from)
-        .collect()
-}
-
-/// The package names `archive`'s spec requires, sorted.
-pub fn requires_of(archive: &Path) -> Vec<String> {
-    let bytes =
-        std::fs::read(archive).unwrap_or_else(|e| panic!("reading {}: {e}", archive.display()));
-    let spec = lvpm_core::install::open_archive(bytes)
-        .and_then(|mut zip| lvpm_core::install::read_spec(&mut zip))
-        .unwrap_or_else(|e| panic!("lvpm cannot read {}'s spec: {e:#}", archive.display()));
-    let mut names = spec
-        .requires
-        .as_deref()
-        .map(requires_names)
-        .unwrap_or_default();
-    names.sort();
-    names
-}
-
 /// The file entries of a package below `File Group 0/<under>`, relative to
 /// `File Group 0/`, sorted.
 pub fn group_zero_files(archive: &Path, under: &str) -> Vec<String> {
@@ -267,6 +236,23 @@ pub fn group_zero_files(archive: &Path, under: &str) -> Vec<String> {
         .file_names()
         .filter_map(|name| name.strip_prefix("File Group 0/"))
         .filter(|name| name.starts_with(under) && !name.ends_with('/'))
+        .map(String::from)
+        .collect();
+    files.sort();
+    files
+}
+
+/// The payload of a `.lvpkg`: the raw names of its zip entries but `RECORD`
+/// and `package.toml`, each below its `install-dir`, sorted. Read without
+/// `lvpkg::read`, which is the code under test.
+pub fn lvpkg_files(archive: &Path) -> Vec<String> {
+    let file = std::fs::File::open(archive)
+        .unwrap_or_else(|e| panic!("opening {}: {e}", archive.display()));
+    let zip = zip::ZipArchive::new(file)
+        .unwrap_or_else(|e| panic!("reading {} as a zip: {e}", archive.display()));
+    let mut files: Vec<String> = zip
+        .file_names()
+        .filter(|name| *name != "RECORD" && *name != "package.toml")
         .map(String::from)
         .collect();
     files.sort();
@@ -515,83 +501,6 @@ mod tests {
         ] {
             assert!(why.contains(wanted), "{wanted} is not in: {why}");
         }
-    }
-
-    #[test]
-    fn pilot_b_requires_data_manipulation_and_nothing_else() {
-        let archive = pilots_dir().join(PILOT_B_ARCHIVE);
-        assert_eq!(
-            requires_of(&archive),
-            ["labview_open_source_lib_data_manipulation"]
-        );
-    }
-
-    /// A `.vip` holding only a spec with `body` after its `[Package]` section.
-    fn archive_with_spec(body: &str) -> (tempfile::TempDir, PathBuf) {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("a-1.0.vip");
-        let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
-        zip.start_file("spec", zip::write::SimpleFileOptions::default())
-            .unwrap();
-        std::io::Write::write_all(
-            &mut zip,
-            format!(
-                "[Package]
-Name=a
-{body}"
-            )
-            .as_bytes(),
-        )
-        .unwrap();
-        zip.finish().unwrap();
-        (dir, path)
-    }
-
-    #[test]
-    fn a_spec_with_no_requires_requires_nothing() {
-        let (_dir, archive) = archive_with_spec("");
-        assert!(requires_of(&archive).is_empty());
-    }
-
-    #[test]
-    fn requires_are_sorted_by_name() {
-        let (_dir, archive) = archive_with_spec(
-            "[Dependencies]
-Requires=b>=1.0,a
-",
-        );
-        assert_eq!(requires_of(&archive), ["a", "b"]);
-    }
-
-    #[test]
-    #[should_panic(expected = "no-such.vip")]
-    fn a_missing_archive_panics_naming_it() {
-        requires_of(Path::new("no-such.vip"));
-    }
-
-    #[test]
-    #[should_panic(expected = "a-1.0.vip")]
-    fn an_archive_without_a_spec_panics_naming_it() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("a-1.0.vip");
-        zip::ZipWriter::new(std::fs::File::create(&path).unwrap())
-            .finish()
-            .unwrap();
-        requires_of(&path);
-    }
-
-    #[test]
-    fn requires_names_drop_the_version_bounds() {
-        assert_eq!(
-            requires_names("a>=1.0,b,  c<2.0 , d==3"),
-            ["a", "b", "c", "d"]
-        );
-        assert!(requires_names("").is_empty());
-    }
-
-    #[test]
-    fn a_space_before_a_version_bound_ends_the_name() {
-        assert_eq!(requires_names("a >= 1.0, b == 2"), ["a", "b"]);
     }
 
     #[test]

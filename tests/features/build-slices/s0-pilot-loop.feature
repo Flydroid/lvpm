@@ -37,7 +37,7 @@ Feature: The pilot loop: build, publish, install, mass compile
       | vi.lib/_probes/Hampel Software Engineering/HSE Logger/HSE Logger Custom Probe - DEBUG (Variant).vi |
 
   @labview @interactive-labview @pilot-source
-  Scenario: lvpm build turns pilot A's library into a .vip project B installs and mass compiles
+  Scenario: lvpm build turns pilot A's library into a .lvpkg project B installs and mass compiles
     Given a LabVIEW 2026 installation without the pilots
     And pilot A built with lvpm build
     And project B depending on both pilots, with a folder feed of the built pilot A and the other pilot archives
@@ -47,7 +47,7 @@ Feature: The pilot loop: build, publish, install, mass compile
     And mass compiling the venv's packages in a LabVIEW on the venv succeeds
 
   @labview @interactive-labview @pilot-source
-  Scenario: lvpm publish puts pilot A's .vip in a folder feed project B installs from
+  Scenario: lvpm publish puts pilot A's .lvpkg in a folder feed project B installs from
     Given a LabVIEW 2026 installation without the pilots
     And pilot A built with lvpm build
     And lvpm publish has put it in an empty folder feed

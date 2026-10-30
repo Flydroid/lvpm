@@ -78,8 +78,7 @@ What `build` does, in order:
 
 ### No `.vip` output
 
-From S7a, lvpm does not write `.vip` ([ADR 6](../adr/0006-lvpkg-only-vip-read-only.md));
-until then `lvpm build` still writes one, for lvpm only.
+Since S7a, lvpm does not write `.vip` ([ADR 6](../adr/0006-lvpkg-only-vip-read-only.md)).
 S1 wrote one, and lvpm installed it, but VIPM refuses it: VIPM checks a
 package `ID` in the `spec` that only its own builder writes, and how that
 `ID` is computed is not published. A `.vip` that VIPM refuses would only

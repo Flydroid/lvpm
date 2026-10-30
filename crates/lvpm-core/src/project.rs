@@ -285,7 +285,7 @@ pub(crate) fn parse(text: &str) -> Result<Project> {
 
 /// `project.labview` as written, `">=2024"`, to the year it starts at, `"2024"`:
 /// what [`Project::labview`] holds, so every reader of it sees a plain year.
-fn labview_minimum(text: &str) -> Result<String> {
+pub(crate) fn labview_minimum(text: &str) -> Result<String> {
     let is_year = |s: &str| s.len() == 4 && s.bytes().all(|b| b.is_ascii_digit()) && s >= "2000";
     let text = text.trim();
     match text.strip_prefix(">=").map(str::trim) {

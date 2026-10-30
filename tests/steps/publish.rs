@@ -75,7 +75,7 @@ impl CliWorld {
 
     /// The message names the file at `rel`: as the work directory spells it,
     /// or as the file system does. The manifest may be named bare.
-    fn message_names(&self, message: &str, rel: &str) -> bool {
+    pub(super) fn message_names(&self, message: &str, rel: &str) -> bool {
         let path = self.below_work(rel);
         let mut spellings = vec![path.display().to_string()];
         let real = match path.canonicalize() {
@@ -313,9 +313,9 @@ async fn is_empty(world: &mut CliWorld, rel: String) {
     );
 }
 
-#[then(regex = r#"^dist holds no \.vip$"#)]
-async fn dist_no_vip(world: &mut CliWorld) {
-    world.no_vip_in_dist();
+#[then(regex = r#"^dist holds no [.]lvpkg$"#)]
+async fn dist_no_package(world: &mut CliWorld) {
+    world.no_package_in_dist();
 }
 
 #[then(regex = r#"^"([^"]+)" is as it was, and dist holds only "([^"]+)"$"#)]

@@ -398,6 +398,7 @@ mod tests {
                 target_dir: "<application>".into(),
                 replace_mode: "Always".into(),
                 files: vec!["alpha/a.vi".into(), "alpha/b.vi".into()],
+                entry_prefix: "File Group 0/".into(),
             }],
             script_vis: Vec::new(),
             requires: None,
