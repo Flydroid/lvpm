@@ -8,6 +8,7 @@ use crate::support::pilots::check_checksums;
 use crate::support::project::MANIFEST_FILE;
 use crate::support::venv::VENV_DIR;
 use cucumber::{given, then, when};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -24,6 +25,9 @@ pub struct InitState {
     given_manifest: Option<(PathBuf, String)>,
     /// The newest year `lvpm targets` listed.
     newest_installed: Option<u32>,
+    /// The `[dependencies]` entries a VIPM configuration's chosen packages should
+    /// become: name, constraint.
+    chosen: Vec<(String, String)>,
 }
 
 /// The newest year in the output of `lvpm targets`
@@ -415,4 +419,253 @@ async fn output_names_the_repository(world: &mut CliWorld, text: String) {
             .any(|w| output.stdout.contains(w) || output.stderr.contains(w)),
         "none of {wanted:?} is in: {output:?}"
     );
+}
+
+// ---- `init --from` a .vipc ----
+
+/// A `.vipc` for LabVIEW `target`: a zip holding a `config.xml` that lists
+/// `packages` as `(name-version, dependency, pinned)`.
+fn vipc_bytes(target: &str, packages: &[(String, bool, bool)]) -> Vec<u8> {
+    let listed: String = packages
+        .iter()
+        .map(|(full, dependency, pinned)| {
+            format!(
+                "    <Package>\r\n      <Name>{full}</Name>\r\n      <Included>false</Included>\r\n      \
+                 <Dependency>{dependency}</Dependency>\r\n      <Pinned>{pinned}</Pinned>\r\n    </Package>\r\n"
+            )
+        })
+        .collect();
+    zip_of(&[(
+        "config.xml",
+        format!(
+            "<VI_Package_Configuration File_Type=\"xml\" Version=\"0.6\">\r\n  <Target>\r\n    \
+             <Name>LabVIEW</Name>\r\n    <Version>{target}</Version>\r\n{listed}  </Target>\r\n\
+             </VI_Package_Configuration>"
+        ),
+    )])
+}
+
+fn zip_of(entries: &[(&str, String)]) -> Vec<u8> {
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for (name, text) in entries {
+        zip.start_file(*name, zip::write::SimpleFileOptions::default())
+            .expect("start a zip entry");
+        zip.write_all(text.as_bytes()).expect("write a zip entry");
+    }
+    zip.finish().expect("finish the zip").into_inner()
+}
+
+impl CliWorld {
+    /// `bytes` as `name` in the working directory, where the scenario's
+    /// "in its folder" runs.
+    fn put_in_work_dir(&self, name: &str, bytes: &[u8]) {
+        std::fs::write(self.sandbox.work_dir().join(name), bytes).expect("write the file");
+    }
+
+    /// A `.vipc` of `chosen` packages that VIPM chose, then `dependencies` that it
+    /// pulled in for them.
+    fn vipc_of_chosen(&mut self, name: &str, chosen: usize, dependencies: usize) {
+        let mut packages = Vec::new();
+        self.init.chosen.clear();
+        for i in 1..=chosen {
+            let lib = format!("chosen_lib_{i}");
+            self.init
+                .chosen
+                .push((lib.clone(), ">=1.0.0.1".to_string()));
+            packages.push((format!("{lib}-1.0.0.1"), false, false));
+        }
+        for i in 1..=dependencies {
+            packages.push((format!("needed_lib_{i}-2.0.0.2"), true, false));
+        }
+        self.put_in_work_dir(name, &vipc_bytes("13.0", &packages));
+    }
+}
+
+#[given(
+    regex = r#"^a VIPM configuration "([^"]+)" for LabVIEW "([^"]+)" with the package "([^"]+)" marked dependency (true|false) and pinned (true|false)$"#
+)]
+async fn vipc_with_a_package(
+    world: &mut CliWorld,
+    file: String,
+    labview: String,
+    package: String,
+    dependency: bool,
+    pinned: bool,
+) {
+    let bytes = vipc_bytes(&labview, &[(package, dependency, pinned)]);
+    world.put_in_work_dir(&file, &bytes);
+}
+
+#[given(
+    regex = r#"^a VIPM configuration "([^"]+)" with (\d+) chosen packages? and (\d+|none) marked as a dependency$"#
+)]
+async fn vipc_with_counts(world: &mut CliWorld, file: String, chosen: usize, dependencies: String) {
+    let dependencies = dependencies.parse().unwrap_or(0);
+    world.vipc_of_chosen(&file, chosen, dependencies);
+}
+
+#[given(regex = r#"^a VIPM configuration "([^"]+)" with no packages$"#)]
+async fn vipc_with_no_packages(world: &mut CliWorld, file: String) {
+    world.vipc_of_chosen(&file, 0, 0);
+}
+
+#[given(regex = r#"^a VIPM configuration "([^"]+)" for LabVIEW "([^"]+)"$"#)]
+async fn vipc_for_labview(world: &mut CliWorld, file: String, labview: String) {
+    world.put_in_work_dir(&file, &vipc_bytes(&labview, &[]));
+}
+
+#[given(
+    regex = r#"^a VIPM configuration "([^"]+)" in the working directory and an empty folder "([^"]+)"$"#
+)]
+async fn vipc_beside_an_empty_folder(world: &mut CliWorld, file: String, folder: String) {
+    std::fs::create_dir_all(world.sandbox.work_dir().join(folder)).expect("create the folder");
+    world.vipc_of_chosen(&file, 1, 0);
+}
+
+#[given(regex = r#"^a VIPM configuration "([^"]+)" choosing (\S+) (\S+), not pinned$"#)]
+async fn vipc_choosing(world: &mut CliWorld, file: String, name: String, version: String) {
+    let bytes = vipc_bytes("13.0", &[(format!("{name}-{version}"), false, false)]);
+    world.put_in_work_dir(&file, &bytes);
+}
+
+#[given(regex = r#"^no file "([^"]+)"$"#)]
+async fn no_such_file(world: &mut CliWorld, file: String) {
+    assert!(
+        !world.sandbox.work_dir().join(&file).exists(),
+        "{file} exists"
+    );
+}
+
+#[given(regex = r#"^a file "([^"]+)"$"#)]
+async fn an_empty_file(world: &mut CliWorld, file: String) {
+    world.put_in_work_dir(&file, b"");
+}
+
+#[given(regex = r#"^a zip "([^"]+)" with only "([^"]+)"$"#)]
+async fn a_zip_with_only(world: &mut CliWorld, file: String, entry: String) {
+    world.put_in_work_dir(&file, &zip_of(&[(&entry, "x".to_string())]));
+}
+
+#[given(regex = r#"^a zip "([^"]+)" whose config\.xml has no <Target>$"#)]
+async fn a_zip_with_no_target(world: &mut CliWorld, file: String) {
+    let config = "<VI_Package_Configuration></VI_Package_Configuration>".to_string();
+    world.put_in_work_dir(&file, &zip_of(&[("config.xml", config)]));
+}
+
+#[when(regex = r#"^I run "([^"]+)" in its folder$"#)]
+async fn run_in_its_folder(world: &mut CliWorld, command_line: String) {
+    let work = world.sandbox.work_dir();
+    world.run_in(&command_line, work);
+}
+
+#[when(regex = r#"^I run "([^"]+)" in the same folder$"#)]
+async fn run_where_the_last_command_ran(world: &mut CliWorld, command_line: String) {
+    let folder = world.init_cwd().to_path_buf();
+    world.run_in(&command_line, folder);
+}
+
+fn dependencies_of(dir: &Path) -> toml::Table {
+    manifest_in(dir)["dependencies"]
+        .as_table()
+        .expect("a [dependencies] table")
+        .clone()
+}
+
+#[then(regex = r#"^lvpm\.toml \[dependencies\] has (\S+) = "([^"]+)"$"#)]
+async fn dependencies_has(world: &mut CliWorld, name: String, constraint: String) {
+    let dependencies = dependencies_of(world.init_cwd());
+    assert_eq!(
+        dependencies.get(&name).and_then(|c| c.as_str()),
+        Some(constraint.as_str()),
+        "{dependencies:?}"
+    );
+}
+
+#[then(regex = r"^lvpm\.toml \[dependencies\] is empty$")]
+async fn dependencies_is_empty(world: &mut CliWorld) {
+    let dependencies = dependencies_of(world.init_cwd());
+    assert!(dependencies.is_empty(), "{dependencies:?}");
+}
+
+#[then(regex = r#"^lvpm\.toml says labview "([^"]+)"$"#)]
+async fn manifest_says_labview(world: &mut CliWorld, labview: String) {
+    let manifest = manifest_in(world.init_cwd());
+    assert_eq!(project_text(&manifest, "labview"), labview);
+}
+
+#[then(r#"the output has a line "  <name> <constraint>" for each chosen package"#)]
+async fn output_lists_each_chosen_package(world: &mut CliWorld) {
+    let output = world.init_output();
+    assert!(
+        !world.init.chosen.is_empty(),
+        "no chosen packages were set up"
+    );
+    for (name, constraint) in &world.init.chosen {
+        let wanted = format!("  {name} {constraint}");
+        assert!(
+            printed_lines(output).any(|line| line == wanted),
+            "no line is {wanted:?}: {output:?}"
+        );
+    }
+    let written = dependencies_of(world.init_cwd());
+    assert_eq!(written.len(), world.init.chosen.len(), "{written:?}");
+}
+
+#[then(regex = r#"^the output does not say "([^"]+)"$"#)]
+async fn output_does_not_say(world: &mut CliWorld, text: String) {
+    let output = world.init_output();
+    assert!(
+        !output.stdout.contains(&text) && !output.stderr.contains(&text),
+        "{text:?} is in: {output:?}"
+    );
+}
+
+#[then(regex = r#"^it succeeds and "([^"]+)" has an lvpm\.toml with the \.vipc's packages$"#)]
+async fn succeeds_and_folder_has_the_packages(world: &mut CliWorld, folder: String) {
+    world.succeeded();
+    let dependencies = dependencies_of(&world.sandbox.work_dir().join(folder));
+    let names: Vec<&str> = dependencies.keys().map(String::as_str).collect();
+    let chosen: Vec<&str> = world.init.chosen.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, chosen);
+}
+
+/// The packages `lvpm.lock` in `dir` lists, as `(name, version)`.
+fn locked_in(dir: &Path) -> Vec<(String, String)> {
+    let path = dir.join("lvpm.lock");
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let lock: toml::Table = text.parse().expect("an lvpm.lock that is TOML");
+    lock["package"]
+        .as_array()
+        .expect("[[package]] entries")
+        .iter()
+        .map(|p| {
+            (
+                p["name"].as_str().expect("a name").to_string(),
+                p["version"].as_str().expect("a version").to_string(),
+            )
+        })
+        .collect()
+}
+
+#[then("the folder's lvpm.lock holds the serializer 1.2.1.16 and its two dependencies")]
+async fn lock_holds_the_serializer_and_its_dependencies(world: &mut CliWorld) {
+    let locked = locked_in(world.init_cwd());
+    let names: Vec<&str> = locked.iter().map(|(name, _)| name.as_str()).collect();
+    assert!(
+        locked.contains(&(
+            "labview_open_source_lib_serializer".into(),
+            "1.2.1.16".into()
+        )),
+        "{locked:?}"
+    );
+    for dependency in [
+        "labview_open_source_lib_data_manipulation",
+        "labview_open_source_project_lib_labview_open_source_palette",
+    ] {
+        assert!(
+            names.contains(&dependency),
+            "{dependency} is not in {names:?}"
+        );
+    }
+    assert_eq!(names.len(), 3, "{names:?}");
 }

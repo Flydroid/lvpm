@@ -179,7 +179,12 @@ enum Cmd {
     /// `labview` is --labview-version, else the newest installed LabVIEW. Then make a git
     /// repository (left alone inside one) and bind a venv to that LabVIEW when it can. An
     /// existing lvpm.toml is never replaced, and nothing is written unless every check passes.
-    Init,
+    Init {
+        /// Add the packages a VIPM .vipc chose as dependencies. Its own LabVIEW is only reported.
+        /// Relative to the working directory. A .dragon file is refused.
+        #[arg(long, value_name = "FILE")]
+        from: Option<PathBuf>,
+    },
     /// Install a package by name, or name@version. In a project, a bare
     /// install is `lvpm sync` and a named install is `lvpm add`, unless
     /// --global, --prefix or --labview-version say where it goes.
@@ -583,8 +588,8 @@ fn run(cli: &Cli) -> Result<Report> {
             let started = ops::start::start(&env, *wait)?;
             Ok(Report::said(render::viserver::started(&started), "start"))
         }
-        Cmd::Init => {
-            let done = ops::init::run(&env, &git::spawn)
+        Cmd::Init { from } => {
+            let done = ops::init::run(&env, from.as_deref(), &git::spawn)
                 .map_err(|why| anyhow!(render::init::error(&why)))?;
             Report::new(render::init::initialized(&done), &done)
         }

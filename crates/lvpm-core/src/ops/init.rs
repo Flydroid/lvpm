@@ -5,11 +5,12 @@
 
 use super::env::OpEnv;
 use crate::errors::InitError;
-use crate::events::{Event, Retarget};
+use crate::events::{AddedDependency, Event, Retarget, SourceKind};
 use crate::git::{self, Runner};
+use crate::manifest_edit::DependencyTable;
 use crate::target::LvTarget;
 use crate::venv::{self, Venv};
-use crate::{manifest_edit, paths, project};
+use crate::{manifest_edit, paths, project, vipc};
 use anyhow::anyhow;
 use serde::Serialize;
 use std::cmp::Reverse;
@@ -116,9 +117,11 @@ fn installation_label(target: &LvTarget) -> String {
 /// Write an `lvpm.toml` in the project root — `--project`, else the directory
 /// the command ran in — named after its folder. `labview` is `--labview-version`
 /// when given, else the newest LabVIEW installed, and left out when there is none.
-/// Once the manifest is written, `git` makes the repository (the op does not know
-/// how git is run) and a venv is bound to the chosen LabVIEW when it can be.
-pub fn run(env: &OpEnv, runner: Runner) -> Result<Initialized, InitError> {
+/// `from` (`--from`, relative to the working directory) adds the packages that file
+/// chose as dependencies; its own LabVIEW is reported and never used. Once the
+/// manifest is written, `git` makes the repository (the op does not know how git
+/// is run) and a venv is bound to the chosen LabVIEW when it can be.
+pub fn run(env: &OpEnv, from: Option<&Path>, runner: Runner) -> Result<Initialized, InitError> {
     let root = match &env.flags.project {
         Some(dir) => paths::resolve(&env.cwd, dir),
         None => paths::clean(&env.cwd),
@@ -140,22 +143,35 @@ pub fn run(env: &OpEnv, runner: Runner) -> Result<Initialized, InitError> {
             })
         })
         .transpose()?;
+    let (seed, source_kind) = match from {
+        Some(from) => read_source(&env.cwd, from).map(|(seed, kind)| (seed, Some(kind)))?,
+        None => (Seed::default(), None),
+    };
     let choice = choose_labview(&env.targets, flag);
 
-    let text = manifest_edit::skeleton(
-        &manifest_edit::folder_name(&root),
-        Some(FIRST_VERSION),
-        choice.year,
-    );
+    let text = manifest_text(&root, choice.year, &seed)?;
     write_new(&manifest, &text)?;
     env.sink.emit(Event::InitManifestWritten {
         path: manifest.clone(),
         labview: choice.year,
         installed: choice.installed,
         retarget: choice.retarget,
+        source_labview: seed.source_labview,
+        source_kind,
     });
     if choice.year.is_none() {
         env.sink.emit(Event::InitNoLabview);
+    }
+    if let Some(from) = from {
+        env.sink.emit(Event::InitDependenciesAdded {
+            from: from.display().to_string(),
+            added: seed
+                .deps
+                .into_iter()
+                .map(|(name, constraint)| AddedDependency { name, constraint })
+                .collect(),
+            skipped: seed.skipped,
+        });
     }
     env.sink.emit(Event::InitGit {
         outcome: git::init(&root, runner),
@@ -166,6 +182,37 @@ pub fn run(env: &OpEnv, runner: Runner) -> Result<Initialized, InitError> {
         labview: choice.year,
         venv,
     })
+}
+
+/// What the file `--from` names says, and what kind of file it is. The kind is
+/// told from the file's name before the file is opened, so this `match` is where
+/// another kind of file gets its reader. `from` is looked for from `cwd`; the
+/// errors name it as it was typed.
+fn read_source(cwd: &Path, from: &Path) -> Result<(Seed, SourceKind), InitError> {
+    let file = from.display().to_string();
+    let name = from
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_lowercase();
+    match name.as_str() {
+        n if n.ends_with(".dragon") => Err(InitError::DragonFile { file }),
+        _ => vipc::read(&paths::resolve(cwd, from), &file)
+            .map(|vipc| (vipc.seed(), SourceKind::Vipc))
+            .map_err(|why| InitError::BadSource {
+                why: format!("{why:#}"),
+            }),
+    }
+}
+
+/// The text of the new `lvpm.toml`: the skeleton, then each of the seed's dependencies.
+fn manifest_text(root: &Path, year: Option<u32>, seed: &Seed) -> Result<String, InitError> {
+    let mut text =
+        manifest_edit::skeleton(&manifest_edit::folder_name(root), Some(FIRST_VERSION), year);
+    for (name, constraint) in &seed.deps {
+        text = manifest_edit::set(&text, DependencyTable::Dependencies, name, constraint)?;
+    }
+    Ok(text)
 }
 
 /// The venv for the LabVIEW `year` names, bound to the installation at `path`
@@ -259,7 +306,7 @@ mod tests {
             let mut env = env_on(&sink, &root);
             env.targets = targets;
             env.flags.labview_version = flag.map(String::from);
-            let done = run(&env, &git_ok).unwrap();
+            let done = run(&env, None, &git_ok).unwrap();
             Ran {
                 events: sink.events(),
                 manifest: std::fs::read_to_string(&done.manifest).unwrap(),
@@ -299,7 +346,7 @@ mod tests {
         let mut env = env_on(&sink, &root);
         env.flags.labview_version = Some("2023".into());
 
-        let done = run(&env, &git_ok).unwrap();
+        let done = run(&env, None, &git_ok).unwrap();
 
         assert_eq!(done.manifest, root.join("lvpm.toml"));
         assert_eq!(done.labview, Some(2023));
@@ -315,6 +362,8 @@ mod tests {
                     labview: Some(2023),
                     installed: vec!["2026 (64-bit)".into()],
                     retarget: None,
+                    source_labview: None,
+                    source_kind: None,
                 },
                 Event::InitGit {
                     outcome: GitOutcome::Initialized
@@ -338,7 +387,7 @@ mod tests {
         let calls = std::cell::RefCell::new(Vec::new());
         let sink = Recorded::default();
 
-        run(&env_on(&sink, &root), &|command: &mut Command| {
+        run(&env_on(&sink, &root), None, &|command: &mut Command| {
             calls.borrow_mut().push((
                 command.get_current_dir().map(Path::to_path_buf),
                 root.join("lvpm.toml").is_file(),
@@ -370,7 +419,7 @@ mod tests {
             let (scratch, root) = folder("init-git-warns", "App");
             let sink = Recorded::default();
 
-            let done = run(&env_on(&sink, &root), &|_: &mut Command| answer()).unwrap();
+            let done = run(&env_on(&sink, &root), None, &|_: &mut Command| answer()).unwrap();
 
             assert!(done.manifest.is_file(), "{outcome:?}");
             assert_eq!(git_outcome(&sink.events()), outcome);
@@ -386,7 +435,7 @@ mod tests {
         std::fs::create_dir(&app).unwrap();
         let sink = Recorded::default();
 
-        run(&env_on(&sink, &app), &no_git).unwrap();
+        run(&env_on(&sink, &app), None, &no_git).unwrap();
 
         assert_eq!(
             git_outcome(&sink.events()),
@@ -402,7 +451,7 @@ mod tests {
         std::fs::write(root.join("lvpm.toml"), "# mine\n").unwrap();
         let calls = std::cell::Cell::new(0);
 
-        let why = run(&env(&root), &|_: &mut Command| {
+        let why = run(&env(&root), None, &|_: &mut Command| {
             calls.set(calls.get() + 1);
             fake_output(0, "")
         })
@@ -470,7 +519,7 @@ mod tests {
         std::fs::create_dir_all(binding.parent().unwrap()).unwrap();
         std::fs::write(&binding, "{\"mine\":1}").unwrap();
 
-        let done = run(&env(&root), &git_ok).unwrap();
+        let done = run(&env(&root), None, &git_ok).unwrap();
 
         let skip = done.venv.unwrap_err();
         assert!(skip.why.contains("already has a venv"), "{}", skip.why);
@@ -651,7 +700,7 @@ mod tests {
         let mut env = env(&scratch);
         env.flags.project = Some(PathBuf::from("Elsewhere"));
 
-        let done = run(&env, &git_ok).unwrap();
+        let done = run(&env, None, &git_ok).unwrap();
 
         assert_eq!(done.manifest, root.join("lvpm.toml"));
         assert!(!scratch.join("lvpm.toml").exists());
@@ -669,7 +718,7 @@ mod tests {
         let mut env = env(&scratch);
         env.flags.project = Some(PathBuf::from("Missing"));
 
-        let why = run(&env, &no_git).unwrap_err();
+        let why = run(&env, None, &no_git).unwrap_err();
 
         assert!(
             matches!(&why, InitError::ProjectMissing { dir } if *dir == scratch.join("Missing")),
@@ -686,7 +735,7 @@ mod tests {
         let mut env = env(&root);
         env.flags.project = Some(PathBuf::from("afile"));
 
-        let why = run(&env, &no_git).unwrap_err();
+        let why = run(&env, None, &no_git).unwrap_err();
 
         assert!(matches!(why, InitError::ProjectMissing { .. }), "{why:?}");
         let _ = std::fs::remove_dir_all(&scratch);
@@ -714,7 +763,7 @@ mod tests {
         std::fs::write(root.join("lvpm.toml"), "# mine\n").unwrap();
         let sink = Recorded::default();
 
-        let why = run(&env_on(&sink, &root), &no_git).unwrap_err();
+        let why = run(&env_on(&sink, &root), None, &no_git).unwrap_err();
 
         assert!(
             matches!(&why, InitError::ManifestExists { path } if *path == root.join("lvpm.toml")),
@@ -748,7 +797,7 @@ mod tests {
         let app = root.join("app");
         std::fs::create_dir_all(&app).unwrap();
 
-        let done = run(&env_on(&Recorded::default(), &app), &git_ok).unwrap();
+        let done = run(&env_on(&Recorded::default(), &app), None, &git_ok).unwrap();
 
         assert_eq!(done.manifest, app.join("lvpm.toml"));
         assert_eq!(
@@ -765,7 +814,7 @@ mod tests {
             let mut env = env(&root);
             env.flags.labview_version = Some(value.into());
 
-            let why = run(&env, &no_git).unwrap_err();
+            let why = run(&env, None, &no_git).unwrap_err();
 
             assert!(
                 matches!(&why, InitError::BadLabview { value: v } if v == value),
@@ -783,14 +832,270 @@ mod tests {
         let mut env = env(&root);
         env.flags.labview_version = Some("abc".into());
         assert!(matches!(
-            run(&env, &no_git).unwrap_err(),
+            run(&env, None, &no_git).unwrap_err(),
             InitError::ManifestExists { .. }
         ));
 
         env.flags.project = Some(PathBuf::from("Missing"));
         assert!(matches!(
-            run(&env, &no_git).unwrap_err(),
+            run(&env, None, &no_git).unwrap_err(),
             InitError::ProjectMissing { .. }
+        ));
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// `name` in `dir`: a `.vipc` for LabVIEW `target` listing `packages` as
+    /// `(name-version, pinned, dependency)`.
+    fn vipc_in(dir: &Path, name: &str, target: &str, packages: &[(&str, bool, bool)]) -> PathBuf {
+        use std::io::Write;
+        let listed: String = packages
+            .iter()
+            .map(|(full, pinned, dependency)| {
+                format!(
+                    "<Package><Name>{full}</Name><Included>false</Included>\
+                     <Dependency>{dependency}</Dependency><Pinned>{pinned}</Pinned></Package>"
+                )
+            })
+            .collect();
+        let xml = format!(
+            "<VI_Package_Configuration><Target><Name>LabVIEW</Name>\
+             <Version>{target}</Version>{listed}</Target></VI_Package_Configuration>"
+        );
+        let path = dir.join(name);
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+        zip.start_file("config.xml", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(xml.as_bytes()).unwrap();
+        zip.finish().unwrap();
+        path
+    }
+
+    /// A refusal leaves none of what `init` makes.
+    fn assert_nothing_written(root: &Path) {
+        for name in ["lvpm.toml", ".git", ".lv-venv"] {
+            assert!(!root.join(name).exists(), "{name} was made");
+        }
+    }
+
+    #[test]
+    fn from_adds_the_chosen_packages_exact_or_floored_and_reports_them_and_the_skips() {
+        let (scratch, root) = folder("init-from-adds", "App");
+        vipc_in(
+            &root,
+            "p.vipc",
+            "13.0",
+            &[
+                ("pinned_lib-1.0.0.1", true, false),
+                ("floating_lib-2.0.0.2", false, false),
+                ("needed_lib-3.0.0.3", false, true),
+            ],
+        );
+        let sink = Recorded::default();
+        let mut env = env_on(&sink, &root);
+        env.flags.labview_version = Some("2023".into());
+
+        let done = run(&env, Some(Path::new("p.vipc")), &git_ok).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&done.manifest).unwrap(),
+            "[project]\nname = \"App\"\nversion = \"0.1.0\"\nlabview = \">=2023\"\n\n\
+             [dependencies]\npinned_lib = \"1.0.0.1\"\nfloating_lib = \">=2.0.0.2\"\n"
+        );
+        assert_eq!(
+            sink.events(),
+            [
+                Event::InitManifestWritten {
+                    path: done.manifest.clone(),
+                    labview: Some(2023),
+                    installed: vec!["2026 (64-bit)".into()],
+                    retarget: None,
+                    source_labview: Some(2013),
+                    source_kind: Some(SourceKind::Vipc),
+                },
+                Event::InitDependenciesAdded {
+                    from: "p.vipc".into(),
+                    added: vec![
+                        AddedDependency {
+                            name: "pinned_lib".into(),
+                            constraint: "1.0.0.1".into()
+                        },
+                        AddedDependency {
+                            name: "floating_lib".into(),
+                            constraint: ">=2.0.0.2".into()
+                        },
+                    ],
+                    skipped: 1,
+                },
+                Event::InitGit {
+                    outcome: GitOutcome::Initialized
+                }
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
+    fn a_vipc_with_no_packages_adds_none_and_says_so() {
+        let (scratch, root) = folder("init-from-empty", "App");
+        vipc_in(&root, "p.vipc", "13.0", &[]);
+        let sink = Recorded::default();
+
+        let done = run(&env_on(&sink, &root), Some(Path::new("p.vipc")), &git_ok).unwrap();
+
+        assert!(
+            std::fs::read_to_string(done.manifest)
+                .unwrap()
+                .ends_with("[dependencies]\n")
+        );
+        assert!(sink.events().contains(&Event::InitDependenciesAdded {
+            from: "p.vipc".into(),
+            added: Vec::new(),
+            skipped: 0
+        }));
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
+    fn from_is_taken_from_the_working_directory_not_from_project() {
+        let (scratch, work) = folder("init-from-cwd", "Work");
+        let app = work.join("App");
+        std::fs::create_dir(&app).unwrap();
+        vipc_in(
+            &work,
+            "p.vipc",
+            "13.0",
+            &[("demo_lib-1.0.0.1", false, false)],
+        );
+        let mut env = env(&work);
+        env.flags.project = Some(PathBuf::from("App"));
+
+        let done = run(&env, Some(Path::new("p.vipc")), &git_ok).unwrap();
+
+        assert_eq!(done.manifest, app.join("lvpm.toml"));
+        assert!(
+            std::fs::read_to_string(done.manifest)
+                .unwrap()
+                .contains("demo_lib = \">=1.0.0.1\"")
+        );
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
+    fn the_labview_of_the_from_file_is_reported_and_never_chosen() {
+        // The .vipc targets 2013, which is neither installed nor named by a flag.
+        let ran = |tag, targets, flag| {
+            let (scratch, root) = folder(tag, "App");
+            vipc_in(&root, "p.vipc", "13.0", &[]);
+            let sink = Recorded::default();
+            let mut env = env_on(&sink, &root);
+            env.targets = targets;
+            env.flags.labview_version = flag;
+            let done = run(&env, Some(Path::new("p.vipc")), &git_ok).unwrap();
+            let manifest = std::fs::read_to_string(done.manifest).unwrap();
+            let _ = std::fs::remove_dir_all(&scratch);
+            (done.labview, manifest, sink.events())
+        };
+
+        let (labview, _, events) = ran("init-from-lv-installed", vec![lv(2026, 64)], None);
+        assert_eq!(labview, Some(2026));
+        assert!(matches!(
+            events[0],
+            Event::InitManifestWritten {
+                labview: Some(2026),
+                source_labview: Some(2013),
+                ..
+            }
+        ));
+
+        let (labview, manifest, events) = ran("init-from-lv-none", Vec::new(), None);
+        assert_eq!(labview, None);
+        assert!(!manifest.contains("labview"), "{manifest}");
+        assert!(events.contains(&Event::InitNoLabview));
+        assert!(matches!(
+            events[0],
+            Event::InitManifestWritten {
+                labview: None,
+                source_labview: Some(2013),
+                ..
+            }
+        ));
+
+        let (labview, _, _) = ran("init-from-lv-flag", Vec::new(), Some("2023".into()));
+        assert_eq!(labview, Some(2023));
+    }
+
+    #[test]
+    fn a_dragon_file_is_refused_by_its_name_alone_and_nothing_is_written() {
+        for typed in ["p.dragon", "P.DRAGON", "sub/Project.Dragon", ".dragon"] {
+            let (scratch, root) = folder("init-dragon", "App");
+            let sink = Recorded::default();
+
+            let why = run(&env_on(&sink, &root), Some(Path::new(typed)), &no_git).unwrap_err();
+
+            assert!(
+                matches!(&why, InitError::DragonFile { file } if file == typed),
+                "{typed}: {why:?}"
+            );
+            assert!(sink.events().is_empty(), "{typed}");
+            assert_nothing_written(&root);
+            let _ = std::fs::remove_dir_all(&scratch);
+        }
+    }
+
+    #[test]
+    fn a_bad_from_file_is_refused_naming_it_as_typed_and_nothing_is_written() {
+        let (scratch, root) = folder("init-from-bad", "App");
+        std::fs::create_dir(root.join("sub")).unwrap();
+        std::fs::write(root.join("sub").join("bad.vipc"), "hello").unwrap();
+        let typed = Path::new("sub").join("bad.vipc");
+        let missing = Path::new("sub").join("missing.vipc");
+        let sink = Recorded::default();
+
+        for (from, what) in [(&typed, "not a zip file"), (&missing, "cannot be read: ")] {
+            let why = run(&env_on(&sink, &root), Some(from), &no_git).unwrap_err();
+
+            let InitError::BadSource { why } = why else {
+                panic!("{from:?}: {why:?}")
+            };
+            assert!(
+                why.starts_with(&format!("{}: {what}", from.display())),
+                "{why}"
+            );
+        }
+        assert!(sink.events().is_empty());
+        assert_nothing_written(&root);
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
+    fn the_from_file_is_read_last_after_project_manifest_and_flag_are_checked() {
+        let (scratch, root) = folder("init-from-order", "App");
+        let from = Some(Path::new("p.dragon"));
+        std::fs::write(root.join("lvpm.toml"), "").unwrap();
+        let mut env = env(&root);
+        env.flags.labview_version = Some("abc".into());
+        env.flags.project = Some(PathBuf::from("Missing"));
+        assert!(matches!(
+            run(&env, from, &no_git).unwrap_err(),
+            InitError::ProjectMissing { .. }
+        ));
+
+        env.flags.project = None;
+        assert!(matches!(
+            run(&env, from, &no_git).unwrap_err(),
+            InitError::ManifestExists { .. }
+        ));
+
+        std::fs::remove_file(root.join("lvpm.toml")).unwrap();
+        assert!(matches!(
+            run(&env, from, &no_git).unwrap_err(),
+            InitError::BadLabview { .. }
+        ));
+
+        env.flags.labview_version = None;
+        assert!(matches!(
+            run(&env, from, &no_git).unwrap_err(),
+            InitError::DragonFile { .. }
         ));
         let _ = std::fs::remove_dir_all(&scratch);
     }

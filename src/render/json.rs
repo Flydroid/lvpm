@@ -52,7 +52,7 @@ fn to_line(value: serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lvpm_core::events::{Phase, Retarget};
+    use lvpm_core::events::{AddedDependency, Phase, Retarget, SourceKind};
     use lvpm_core::git::GitOutcome;
     use lvpm_core::ops::venv_cmd::VenvStatus;
     use lvpm_core::target::LvTarget;
@@ -141,6 +141,8 @@ mod tests {
                 labview,
                 installed: vec!["2023 (64-bit)".into(), "2022 (64-bit)".into()],
                 retarget,
+                source_labview: Some(2013),
+                source_kind: Some(SourceKind::Vipc),
             })
         };
         assert_eq!(
@@ -148,7 +150,8 @@ mod tests {
             serde_json::json!({"event": "init_manifest_written", "data":
                 {"path": "proj/lvpm.toml", "labview": 2023,
                  "installed": ["2023 (64-bit)", "2022 (64-bit)"],
-                 "retarget": {"by": "year", "value": 2022}}})
+                 "retarget": {"by": "year", "value": 2022},
+                 "source_labview": 2013, "source_kind": "vipc"}})
         );
         assert_eq!(
             written(None, Some(Retarget::Path("lv32".into())))["data"]["retarget"],
@@ -157,6 +160,23 @@ mod tests {
         let none = written(None, None);
         assert_eq!(none["data"]["labview"], serde_json::Value::Null);
         assert_eq!(none["data"]["retarget"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn the_dependencies_init_added_keep_their_field_names() {
+        assert_eq!(
+            serde_json::json!(Event::InitDependenciesAdded {
+                from: "p.vipc".into(),
+                added: vec![AddedDependency {
+                    name: "demo_lib".into(),
+                    constraint: ">=1.0.0.1".into()
+                }],
+                skipped: 2,
+            }),
+            serde_json::json!({"event": "init_dependencies_added", "data":
+                {"from": "p.vipc", "skipped": 2,
+                 "added": [{"name": "demo_lib", "constraint": ">=1.0.0.1"}]}})
+        );
     }
 
     #[test]

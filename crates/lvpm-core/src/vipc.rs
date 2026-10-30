@@ -38,11 +38,11 @@ pub struct Vipc {
     pub packages: Vec<Package>,
 }
 
-/// Read the `.vipc` at `path`. Every error starts with `path`.
-pub fn read(path: &Path) -> Result<Vipc> {
-    let file = path.display();
-    let config = read_config(path).map_err(|what| anyhow!("{file}: {what}"))?;
-    parse(&config).map_err(|what| anyhow!("{file}: config.xml: {what}"))
+/// Read the `.vipc` at `path`. Every error starts with `label`, the name the
+/// user knows the file by (`--from` as typed, which `path` may have been resolved from).
+pub fn read(path: &Path, label: &str) -> Result<Vipc> {
+    let config = read_config(path).map_err(|what| anyhow!("{label}: {what}"))?;
+    parse(&config).map_err(|what| anyhow!("{label}: config.xml: {what}"))
 }
 
 /// The text of the archive's `config.xml`; the error is what is wrong with the file.
@@ -257,7 +257,8 @@ mod tests {
     /// What reading `xml` says: the `Vipc`, or the whole error text.
     fn read_xml(tag: &str, xml: &str) -> Result<Vipc, String> {
         let dir = Dir::new(tag);
-        read(&dir.config(xml)).map_err(|e| e.to_string())
+        let path = dir.config(xml);
+        read(&path, &path.display().to_string()).map_err(|e| e.to_string())
     }
 
     #[test]
@@ -405,7 +406,9 @@ mod tests {
         ];
         for (xml, what) in cases {
             let zip = dir.config(&xml);
-            let err = read(&zip).unwrap_err().to_string();
+            let err = read(&zip, &path.display().to_string())
+                .unwrap_err()
+                .to_string();
             assert_eq!(
                 err,
                 format!("{}: config.xml: {what}", path.display()),
@@ -446,7 +449,7 @@ mod tests {
         let path = dir.0.join("p.vipc");
         let shown = path.display();
 
-        let missing = read(&path).unwrap_err().to_string();
+        let missing = read(&path, &shown.to_string()).unwrap_err().to_string();
         assert!(
             missing.starts_with(&format!("{shown}: cannot be read: ")),
             "{missing}"
@@ -454,21 +457,32 @@ mod tests {
 
         std::fs::write(&path, "hello").unwrap();
         assert_eq!(
-            read(&path).unwrap_err().to_string(),
+            read(&path, &shown.to_string()).unwrap_err().to_string(),
             format!("{shown}: not a zip file")
         );
 
         dir.vipc(&[("readme.txt", b"x")]);
         assert_eq!(
-            read(&path).unwrap_err().to_string(),
+            read(&path, &shown.to_string()).unwrap_err().to_string(),
             format!("{shown}: config.xml is missing")
         );
 
         dir.vipc(&[("config.xml", &[0xff, 0xfe])]);
         assert_eq!(
-            read(&path).unwrap_err().to_string(),
+            read(&path, &shown.to_string()).unwrap_err().to_string(),
             format!("{shown}: config.xml: not UTF-8 text")
         );
+    }
+
+    #[test]
+    fn an_error_leads_with_the_label_given_not_with_the_path_read() {
+        let dir = Dir::new("label");
+        let path = dir.0.join("p.vipc");
+        std::fs::write(&path, "hello").unwrap();
+
+        let err = read(&path, "as/typed.vipc").unwrap_err().to_string();
+
+        assert_eq!(err, "as/typed.vipc: not a zip file");
     }
 
     #[test]

@@ -92,3 +92,87 @@ Feature: lvpm init starts a project (S10a)
     Given the LabVIEW installations "lvpm targets" lists
     When I run "lvpm init" in an empty folder
     Then lvpm.toml says labview ">=" the newest listed year
+
+  Scenario Outline: each .vipc package flag decides what init writes
+    Given a VIPM configuration "p.vipc" for LabVIEW "13.0" with the package "demo_lib-1.5.0.15" marked dependency <dependency> and pinned <pinned>
+    When I run "lvpm init --from p.vipc --labview-version 2023" in its folder
+    Then it succeeds
+    And lvpm.toml [dependencies] <outcome>
+
+    Examples:
+      | dependency | pinned | outcome                     |
+      | false      | true   | has demo_lib = "1.5.0.15"   |
+      | false      | false  | has demo_lib = ">=1.5.0.15" |
+      | true       | false  | is empty                    |
+      | true       | true   | is empty                    |
+
+  Scenario: init reports what it added and skipped
+    Given a VIPM configuration "p.vipc" with 2 chosen packages and 1 marked as a dependency
+    When I run "lvpm init --from p.vipc --labview-version 2023" in its folder
+    Then the output has the line "added 2 dependencies from p.vipc"
+    And the output has a line "  <name> <constraint>" for each chosen package
+    And the output has the line "  skipped 1 package VIPM marked as a dependency of another"
+
+  Scenario: one package added, none skipped
+    Given a VIPM configuration "p.vipc" with 1 chosen package and none marked as a dependency
+    When I run "lvpm init --from p.vipc --labview-version 2023" in its folder
+    Then the output has the line "added 1 dependency from p.vipc"
+    And the output does not say "skipped"
+
+  Scenario: a .vipc with no packages
+    Given a VIPM configuration "p.vipc" with no packages
+    When I run "lvpm init --from p.vipc --labview-version 2023" in its folder
+    Then it succeeds
+    And lvpm.toml [dependencies] is empty
+    And the output has the line "added 0 dependencies from p.vipc"
+
+  Scenario: the .vipc's LabVIEW is reported, not used
+    Given a VIPM configuration "p.vipc" for LabVIEW "13.0"
+    When I run "lvpm init --from p.vipc --labview-version 2023" in its folder
+    Then lvpm.toml says labview ">=2023"
+    And the output has the line "  the .vipc targets LabVIEW 2013; lvpm.toml says >=2023"
+
+  Scenario: no report when the .vipc targets the chosen LabVIEW
+    Given a VIPM configuration "p.vipc" for LabVIEW "23.0"
+    When I run "lvpm init --from p.vipc --labview-version 2023" in its folder
+    Then the output does not say "the .vipc targets"
+
+  Scenario: --from is relative to the working directory, not --project
+    Given a VIPM configuration "p.vipc" in the working directory and an empty folder "App"
+    When I run "lvpm init --project App --from p.vipc --labview-version 2023" in the working directory
+    Then it succeeds and "App" has an lvpm.toml with the .vipc's packages
+
+  # The pilot feed holds only serializer 1.2.1.16, so ">=1.2.1.16" resolves to it.
+  Scenario: lock resolves what init added
+    Given a folder feed with the pilot packages
+    And a VIPM configuration "Serializer.vipc" choosing labview_open_source_lib_serializer 1.2.1.16, not pinned
+    When I run "lvpm init --from Serializer.vipc --labview-version 2023" in its folder
+    And I run "lvpm lock" in the same folder
+    Then the folder's lvpm.lock holds the serializer 1.2.1.16 and its two dependencies
+
+  Scenario Outline: a bad --from file writes nothing
+    Given <file>
+    When I run "lvpm init --from p.vipc --labview-version 2023" in its folder
+    Then it fails with "<text>"
+    And the output says "nothing was written"
+    And the folder has no lvpm.toml, no .git and no .lv-venv
+
+    Examples:
+      | file                                            | text                            |
+      | no file "p.vipc"                                | p.vipc: cannot be read          |
+      | a file "p.vipc" holding "hello"                 | p.vipc: not a zip file          |
+      | a zip "p.vipc" with only "readme.txt"           | p.vipc: config.xml is missing   |
+      | a zip "p.vipc" whose config.xml has no <Target> | p.vipc: config.xml: no <Target> |
+
+  Scenario Outline: a .dragon file is refused
+    Given <file>
+    When I run "lvpm init --from <name>" in its folder
+    Then it fails with ".dragon files are not supported and not planned"
+    And the output says "export a .vipc from VIPM instead"
+    And the folder has no lvpm.toml, no .git and no .lv-venv
+
+    Examples:
+      | file               | name     |
+      | a file "p.dragon"  | p.dragon |
+      | a file "P.DRAGON"  | P.DRAGON |
+      | no file "p.dragon" | p.dragon |

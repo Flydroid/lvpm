@@ -202,6 +202,15 @@ pub enum InitError {
     /// `--labview-version` is not a LabVIEW year.
     #[error("--labview-version {value} is not a LabVIEW year (expected e.g. 2025)")]
     BadLabview { value: String },
+    /// `--from` names a `.dragon` file; the file is not opened. `file` is as typed.
+    #[error(
+        "{file}: .dragon files are not supported and not planned (VIPM discontinued the format); \
+         export a .vipc from VIPM instead"
+    )]
+    DragonFile { file: String },
+    /// The `--from` file cannot be read; `why` leads with the file as typed.
+    #[error("{why}")]
+    BadSource { why: String },
     /// Anything else that went wrong: its own text.
     #[error(transparent)]
     Other(#[from] anyhow::Error),

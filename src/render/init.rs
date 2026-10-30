@@ -3,7 +3,7 @@
 
 use super::{Renderer, Stream};
 use lvpm_core::errors::InitError;
-use lvpm_core::events::{Event, Retarget};
+use lvpm_core::events::{Event, Retarget, SourceKind};
 use lvpm_core::git::GitOutcome;
 use lvpm_core::ops::init::Initialized;
 
@@ -14,6 +14,8 @@ pub(super) fn render(r: &mut Renderer, event: &Event) {
             labview,
             installed,
             retarget,
+            source_labview,
+            source_kind,
         } => {
             r.line(Stream::Out, &format!("wrote {}", path.display()));
             if let Some(year) = labview {
@@ -38,12 +40,54 @@ pub(super) fn render(r: &mut Renderer, event: &Event) {
                     &format!("    lvpm venv create --labview-version {chosen}"),
                 );
             }
+            if let (Some(kind), Some(source)) = (source_kind, source_labview)
+                && *labview != Some(*source)
+            {
+                let file = match kind {
+                    SourceKind::Vipc => ".vipc",
+                };
+                let says = labview
+                    .map(|year| format!("; lvpm.toml says >={year}"))
+                    .unwrap_or_default();
+                r.line(
+                    Stream::Out,
+                    &format!("  the {file} targets LabVIEW {source}{says}"),
+                );
+            }
         }
         Event::InitNoLabview => r.line(
             Stream::Err,
             "warning: no LabVIEW found; lvpm.toml has no `labview`. \
              Add labview = \">=YYYY\" before `lvpm lock`",
         ),
+        Event::InitDependenciesAdded {
+            from,
+            added,
+            skipped,
+        } => {
+            let noun = if added.len() == 1 {
+                "dependency"
+            } else {
+                "dependencies"
+            };
+            r.line(
+                Stream::Out,
+                &format!("added {} {noun} from {from}", added.len()),
+            );
+            for dependency in added {
+                r.line(
+                    Stream::Out,
+                    &format!("  {} {}", dependency.name, dependency.constraint),
+                );
+            }
+            if *skipped > 0 {
+                let noun = if *skipped == 1 { "package" } else { "packages" };
+                r.line(
+                    Stream::Out,
+                    &format!("  skipped {skipped} {noun} VIPM marked as a dependency of another"),
+                );
+            }
+        }
         Event::InitGit { outcome } => git(r, outcome),
         _ => unreachable!("routed here by Renderer::render: {event:?}"),
     }
@@ -100,9 +144,10 @@ pub fn initialized(done: &Initialized) -> String {
 /// written when that is so.
 pub fn error(error: &InitError) -> String {
     match error {
-        InitError::ProjectMissing { .. } | InitError::BadLabview { .. } => {
-            format!("{error}; nothing was written")
-        }
+        InitError::ProjectMissing { .. }
+        | InitError::BadLabview { .. }
+        | InitError::BadSource { .. } => format!("{error}; nothing was written"),
+        InitError::DragonFile { .. } => error.to_string(),
         InitError::ManifestExists { .. } => format!(
             "{error}; lvpm init does not overwrite it\n  \
              this folder is already an lvpm project: lvpm add puts packages in it, \
@@ -116,6 +161,7 @@ pub fn error(error: &InitError) -> String {
 mod tests {
     use super::super::tests::renderer;
     use super::*;
+    use lvpm_core::events::AddedDependency;
     use lvpm_core::ops::init::VenvSkip;
     use lvpm_core::target::LvTarget;
     use lvpm_core::venv::Venv;
@@ -132,8 +178,98 @@ mod tests {
             labview,
             installed: installed.iter().map(|label| label.to_string()).collect(),
             retarget,
+            source_labview: None,
+            source_kind: None,
         };
         (event, path)
+    }
+
+    /// `labview` as written, and a `.vipc` that targets `source`.
+    fn written_from_vipc(labview: Option<u32>, source: u32) -> Event {
+        Event::InitManifestWritten {
+            path: PathBuf::from("proj").join("lvpm.toml"),
+            labview,
+            installed: Vec::new(),
+            retarget: None,
+            source_labview: Some(source),
+            source_kind: Some(SourceKind::Vipc),
+        }
+    }
+
+    fn added(deps: &[(&str, &str)], skipped: usize) -> Event {
+        Event::InitDependenciesAdded {
+            from: "p.vipc".into(),
+            added: deps
+                .iter()
+                .map(|(name, constraint)| AddedDependency {
+                    name: name.to_string(),
+                    constraint: constraint.to_string(),
+                })
+                .collect(),
+            skipped,
+        }
+    }
+
+    #[test]
+    fn a_vipc_for_another_labview_is_reported_with_what_lvpm_toml_says() {
+        let (mut renderer, out, err) = renderer();
+        renderer.render(&written_from_vipc(Some(2023), 2013));
+        assert_eq!(
+            out.text(),
+            format!(
+                "wrote {}\n  labview = \">=2023\"\n  \
+                 the .vipc targets LabVIEW 2013; lvpm.toml says >=2023\n",
+                PathBuf::from("proj").join("lvpm.toml").display()
+            )
+        );
+        assert_eq!(err.text(), "");
+    }
+
+    #[test]
+    fn a_vipc_for_the_chosen_labview_is_not_reported() {
+        let (mut renderer, out, _) = renderer();
+        renderer.render(&written_from_vipc(Some(2023), 2023));
+        assert!(!out.text().contains("targets"), "{}", out.text());
+    }
+
+    #[test]
+    fn a_vipc_with_no_labview_chosen_is_reported_with_no_lvpm_toml_part() {
+        let (mut renderer, out, _) = renderer();
+        renderer.render(&written_from_vipc(None, 2013));
+        assert_eq!(
+            out.text().lines().last(),
+            Some("  the .vipc targets LabVIEW 2013")
+        );
+    }
+
+    #[test]
+    fn the_added_dependencies_are_counted_listed_and_the_skipped_ones_counted() {
+        let (mut renderer, out, err) = renderer();
+        renderer.render(&added(&[("a_lib", "1.0.0.1"), ("b_lib", ">=2.0.0.2")], 3));
+        assert_eq!(
+            out.text(),
+            "added 2 dependencies from p.vipc\n  a_lib 1.0.0.1\n  b_lib >=2.0.0.2\n  \
+             skipped 3 packages VIPM marked as a dependency of another\n"
+        );
+        assert_eq!(err.text(), "");
+    }
+
+    #[test]
+    fn one_dependency_and_one_skip_are_singular() {
+        let (mut renderer, out, _) = renderer();
+        renderer.render(&added(&[("a_lib", "1.0.0.1")], 1));
+        assert_eq!(
+            out.text(),
+            "added 1 dependency from p.vipc\n  a_lib 1.0.0.1\n  \
+             skipped 1 package VIPM marked as a dependency of another\n"
+        );
+    }
+
+    #[test]
+    fn no_dependencies_is_plural_and_says_nothing_about_skips_when_none_were() {
+        let (mut renderer, out, _) = renderer();
+        renderer.render(&added(&[], 0));
+        assert_eq!(out.text(), "added 0 dependencies from p.vipc\n");
     }
 
     #[test]
@@ -345,6 +481,23 @@ mod tests {
                 value: "26.3".into()
             }),
             "--labview-version 26.3 is not a LabVIEW year (expected e.g. 2025); nothing was written"
+        );
+    }
+
+    #[test]
+    fn a_bad_from_file_says_nothing_was_written_and_a_dragon_file_is_not_supported() {
+        assert_eq!(
+            error(&InitError::BadSource {
+                why: "p.vipc: not a zip file".into()
+            }),
+            "p.vipc: not a zip file; nothing was written"
+        );
+        assert_eq!(
+            error(&InitError::DragonFile {
+                file: "p.dragon".into()
+            }),
+            "p.dragon: .dragon files are not supported and not planned \
+             (VIPM discontinued the format); export a .vipc from VIPM instead"
         );
     }
 

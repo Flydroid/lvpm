@@ -396,22 +396,47 @@ pub enum Event {
     /// `init` wrote the project's manifest. `labview` is the year its `labview`
     /// states, if it has one. `installed` labels every LabVIEW installation,
     /// newest first (`2026 (64-bit)`), and `retarget` is how to choose another
-    /// one: `None` when at most one installation was found.
+    /// one: `None` when at most one installation was found. `source_kind` is the
+    /// kind of file `--from` read, and `source_labview` the year of the LabVIEW
+    /// it targets: reported, never what `labview` says.
     InitManifestWritten {
         path: PathBuf,
         labview: Option<u32>,
         installed: Vec<String>,
         retarget: Option<Retarget>,
+        source_labview: Option<u32>,
+        source_kind: Option<SourceKind>,
     },
     /// No LabVIEW is installed and `--labview-version` was not given, so the
     /// manifest has no `labview`.
     InitNoLabview,
+    /// `init` put the packages `from` (as typed) names in `[dependencies]`, and
+    /// left out `skipped` that VIPM only lists for another package's sake.
+    InitDependenciesAdded {
+        from: String,
+        added: Vec<AddedDependency>,
+        skipped: usize,
+    },
     /// What `init` did about a git repository.
     InitGit { outcome: GitOutcome },
 
     // ---- ops::query ----
     /// A package's archive is not cached and is about to be downloaded.
     ArchiveFetching { name: String, version: String },
+}
+
+/// What kind of file `init --from` read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceKind {
+    Vipc,
+}
+
+/// A dependency `init` wrote, with its constraint as the manifest writes it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct AddedDependency {
+    pub name: String,
+    pub constraint: String,
 }
 
 /// What `--labview-version` takes to name another installation than the one
