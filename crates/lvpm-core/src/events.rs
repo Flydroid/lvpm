@@ -395,7 +395,7 @@ pub enum Event {
     /// `init` wrote the project's manifest. `labview` is the year its `labview`
     /// states, if it has one. `installed` labels every LabVIEW installation,
     /// newest first (`2026 (64-bit)`), and `retarget` is how to choose another
-    /// one: `None` when there is no other installation, or none was chosen.
+    /// one: `None` when at most one installation was found.
     InitManifestWritten {
         path: PathBuf,
         labview: Option<u32>,

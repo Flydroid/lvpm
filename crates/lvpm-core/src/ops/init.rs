@@ -80,7 +80,7 @@ pub fn run(env: &OpEnv) -> Result<Initialized, InitError> {
         Some(dir) => paths::resolve(&env.cwd, dir),
         None => paths::clean(&env.cwd),
     };
-    if !root.exists() {
+    if !root.is_dir() {
         return Err(InitError::ProjectMissing { dir: root });
     }
     let manifest = root.join(project::FILE_NAME);
@@ -410,6 +410,35 @@ mod tests {
     }
 
     #[test]
+    fn a_project_that_is_a_file_is_refused_like_a_missing_folder() {
+        let (scratch, root) = folder("init-file", "Taken");
+        std::fs::write(root.join("afile"), "x").unwrap();
+        let mut env = env(&root);
+        env.flags.project = Some(PathBuf::from("afile"));
+
+        let why = run(&env).unwrap_err();
+
+        assert!(matches!(why, InitError::ProjectMissing { .. }), "{why:?}");
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
+    fn a_write_that_fails_for_another_reason_says_what_it_was_writing() {
+        let scratch = scratch_dir("init-write-fails");
+        let path = scratch.join("no-such-dir").join("lvpm.toml");
+
+        let why = write_new(&path, "x").unwrap_err();
+
+        assert!(matches!(&why, InitError::Other(_)), "{why:?}");
+        let InitError::Other(cause) = why else { return };
+        assert!(
+            format!("{cause:#}").starts_with(&format!("writing {}", path.display())),
+            "{cause:#}"
+        );
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
     fn an_existing_manifest_is_refused_untouched_with_nothing_said() {
         let (scratch, root) = folder("init-exists", "Taken");
         std::fs::write(root.join("lvpm.toml"), "# mine\n").unwrap();
@@ -478,7 +507,7 @@ mod tests {
     }
 
     #[test]
-    fn the_checks_run_in_order_the_folder_then_the_manifest_then_the_flag() {
+    fn a_manifest_or_a_missing_folder_is_reported_before_a_bad_flag() {
         let (scratch, root) = folder("init-order", "Taken");
         std::fs::write(root.join("lvpm.toml"), "").unwrap();
         let mut env = env(&root);

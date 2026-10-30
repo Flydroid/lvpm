@@ -41,7 +41,8 @@ struct Cli {
     #[arg(long, global = true, conflicts_with = "project")]
     global: bool,
 
-    /// The project whose venv to use, instead of looking upwards from the
+    /// The project to act on: its venv for venv commands, or the folder `init`
+    /// writes a project into. Without it, commands look upwards from the
     /// current directory.
     #[arg(long, global = true, value_name = "DIR", conflicts_with = "prefix")]
     project: Option<PathBuf>,

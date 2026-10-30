@@ -292,6 +292,7 @@ beta = \">=1.0\"
     #[test]
     fn a_file_is_created_once_and_a_second_create_leaves_it_as_it_is() {
         let dir = std::env::temp_dir().join(format!("lvpm-create-file-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("lvpm.toml");
 
