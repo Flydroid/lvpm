@@ -46,9 +46,10 @@ ni-daqmx-labview-support = "26.0"
 ```
 
 Every table is optional. A file containing only `[project]` is a valid
-manifest with no dependencies. When no manifest exists, `lvpm venv create`
-writes a skeleton: `name` from the directory, `labview` set to the year the
-venv was bound to, and an empty `[dependencies]`.
+manifest with no dependencies. `lvpm init` writes the first one:
+`name` from the directory, `version` `0.1.0`, `labview` and an empty
+`[dependencies]` ([usage.md](usage.md#starting-a-project)). `lvpm venv create`
+writes the same skeleton, without `version`, only when it finds no manifest.
 
 ## Finding the manifest
 
@@ -268,6 +269,13 @@ installs them with `lvpm install --manifest vipm.toml`.
 
 `venv create --manifest` writes no `lvpm.toml` skeleton: a skeleton is
 written only when `venv create` has no manifest to read.
+
+To move a `vipm.toml` project over instead, `lvpm init --from vipm.toml`
+writes an `lvpm.toml` from it ([usage.md](usage.md#from-a-vipmtoml)) and leaves
+the `vipm.toml` as it is: `name`, `version`, `[dependencies]` and
+`[dev-dependencies]` are kept (exact versions stay exact), `[nipm.dependencies]`
+is copied as written, `labview-version` is reported and not used for `labview`,
+and the rest is named as not used, as above.
 
 | `vipm.toml` content                                  | lvpm                                                                                             |
 | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------ |

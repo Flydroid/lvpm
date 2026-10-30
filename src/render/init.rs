@@ -45,6 +45,7 @@ pub(super) fn render(r: &mut Renderer, event: &Event) {
             {
                 let file = match kind {
                     SourceKind::Vipc => ".vipc",
+                    SourceKind::VipmToml => "vipm.toml",
                 };
                 let says = labview
                     .map(|year| format!("; lvpm.toml says >={year}"))
@@ -207,16 +208,20 @@ mod tests {
         (event, path)
     }
 
-    /// `labview` as written, and a `.vipc` that targets `source`.
-    fn written_from_vipc(labview: Option<u32>, source: u32) -> Event {
+    /// `labview` as written, and a file of `kind` that targets `source`.
+    fn written_from(kind: SourceKind, labview: Option<u32>, source: u32) -> Event {
         Event::InitManifestWritten {
             path: PathBuf::from("proj").join("lvpm.toml"),
             labview,
             installed: Vec::new(),
             retarget: None,
             source_labview: Some(source),
-            source_kind: Some(SourceKind::Vipc),
+            source_kind: Some(kind),
         }
+    }
+
+    fn written_from_vipc(labview: Option<u32>, source: u32) -> Event {
+        written_from(SourceKind::Vipc, labview, source)
     }
 
     fn added(deps: &[(&str, &str)], skipped: usize) -> Event {
@@ -246,6 +251,16 @@ mod tests {
             )
         );
         assert_eq!(err.text(), "");
+    }
+
+    #[test]
+    fn a_vipm_toml_for_another_labview_is_reported_as_the_vipm_toml() {
+        let (mut renderer, out, _) = renderer();
+        renderer.render(&written_from(SourceKind::VipmToml, Some(2023), 2021));
+        assert_eq!(
+            out.text().lines().last(),
+            Some("  the vipm.toml targets LabVIEW 2021; lvpm.toml says >=2023")
+        );
     }
 
     #[test]

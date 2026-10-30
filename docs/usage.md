@@ -6,6 +6,7 @@
 | ---------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
 | `lvpm init`                                          | Start a project here: write an `lvpm.toml`, make a git repository and a venv ([Starting a project](#starting-a-project)); an existing `lvpm.toml` is never replaced |
 | `lvpm init --from <file.vipc>`                       | The same, with the packages VIPM chose in a `.vipc` as dependencies ([From a .vipc](#from-a-vipc))                                           |
+| `lvpm init --from vipm.toml`                         | The same, with the project and packages of a VIPM 2026 `vipm.toml` ([From a vipm.toml](#from-a-vipmtoml))                                    |
 | `lvpm install <name>[@<version>]`                    | Outside a project, or with `--global`, `--prefix` or `--labview-version`: resolve the package and its dependencies, download, verify MD5, unpack, relink, run hooks. In a project it is `lvpm add` |
 | `lvpm install`                                       | Inside a project: the same as `lvpm sync`                                                                                                    |
 | `lvpm sync`                                          | Make the destination hold exactly what `lvpm.lock` lists, one plan with one relink pass ([The lock file](#the-lock-file))                    |
@@ -109,6 +110,37 @@ reported (`the .vipc targets LabVIEW 2013; lvpm.toml says >=2026`); `labview`
 comes from `--labview-version` or the installed LabVIEW, as above. Run
 `lvpm sync` next. A `.vipc` that cannot be read fails and writes nothing. A
 `.dragon` file is refused: it is not supported and not planned.
+
+### From a vipm.toml
+
+`lvpm init --from vipm.toml` starts from VIPM 2026's project file (any file named
+`vipm.toml`, read from the working directory like a `.vipc`). It is read, never
+changed.
+
+```console
+$ lvpm init --from vipm.toml
+wrote C:\Git\daq-tool\lvpm.toml
+  labview = ">=2026"
+  the vipm.toml targets LabVIEW 2021; lvpm.toml says >=2026
+added 1 dependency from vipm.toml
+  labview_open_source_lib_serializer 1.2.1.16
+manifest: vipm.toml (VIPM format, converted)
+  not used: tool
+  [dev-dependencies] read as lvpm's [dev-dependencies]
+initialized a git repository
+  ...
+```
+
+- `[project]` `name` and `version` are kept (the folder's name and `0.1.0` when
+  the file has none). `labview-version` is only reported, as a `.vipc`'s LabVIEW
+  is: `labview` comes from `--labview-version` or the installed LabVIEW.
+- `[dependencies]` and `[dev-dependencies]` keep their exact versions.
+  `[nipm.dependencies]` is copied as written; lvpm reports those packages and does
+  not install them.
+- What lvpm has no use for is listed on the `not used:` line, as for
+  `venv create --manifest` ([the table](manifest.md#compatibility-with-vipmtoml)).
+  A `vipm.toml` that cannot be converted (a floor such as `">=1.0"` where VIPM
+  takes only exact versions, or text that is not TOML) fails and writes nothing.
 
 ## The project manifest
 

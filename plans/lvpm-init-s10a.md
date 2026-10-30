@@ -1031,7 +1031,7 @@ neither is a cross-cutting change.
 
 #### Wave 5
 - [ ] Slice 4: `init --from vipm.toml`
-  - [ ] Step 4.1: the `vipm.toml` arm
+  - [x] Step 4.1: the `vipm.toml` arm
 
 ## Plan Review Summary
 

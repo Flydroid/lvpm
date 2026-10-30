@@ -8,14 +8,17 @@ use crate::errors::InitError;
 use crate::events::{AddedDependency, Event, Retarget, SourceKind};
 use crate::git::{self, Runner};
 use crate::manifest_edit::DependencyTable;
+use crate::project::Constraint;
 use crate::target::LvTarget;
 use crate::venv::{self, Venv};
-use crate::{index, manifest_edit, paths, project, vipc};
+use crate::vipm_interop::Converted;
+use crate::{index, manifest_edit, paths, project, vipc, vipm_interop};
 use anyhow::anyhow;
 use serde::Serialize;
 use std::cmp::Reverse;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use toml_edit::{DocumentMut, Item, Table};
 
 /// The version a new project starts at.
 const FIRST_VERSION: &str = "0.1.0";
@@ -50,7 +53,11 @@ pub struct Seed {
     pub dev_deps: Vec<(String, String)>,
     /// How many packages the source marks as another's dependency and so left out.
     pub skipped: usize,
-    pub nipm: Option<toml_edit::Table>,
+    /// `[nipm.dependencies]` as the source wrote it, carried over unread.
+    pub nipm: Option<Table>,
+    /// The fields of the source that `lvpm.toml` has no use for, when its reader
+    /// reports them.
+    pub unused: Option<Vec<String>>,
     /// Packages the source file carries, to be imported into the cache.
     pub embedded: Vec<Embedded>,
     /// Packages the source file says it carries and does not: `(name, version)`.
@@ -176,6 +183,15 @@ pub fn run(env: &OpEnv, from: Option<&Path>, runner: Runner) -> Result<Initializ
                 .collect(),
             skipped: seed.skipped,
         });
+        if let Some(unused) = seed.unused {
+            // Init carries the dev-dependencies, so the converter's line about them holds.
+            env.sink.emit(Event::VipmManifestConverted {
+                path: PathBuf::from(&from),
+                unused,
+                labview: None,
+                dev_dependencies: seed.dev_deps.len(),
+            });
+        }
         import_embedded(env, &from, seed.embedded, seed.not_embedded);
     }
     env.sink.emit(Event::InitGit {
@@ -200,13 +216,73 @@ fn read_source(cwd: &Path, from: &Path) -> Result<(Seed, SourceKind), InitError>
         .unwrap_or_default()
         .to_string_lossy()
         .to_lowercase();
+    let path = paths::resolve(cwd, from);
     match name.as_str() {
         n if n.ends_with(".dragon") => Err(InitError::DragonFile { file }),
-        _ => read_vipc(&paths::resolve(cwd, from), &file)
+        _ if vipm_interop::is_toml(from) => read_vipm_toml(&path, &file)
+            .map(|seed| (seed, SourceKind::VipmToml))
+            .map_err(bad_source),
+        _ => read_vipc(&path, &file)
             .map(|seed| (seed, SourceKind::Vipc))
-            .map_err(|why| InitError::BadSource {
-                why: format!("{why:#}"),
-            }),
+            .map_err(bad_source),
+    }
+}
+
+fn bad_source(why: anyhow::Error) -> InitError {
+    InitError::BadSource {
+        why: format!("{why:#}"),
+    }
+}
+
+/// The `vipm.toml` at `path`. The text is read once: the converter takes the
+/// project and its packages from it, and `[nipm.dependencies]`, which the
+/// converter only names, is lifted from it as it was written.
+fn read_vipm_toml(path: &Path, file: &str) -> anyhow::Result<Seed> {
+    let text =
+        std::fs::read_to_string(path).map_err(|why| anyhow!("{file}: cannot be read: {why}"))?;
+    // The TOML parser's own messages end in a newline.
+    let refused = |why: String| anyhow!("{file}: {}", why.trim_end());
+    let Converted { project, unused } =
+        vipm_interop::parse_toml(&text).map_err(|why| refused(format!("{why:#}")))?;
+    let source_labview = project
+        .labview
+        .as_deref()
+        .map(|value| {
+            project::labview_year(value).map_err(|_| {
+                anyhow!("{file}: [project] labview-version {value:?} is not a LabVIEW year")
+            })
+        })
+        .transpose()?;
+    let doc: DocumentMut = text
+        .parse()
+        .map_err(|why: toml_edit::TomlError| refused(why.to_string()))?;
+    let exact = |entries: Vec<(String, Constraint)>| -> Vec<(String, String)> {
+        entries
+            .into_iter()
+            .map(|(name, constraint)| (name, constraint_text(constraint)))
+            .collect()
+    };
+    Ok(Seed {
+        name: project.name,
+        version: project.version,
+        source_labview,
+        deps: exact(project.dependencies),
+        dev_deps: exact(project.dev_dependencies),
+        nipm: doc
+            .get("nipm")
+            .and_then(|nipm| nipm.get("dependencies"))
+            .and_then(|table| table.clone().into_table().ok()),
+        unused: Some(unused),
+        ..Seed::default()
+    })
+}
+
+/// A constraint as `lvpm.toml` writes it.
+fn constraint_text(constraint: Constraint) -> String {
+    match constraint {
+        Constraint::Exact(version) => version.raw,
+        Constraint::AtLeast(version) => format!(">={}", version.raw),
+        Constraint::Any => "*".to_string(),
     }
 }
 
@@ -259,14 +335,38 @@ fn import_embedded(
     }
 }
 
-/// The text of the new `lvpm.toml`: the skeleton, then each of the seed's dependencies.
+/// The text of the new `lvpm.toml`: the skeleton (named and versioned as the seed
+/// says, else after the folder at the first version), then each of the seed's
+/// dependencies and its `[nipm.dependencies]`.
 fn manifest_text(root: &Path, year: Option<u32>, seed: &Seed) -> Result<String, InitError> {
-    let mut text =
-        manifest_edit::skeleton(&manifest_edit::folder_name(root), Some(FIRST_VERSION), year);
-    for (name, constraint) in &seed.deps {
-        text = manifest_edit::set(&text, DependencyTable::Dependencies, name, constraint)?;
+    let name = seed
+        .name
+        .clone()
+        .unwrap_or_else(|| manifest_edit::folder_name(root));
+    let version = seed.version.as_deref().unwrap_or(FIRST_VERSION);
+    let mut text = manifest_edit::skeleton(&name, Some(version), year);
+    for (table, entries) in [
+        (DependencyTable::Dependencies, &seed.deps),
+        (DependencyTable::DevDependencies, &seed.dev_deps),
+    ] {
+        for (name, constraint) in entries {
+            text = manifest_edit::set(&text, table, name, constraint)?;
+        }
     }
-    Ok(text)
+    match &seed.nipm {
+        Some(nipm) => with_nipm_dependencies(&text, nipm),
+        None => Ok(text),
+    }
+}
+
+/// `text` with `[nipm.dependencies]` as `dependencies` has it, at the end.
+fn with_nipm_dependencies(text: &str, dependencies: &Table) -> Result<String, InitError> {
+    let mut doc: DocumentMut = text.parse().map_err(anyhow::Error::from)?;
+    let mut nipm = Table::new();
+    nipm.set_implicit(true);
+    nipm.insert("dependencies", Item::Table(dependencies.clone()));
+    doc.insert("nipm", Item::Table(nipm));
+    Ok(doc.to_string())
 }
 
 /// The venv for the LabVIEW `year` names, bound to the installation at `path`
@@ -1316,6 +1416,174 @@ mod tests {
         }
         assert!(sink.events().is_empty());
         assert_nothing_written(&root);
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// A `vipm.toml` with every table the converter knows, one it does not use.
+    const VIPM_TOML: &str = r#"[project]
+name = "daq-tool"
+version = "0.1.0"
+labview-version = "2021"
+
+[dependencies]
+labview_open_source_lib_serializer = "1.2.1.16"
+
+[dev-dependencies]
+jki_vi_tester = "3.0.0.1"
+
+[nipm.dependencies]
+ni-daqmx-labview-support = "26.0"
+
+[tool.vipm]
+build = "x"
+"#;
+
+    /// `vipm.toml` holding `text` in a folder `name`, and `init --from` it run there.
+    fn init_from_vipm_toml(
+        tag: &str,
+        name: &str,
+        text: &str,
+    ) -> (Result<Initialized, InitError>, Vec<Event>, PathBuf) {
+        let (scratch, root) = folder(tag, name);
+        std::fs::write(root.join("vipm.toml"), text).unwrap();
+        let sink = Recorded::default();
+        let mut env = env_on(&sink, &root);
+        env.flags.labview_version = Some("2023".into());
+        let done = run(&env, Some(Path::new("vipm.toml")), &git_ok);
+        (done, sink.events(), scratch)
+    }
+
+    #[test]
+    fn a_vipm_toml_becomes_the_lvpm_toml_with_its_project_packages_and_nipm_table() {
+        let (done, events, scratch) = init_from_vipm_toml("init-vipm-toml", "App", VIPM_TOML);
+
+        let done = done.unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&done.manifest).unwrap(),
+            "[project]\nname = \"daq-tool\"\nversion = \"0.1.0\"\nlabview = \">=2023\"\n\n\
+             [dependencies]\nlabview_open_source_lib_serializer = \"1.2.1.16\"\n\n\
+             [dev-dependencies]\njki_vi_tester = \"3.0.0.1\"\n\n\
+             [nipm.dependencies]\nni-daqmx-labview-support = \"26.0\"\n"
+        );
+        assert_eq!(
+            events[..3],
+            [
+                Event::InitManifestWritten {
+                    path: done.manifest.clone(),
+                    labview: Some(2023),
+                    installed: vec!["2026 (64-bit)".into()],
+                    retarget: None,
+                    source_labview: Some(2021),
+                    source_kind: Some(SourceKind::VipmToml),
+                },
+                Event::InitDependenciesAdded {
+                    from: "vipm.toml".into(),
+                    added: vec![AddedDependency {
+                        name: "labview_open_source_lib_serializer".into(),
+                        constraint: "1.2.1.16".into()
+                    }],
+                    skipped: 0,
+                },
+                Event::VipmManifestConverted {
+                    path: PathBuf::from("vipm.toml"),
+                    unused: vec!["tool".into()],
+                    labview: None,
+                    dev_dependencies: 1,
+                },
+            ]
+        );
+        assert_eq!(
+            std::fs::read_to_string(done.manifest.with_file_name("vipm.toml")).unwrap(),
+            VIPM_TOML
+        );
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
+    fn a_vipm_toml_with_only_dependencies_is_named_after_the_folder_with_no_nipm_table() {
+        let (done, events, scratch) = init_from_vipm_toml(
+            "init-vipm-toml-deps",
+            "tool",
+            "[dependencies]\na_lib = \"1.0.0.1\"\n",
+        );
+
+        let manifest = std::fs::read_to_string(done.unwrap().manifest).unwrap();
+
+        assert_eq!(
+            manifest,
+            "[project]\nname = \"tool\"\nversion = \"0.1.0\"\nlabview = \">=2023\"\n\n\
+             [dependencies]\na_lib = \"1.0.0.1\"\n"
+        );
+        assert!(matches!(
+            events[0],
+            Event::InitManifestWritten {
+                source_labview: None,
+                ..
+            }
+        ));
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
+    fn the_nipm_table_is_copied_as_written_and_never_named_as_not_used() {
+        let nipm = "[nipm.dependencies]\nni-daqmx = { version = \"24.5.0\", feed = \"ni-daq\" }\n\
+                    ni-visa = '24.0'\n";
+        let (done, events, scratch) = init_from_vipm_toml(
+            "init-vipm-toml-nipm",
+            "App",
+            &format!("[nipm.feeds]\nni-daq = \"https://x\"\n\n{nipm}"),
+        );
+
+        let manifest = std::fs::read_to_string(done.unwrap().manifest).unwrap();
+
+        assert!(manifest.ends_with(&format!("\n{nipm}")), "{manifest}");
+        let unused = events.iter().find_map(|event| match event {
+            Event::VipmManifestConverted { unused, .. } => Some(unused.clone()),
+            _ => None,
+        });
+        assert_eq!(unused, Some(vec!["nipm.feeds".to_string()]));
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
+    fn a_vipm_toml_the_converter_refuses_writes_nothing_and_says_why_after_its_name() {
+        let cases = [
+            ("[project", "vipm.toml: "),
+            (
+                "[dependencies]\na = \">=1.0\"\n",
+                "vipm.toml: [dependencies] \">=1.0\": vipm.toml requires an exact version",
+            ),
+            (
+                "[project]\nlabview-version = \"latest\"\n",
+                "vipm.toml: [project] labview-version \"latest\" is not a LabVIEW year",
+            ),
+        ];
+        for (text, message) in cases {
+            let (done, events, scratch) = init_from_vipm_toml("init-vipm-toml-bad", "App", text);
+
+            let InitError::BadSource { why } = done.unwrap_err() else {
+                panic!("{text:?}: not a bad source")
+            };
+
+            assert!(why.starts_with(message), "{text:?}: {why}");
+            assert!(!why.ends_with('\n'), "{text:?}: {why:?}");
+            assert!(events.is_empty(), "{text:?}");
+            assert_nothing_written(&scratch.join("App"));
+            let _ = std::fs::remove_dir_all(&scratch);
+        }
+    }
+
+    #[test]
+    fn a_vipm_toml_that_is_not_there_is_refused_as_cannot_be_read() {
+        let (scratch, root) = folder("init-vipm-toml-missing", "App");
+
+        let why = run(&env(&root), Some(Path::new("vipm.toml")), &no_git).unwrap_err();
+
+        assert!(
+            matches!(&why, InitError::BadSource { why } if why.starts_with("vipm.toml: cannot be read: ")),
+            "{why:?}"
+        );
         let _ = std::fs::remove_dir_all(&scratch);
     }
 

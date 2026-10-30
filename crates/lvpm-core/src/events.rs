@@ -451,6 +451,7 @@ pub enum Event {
 #[serde(rename_all = "snake_case")]
 pub enum SourceKind {
     Vipc,
+    VipmToml,
 }
 
 /// A dependency `init` wrote, with its constraint as the manifest writes it.

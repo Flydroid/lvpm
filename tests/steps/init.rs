@@ -28,6 +28,10 @@ pub struct InitState {
     /// The `[dependencies]` entries a VIPM configuration's chosen packages should
     /// become: name, constraint.
     chosen: Vec<(String, String)>,
+    /// The folder a Given made for the command to run in, if it made one.
+    given_folder: Option<PathBuf>,
+    /// The `vipm.toml` a Given wrote and what it held, to compare after the run.
+    vipm_toml: Option<(PathBuf, String)>,
 }
 
 /// The newest year in the output of `lvpm targets`
@@ -580,8 +584,11 @@ async fn a_zip_with_no_target(world: &mut CliWorld, file: String) {
 
 #[when(regex = r#"^I run "([^"]+)" in its folder$"#)]
 async fn run_in_its_folder(world: &mut CliWorld, command_line: String) {
-    let work = world.sandbox.work_dir();
-    world.run_in(&command_line, work);
+    let folder = match world.init.given_folder.clone() {
+        Some(folder) => folder,
+        None => world.sandbox.work_dir(),
+    };
+    world.run_in(&command_line, folder);
 }
 
 #[when(regex = r#"^I run "([^"]+)" in the same folder$"#)]
@@ -590,16 +597,20 @@ async fn run_where_the_last_command_ran(world: &mut CliWorld, command_line: Stri
     world.run_in(&command_line, folder);
 }
 
-fn dependencies_of(dir: &Path) -> toml::Table {
-    manifest_in(dir)["dependencies"]
+fn table_of(dir: &Path, key: &str) -> toml::Table {
+    manifest_in(dir)[key]
         .as_table()
-        .expect("a [dependencies] table")
+        .unwrap_or_else(|| panic!("a [{key}] table"))
         .clone()
 }
 
-#[then(regex = r#"^lvpm\.toml \[dependencies\] has (\S+) = "([^"]+)"$"#)]
-async fn dependencies_has(world: &mut CliWorld, name: String, constraint: String) {
-    let dependencies = dependencies_of(world.init_cwd());
+fn dependencies_of(dir: &Path) -> toml::Table {
+    table_of(dir, "dependencies")
+}
+
+#[then(regex = r#"^lvpm\.toml \[(dependencies|dev-dependencies)\] has (\S+) = "([^"]+)"$"#)]
+async fn dependencies_has(world: &mut CliWorld, table: String, name: String, constraint: String) {
+    let dependencies = table_of(world.init_cwd(), &table);
     assert_eq!(
         dependencies.get(&name).and_then(|c| c.as_str()),
         Some(constraint.as_str()),
@@ -798,4 +809,121 @@ async fn cache_holds_nothing(world: &mut CliWorld) {
         .map(|entry| entry.path())
         .collect();
     assert!(files.is_empty(), "the cache holds {files:?}");
+}
+
+// ---- `init --from` a vipm.toml ----
+
+/// The `vipm.toml` of the plan's example: every table the converter reads, a
+/// `[nipm.dependencies]` init carries and a `[tool.vipm]` it does not use.
+const VIPM_TOML: &str = "[project]
+name = \"daq-tool\"
+version = \"0.1.0\"
+labview-version = \"2021\"
+
+[dependencies]
+labview_open_source_lib_serializer = \"1.2.1.16\"
+
+[dev-dependencies]
+jki_vi_tester = \"3.0.0.1\"
+
+[nipm.dependencies]
+ni-daqmx-labview-support = \"26.0\"
+
+[tool.vipm]
+build = \"x\"
+";
+
+impl CliWorld {
+    /// `text` as the `vipm.toml` of `dir`, where the command runs.
+    fn given_vipm_toml(&mut self, dir: PathBuf, text: &str) {
+        std::fs::create_dir_all(&dir).expect("create the folder");
+        let path = dir.join("vipm.toml");
+        std::fs::write(&path, text).expect("write the vipm.toml");
+        self.init.vipm_toml = Some((path, text.to_string()));
+        self.init.given_folder = Some(dir);
+    }
+}
+
+#[given("that vipm.toml in an empty folder")]
+async fn the_example_vipm_toml(world: &mut CliWorld) {
+    let work = world.sandbox.work_dir();
+    world.given_vipm_toml(work, VIPM_TOML);
+}
+
+#[given(regex = r#"^a vipm\.toml in folder "([^"]+)" with only a \[dependencies\] table$"#)]
+async fn vipm_toml_in_a_folder(world: &mut CliWorld, folder: String) {
+    let folder = world.sandbox.work_dir().join(folder);
+    world.given_vipm_toml(folder, "[dependencies]\na_lib = \"1.0.0.1\"\n");
+}
+
+#[given("a vipm.toml with only a [dependencies] table")]
+async fn vipm_toml_with_only_dependencies(world: &mut CliWorld) {
+    let work = world.sandbox.work_dir();
+    world.given_vipm_toml(work, "[dependencies]\na_lib = \"1.0.0.1\"\n");
+}
+
+#[given(regex = r#"^a vipm\.toml with only (\S+) = "([^"]+)"$"#)]
+async fn vipm_toml_with_only_a_package(world: &mut CliWorld, name: String, version: String) {
+    let work = world.sandbox.work_dir();
+    world.given_vipm_toml(work, &format!("[dependencies]\n{name} = \"{version}\"\n"));
+}
+
+#[given(regex = r#"^a vipm\.toml holding "([^"]*)"$"#)]
+async fn vipm_toml_holding(world: &mut CliWorld, text: String) {
+    let work = world.sandbox.work_dir();
+    world.given_vipm_toml(work, &text);
+}
+
+#[then(regex = r#"^lvpm\.toml has project name "([^"]+)" and version "([^"]+)"$"#)]
+async fn manifest_has_name_and_version(world: &mut CliWorld, name: String, version: String) {
+    let manifest = manifest_in(world.init_cwd());
+    assert_eq!(project_text(&manifest, "name"), name);
+    assert_eq!(project_text(&manifest, "version"), version);
+}
+
+#[then("lvpm.toml [nipm.dependencies] has the same keys and values as the vipm.toml's")]
+async fn nipm_table_is_copied(world: &mut CliWorld) {
+    let (path, _) = world.init.vipm_toml.as_ref().expect("a given vipm.toml");
+    let source: toml::Table = std::fs::read_to_string(path)
+        .expect("the vipm.toml")
+        .parse()
+        .expect("a vipm.toml that is TOML");
+    let wanted = &source["nipm"]["dependencies"];
+    assert!(
+        wanted.as_table().is_some_and(|table| !table.is_empty()),
+        "{wanted:?}"
+    );
+    assert_eq!(
+        &manifest_in(world.init_cwd())["nipm"]["dependencies"],
+        wanted
+    );
+}
+
+#[then("lvpm.toml has no [nipm.dependencies] table")]
+async fn manifest_has_no_nipm_table(world: &mut CliWorld) {
+    let manifest = manifest_in(world.init_cwd());
+    assert!(manifest.get("nipm").is_none(), "{manifest:?}");
+}
+
+#[then("the vipm.toml is byte for byte what it was")]
+async fn vipm_toml_is_unchanged(world: &mut CliWorld) {
+    let (path, text) = world.init.vipm_toml.as_ref().expect("a given vipm.toml");
+    assert_eq!(
+        std::fs::read(path).expect("the vipm.toml"),
+        text.as_bytes(),
+        "{}",
+        path.display()
+    );
+}
+
+#[then(r#"it fails with "vipm.toml: " followed by the converter's reason"#)]
+async fn fails_with_the_converters_reason(world: &mut CliWorld) {
+    let message = world.failed();
+    let reason = message
+        .split_once("vipm.toml: ")
+        .map(|(_, reason)| reason.trim_end().trim_end_matches("; nothing was written"));
+    assert!(
+        reason.is_some_and(|reason| !reason.trim().is_empty()),
+        "no reason after \"vipm.toml: \" in: {message}"
+    );
 }

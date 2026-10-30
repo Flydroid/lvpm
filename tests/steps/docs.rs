@@ -502,11 +502,12 @@ async fn usage_section_contains(_: &mut CliWorld, heading: String, quoted: Strin
     }
 }
 
-#[then(regex = r#"^docs/usage\.md does not mention "([^"]+)"$"#)]
-async fn usage_does_not_mention(_: &mut CliWorld, text: String) {
+#[then(regex = r#"^docs/(usage|manifest)\.md (?:mentions|names) "([^"]+)"$"#)]
+async fn doc_mentions(_: &mut CliWorld, doc: String, text: String) {
+    let file = format!("docs/{doc}.md");
     assert!(
-        !repo_file("docs/usage.md").contains(&text),
-        "docs/usage.md mentions {text}"
+        repo_file(&file).contains(&text),
+        "{file} does not mention {text}"
     );
 }
 

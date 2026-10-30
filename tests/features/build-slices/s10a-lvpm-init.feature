@@ -228,6 +228,78 @@ Feature: lvpm init starts a project (S10a)
   Scenario: init is documented
     Then docs/usage.md lists "lvpm init" and "lvpm init --from" in its command table
     And docs/usage.md has a "## Starting a project" section containing "Dependency", "Pinned", "Included" and "lvpm venv remove"
-    And docs/usage.md does not mention "init --from vipm.toml"
+    And docs/usage.md mentions "init --from vipm.toml"
     And docs/cli.md does not list init as missing
     And docs/vision/vipm-cli-comparison.md says .dragon is not planned
+
+  Scenario: init from vipm.toml copies the project and its packages
+    Given that vipm.toml in an empty folder
+    When I run "lvpm init --from vipm.toml --labview-version 2023" in its folder
+    Then it succeeds
+    And lvpm.toml has project name "daq-tool" and version "0.1.0"
+    And lvpm.toml [dependencies] has labview_open_source_lib_serializer = "1.2.1.16"
+    And lvpm.toml [dev-dependencies] has jki_vi_tester = "3.0.0.1"
+
+  # The converter names what it did not use in one line. [nipm.dependencies] is
+  # not in it, because init carries that table.
+  Scenario: init from vipm.toml carries the nipm table and names what it did not use
+    Given that vipm.toml in an empty folder
+    When I run "lvpm init --from vipm.toml --labview-version 2023" in its folder
+    Then lvpm.toml [nipm.dependencies] has the same keys and values as the vipm.toml's
+    And the output has the line "  not used: tool"
+    And the output does not say "nipm.dependencies"
+
+  Scenario: init from vipm.toml reports its LabVIEW
+    Given that vipm.toml in an empty folder
+    When I run "lvpm init --from vipm.toml --labview-version 2023" in its folder
+    Then lvpm.toml says labview ">=2023"
+    And the output has the line "  the vipm.toml targets LabVIEW 2021; lvpm.toml says >=2023"
+
+  Scenario: a vipm.toml with only dependencies
+    Given a vipm.toml in folder "tool" with only a [dependencies] table
+    When I run "lvpm init --from vipm.toml --labview-version 2023" in its folder
+    Then lvpm.toml has project name "tool" and version "0.1.0"
+    And lvpm.toml has no [nipm.dependencies] table
+
+  Scenario: the vipm.toml is unchanged
+    Given that vipm.toml in an empty folder
+    When I run "lvpm init --from vipm.toml --labview-version 2023" in its folder
+    Then it succeeds
+    And the vipm.toml is byte for byte what it was
+
+  Scenario: a vipm.toml that does not parse writes nothing
+    Given a vipm.toml holding "[project"
+    When I run "lvpm init --from vipm.toml --labview-version 2023" in its folder
+    Then it fails with "vipm.toml: " followed by the converter's reason
+    And the output says "nothing was written"
+    And the folder has no lvpm.toml, no .git and no .lv-venv
+    And the vipm.toml is byte for byte what it was
+
+  Scenario: a vipm.toml with no labview-version gives no targets line
+    Given a vipm.toml with only a [dependencies] table
+    When I run "lvpm init --from vipm.toml --labview-version 2023" in its folder
+    Then the output does not say "the vipm.toml targets"
+
+  # The lock and sync scenarios use a second fixture: only [dependencies]
+  # labview_open_source_lib_serializer = "1.2.1.16", since the pilot feed holds
+  # neither jki_vi_tester nor any NI package.
+  Scenario: lock resolves what init took from the vipm.toml
+    Given a folder feed with the pilot packages
+    And a vipm.toml with only labview_open_source_lib_serializer = "1.2.1.16"
+    When I run "lvpm init --from vipm.toml --labview-version 2023" in its folder
+    And I run "lvpm lock" in the same folder
+    Then the folder's lvpm.lock holds the serializer 1.2.1.16 and its two dependencies
+
+  @labview @interactive-labview
+  Scenario: sync installs what init took from the vipm.toml
+    Given a folder feed with the pilot packages
+    And a vipm.toml with only labview_open_source_lib_serializer = "1.2.1.16"
+    When I run "lvpm init --from vipm.toml --labview-version 2026" in its folder
+    And I run "lvpm sync" in the same folder
+    Then it succeeds
+    And the venv holds labview_open_source_lib_serializer in its add-on folder and no staging folder
+    And the venv holds labview_open_source_lib_data_manipulation in its add-on folder and no staging folder
+    And the venv holds labview_open_source_project_lib_labview_open_source_palette in its add-on folder and no staging folder
+
+  Scenario: init --from vipm.toml is documented
+    Then docs/manifest.md names "lvpm init --from vipm.toml"
