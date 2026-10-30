@@ -4,6 +4,7 @@
 use super::{Renderer, Stream};
 use lvpm_core::errors::InitError;
 use lvpm_core::events::{Event, Retarget};
+use lvpm_core::git::GitOutcome;
 
 pub(super) fn render(r: &mut Renderer, event: &Event) {
     match event {
@@ -42,7 +43,36 @@ pub(super) fn render(r: &mut Renderer, event: &Event) {
             "warning: no LabVIEW found; lvpm.toml has no `labview`. \
              Add labview = \">=YYYY\" before `lvpm lock`",
         ),
+        Event::InitGit { outcome } => git(r, outcome),
         _ => unreachable!("routed here by Renderer::render: {event:?}"),
+    }
+}
+
+fn git(r: &mut Renderer, outcome: &GitOutcome) {
+    match outcome {
+        GitOutcome::Initialized => {
+            r.line(Stream::Out, "initialized a git repository");
+            r.line(Stream::Out, "  add a remote:  git remote add origin <url>");
+            r.line(
+                Stream::Out,
+                "  first push:    git add -A && git commit -m \"lvpm init\" && git push -u origin HEAD",
+            );
+        }
+        GitOutcome::InsideWorkTree { top } => r.line(
+            Stream::Out,
+            &format!(
+                "already inside a git repository at {}; left it as it is",
+                top.display()
+            ),
+        ),
+        GitOutcome::GitMissing => r.line(
+            Stream::Err,
+            "warning: git not found on PATH; no repository made",
+        ),
+        GitOutcome::Failed { why } => r.line(
+            Stream::Err,
+            &format!("warning: git init failed: {why}; no repository made"),
+        ),
     }
 }
 
@@ -165,6 +195,57 @@ mod tests {
             err.text(),
             "warning: no LabVIEW found; lvpm.toml has no `labview`. \
              Add labview = \">=YYYY\" before `lvpm lock`\n"
+        );
+    }
+
+    #[test]
+    fn a_new_repository_says_how_to_add_a_remote_and_push_on_stdout() {
+        let (mut renderer, out, err) = renderer();
+        renderer.render(&Event::InitGit {
+            outcome: GitOutcome::Initialized,
+        });
+        assert_eq!(
+            out.text(),
+            "initialized a git repository\n  \
+             add a remote:  git remote add origin <url>\n  \
+             first push:    git add -A && git commit -m \"lvpm init\" && git push -u origin HEAD\n"
+        );
+        assert_eq!(err.text(), "");
+    }
+
+    #[test]
+    fn a_repository_that_was_there_is_named_and_left_alone_on_stdout() {
+        let (mut renderer, out, err) = renderer();
+        let top = PathBuf::from("repo");
+        renderer.render(&Event::InitGit {
+            outcome: GitOutcome::InsideWorkTree { top: top.clone() },
+        });
+        assert_eq!(
+            out.text(),
+            format!(
+                "already inside a git repository at {}; left it as it is\n",
+                top.display()
+            )
+        );
+        assert_eq!(err.text(), "");
+    }
+
+    #[test]
+    fn git_missing_and_git_failing_are_warnings_on_stderr() {
+        let (mut renderer, out, err) = renderer();
+        renderer.render(&Event::InitGit {
+            outcome: GitOutcome::GitMissing,
+        });
+        renderer.render(&Event::InitGit {
+            outcome: GitOutcome::Failed {
+                why: "fatal: permission denied".into(),
+            },
+        });
+        assert_eq!(out.text(), "");
+        assert_eq!(
+            err.text(),
+            "warning: git not found on PATH; no repository made\n\
+             warning: git init failed: fatal: permission denied; no repository made\n"
         );
     }
 

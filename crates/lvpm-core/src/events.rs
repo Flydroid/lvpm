@@ -8,6 +8,7 @@
 //! enumerated values. Work that prints a line in two parts is a begin event and
 //! an end event, so the front end owns the half-written line.
 
+use crate::git::GitOutcome;
 use serde::Serialize;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -405,6 +406,8 @@ pub enum Event {
     /// No LabVIEW is installed and `--labview-version` was not given, so the
     /// manifest has no `labview`.
     InitNoLabview,
+    /// What `init` did about a git repository.
+    InitGit { outcome: GitOutcome },
 
     // ---- ops::query ----
     /// A package's archive is not cached and is about to be downloaded.

@@ -13,6 +13,7 @@ pub mod config;
 pub mod distribution;
 pub mod errors;
 pub mod fetch;
+pub mod git;
 pub mod index;
 pub mod install;
 pub mod launch;

@@ -6,6 +6,7 @@
 use super::env::OpEnv;
 use crate::errors::InitError;
 use crate::events::{Event, Retarget};
+use crate::git::{self, Runner};
 use crate::target::LvTarget;
 use crate::{manifest_edit, paths, project};
 use anyhow::anyhow;
@@ -75,7 +76,9 @@ fn installation_label(target: &LvTarget) -> String {
 /// Write an `lvpm.toml` in the project root — `--project`, else the directory
 /// the command ran in — named after its folder. `labview` is `--labview-version`
 /// when given, else the newest LabVIEW installed, and left out when there is none.
-pub fn run(env: &OpEnv) -> Result<Initialized, InitError> {
+/// Once the manifest is written, `git` makes the repository: the op does not know
+/// how git is run.
+pub fn run(env: &OpEnv, git: Runner) -> Result<Initialized, InitError> {
     let root = match &env.flags.project {
         Some(dir) => paths::resolve(&env.cwd, dir),
         None => paths::clean(&env.cwd),
@@ -114,6 +117,9 @@ pub fn run(env: &OpEnv) -> Result<Initialized, InitError> {
     if choice.year.is_none() {
         env.sink.emit(Event::InitNoLabview);
     }
+    env.sink.emit(Event::InitGit {
+        outcome: git::init(&root, git),
+    });
     Ok(Initialized {
         manifest,
         labview: choice.year,
@@ -134,6 +140,22 @@ fn write_new(path: &Path, text: &str) -> Result<(), InitError> {
 mod tests {
     use super::super::testing::{Recorded, env, env_on, scratch_dir};
     use super::*;
+    use crate::git::{GitOutcome, fake_output};
+    use std::io;
+    use std::process::{Command, Output};
+
+    /// What a fake git answers.
+    type Answer = fn() -> io::Result<Output>;
+
+    /// A git that makes a repository.
+    fn git_ok(_: &mut Command) -> io::Result<Output> {
+        fake_output(0, "")
+    }
+
+    /// A git that must not be run: a test of a refusal passes it.
+    fn no_git(_: &mut Command) -> io::Result<Output> {
+        panic!("git must not be run")
+    }
 
     /// An empty folder named `name`, below a scratch directory of its own.
     fn folder(tag: &str, name: &str) -> (PathBuf, PathBuf) {
@@ -167,7 +189,7 @@ mod tests {
             let mut env = env_on(&sink, &root);
             env.targets = targets;
             env.flags.labview_version = flag.map(String::from);
-            let done = run(&env).unwrap();
+            let done = run(&env, &git_ok).unwrap();
             Ran {
                 events: sink.events(),
                 manifest: std::fs::read_to_string(&done.manifest).unwrap(),
@@ -203,7 +225,7 @@ mod tests {
         let mut env = env_on(&sink, &root);
         env.flags.labview_version = Some("2023".into());
 
-        let done = run(&env).unwrap();
+        let done = run(&env, &git_ok).unwrap();
 
         assert_eq!(done.manifest, root.join("lvpm.toml"));
         assert_eq!(done.labview, Some(2023));
@@ -213,13 +235,109 @@ mod tests {
         );
         assert_eq!(
             sink.events(),
-            [Event::InitManifestWritten {
-                path: done.manifest.clone(),
-                labview: Some(2023),
-                installed: vec!["2026 (64-bit)".into()],
-                retarget: None,
-            }]
+            [
+                Event::InitManifestWritten {
+                    path: done.manifest.clone(),
+                    labview: Some(2023),
+                    installed: vec!["2026 (64-bit)".into()],
+                    retarget: None,
+                },
+                Event::InitGit {
+                    outcome: GitOutcome::Initialized
+                }
+            ]
         );
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// The event `init` ended on, which is its git outcome.
+    fn git_outcome(events: &[Event]) -> GitOutcome {
+        match events.last() {
+            Some(Event::InitGit { outcome }) => outcome.clone(),
+            other => panic!("the last event is the git outcome: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn git_is_run_once_in_the_root_after_the_manifest_is_written() {
+        let (scratch, root) = folder("init-git-after", "App");
+        let calls = std::cell::RefCell::new(Vec::new());
+        let sink = Recorded::default();
+
+        run(&env_on(&sink, &root), &|command: &mut Command| {
+            calls.borrow_mut().push((
+                command.get_current_dir().map(Path::to_path_buf),
+                root.join("lvpm.toml").is_file(),
+            ));
+            fake_output(0, "")
+        })
+        .unwrap();
+
+        assert_eq!(*calls.borrow(), [(Some(root.clone()), true)]);
+        assert_eq!(git_outcome(&sink.events()), GitOutcome::Initialized);
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
+    fn git_missing_or_failing_is_reported_and_leaves_the_manifest_and_an_ok() {
+        let answers: [(Answer, GitOutcome); 2] = [
+            (
+                || Err(io::Error::from(io::ErrorKind::NotFound)),
+                GitOutcome::GitMissing,
+            ),
+            (
+                || fake_output(128, "fatal: permission"),
+                GitOutcome::Failed {
+                    why: "fatal: permission".into(),
+                },
+            ),
+        ];
+        for (answer, outcome) in answers {
+            let (scratch, root) = folder("init-git-warns", "App");
+            let sink = Recorded::default();
+
+            let done = run(&env_on(&sink, &root), &|_: &mut Command| answer()).unwrap();
+
+            assert!(done.manifest.is_file(), "{outcome:?}");
+            assert_eq!(git_outcome(&sink.events()), outcome);
+            let _ = std::fs::remove_dir_all(&scratch);
+        }
+    }
+
+    #[test]
+    fn inside_a_work_tree_git_is_not_run_and_the_top_is_reported() {
+        let (scratch, repo) = folder("init-git-inside", "Repo");
+        std::fs::create_dir(repo.join(".git")).unwrap();
+        let app = repo.join("app");
+        std::fs::create_dir(&app).unwrap();
+        let sink = Recorded::default();
+
+        run(&env_on(&sink, &app), &no_git).unwrap();
+
+        assert_eq!(
+            git_outcome(&sink.events()),
+            GitOutcome::InsideWorkTree { top: repo }
+        );
+        assert!(!app.join(".git").exists());
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
+    fn a_refusal_runs_no_git_and_makes_no_venv() {
+        let (scratch, root) = folder("init-refusal-no-git", "Taken");
+        std::fs::write(root.join("lvpm.toml"), "# mine\n").unwrap();
+        let calls = std::cell::Cell::new(0);
+
+        let why = run(&env(&root), &|_: &mut Command| {
+            calls.set(calls.get() + 1);
+            fake_output(0, "")
+        })
+        .unwrap_err();
+
+        assert!(matches!(why, InitError::ManifestExists { .. }), "{why:?}");
+        assert_eq!(calls.get(), 0);
+        assert!(!root.join(".lv-venv").exists());
+        assert!(!root.join(".git").exists());
         let _ = std::fs::remove_dir_all(&scratch);
     }
 
@@ -294,7 +412,10 @@ mod tests {
             ran.manifest
         );
         assert_eq!(ran.written().2, None);
-        assert_eq!(ran.events.len(), 1, "no warning when the flag named one");
+        assert!(
+            !ran.events.contains(&Event::InitNoLabview),
+            "no warning when the flag named one"
+        );
     }
 
     #[test]
@@ -360,7 +481,15 @@ mod tests {
         );
         assert_eq!(ran.done.labview, None);
         assert_eq!(ran.written(), (None, Vec::new(), None));
-        assert_eq!(ran.events[1..], [Event::InitNoLabview]);
+        assert_eq!(
+            ran.events[1..],
+            [
+                Event::InitNoLabview,
+                Event::InitGit {
+                    outcome: GitOutcome::Initialized
+                }
+            ]
+        );
     }
 
     #[test]
@@ -372,7 +501,11 @@ mod tests {
             "{}",
             ran.manifest
         );
-        assert_eq!(ran.events.len(), 1, "{:?}", ran.events);
+        assert!(
+            !ran.events.contains(&Event::InitNoLabview),
+            "{:?}",
+            ran.events
+        );
     }
 
     #[test]
@@ -381,7 +514,7 @@ mod tests {
         let mut env = env(&scratch);
         env.flags.project = Some(PathBuf::from("Elsewhere"));
 
-        let done = run(&env).unwrap();
+        let done = run(&env, &git_ok).unwrap();
 
         assert_eq!(done.manifest, root.join("lvpm.toml"));
         assert!(!scratch.join("lvpm.toml").exists());
@@ -399,7 +532,7 @@ mod tests {
         let mut env = env(&scratch);
         env.flags.project = Some(PathBuf::from("Missing"));
 
-        let why = run(&env).unwrap_err();
+        let why = run(&env, &no_git).unwrap_err();
 
         assert!(
             matches!(&why, InitError::ProjectMissing { dir } if *dir == scratch.join("Missing")),
@@ -416,7 +549,7 @@ mod tests {
         let mut env = env(&root);
         env.flags.project = Some(PathBuf::from("afile"));
 
-        let why = run(&env).unwrap_err();
+        let why = run(&env, &no_git).unwrap_err();
 
         assert!(matches!(why, InitError::ProjectMissing { .. }), "{why:?}");
         let _ = std::fs::remove_dir_all(&scratch);
@@ -444,7 +577,7 @@ mod tests {
         std::fs::write(root.join("lvpm.toml"), "# mine\n").unwrap();
         let sink = Recorded::default();
 
-        let why = run(&env_on(&sink, &root)).unwrap_err();
+        let why = run(&env_on(&sink, &root), &no_git).unwrap_err();
 
         assert!(
             matches!(&why, InitError::ManifestExists { path } if *path == root.join("lvpm.toml")),
@@ -478,7 +611,7 @@ mod tests {
         let app = root.join("app");
         std::fs::create_dir_all(&app).unwrap();
 
-        let done = run(&env_on(&Recorded::default(), &app)).unwrap();
+        let done = run(&env_on(&Recorded::default(), &app), &git_ok).unwrap();
 
         assert_eq!(done.manifest, app.join("lvpm.toml"));
         assert_eq!(
@@ -495,7 +628,7 @@ mod tests {
             let mut env = env(&root);
             env.flags.labview_version = Some(value.into());
 
-            let why = run(&env).unwrap_err();
+            let why = run(&env, &no_git).unwrap_err();
 
             assert!(
                 matches!(&why, InitError::BadLabview { value: v } if v == value),
@@ -513,13 +646,13 @@ mod tests {
         let mut env = env(&root);
         env.flags.labview_version = Some("abc".into());
         assert!(matches!(
-            run(&env).unwrap_err(),
+            run(&env, &no_git).unwrap_err(),
             InitError::ManifestExists { .. }
         ));
 
         env.flags.project = Some(PathBuf::from("Missing"));
         assert!(matches!(
-            run(&env).unwrap_err(),
+            run(&env, &no_git).unwrap_err(),
             InitError::ProjectMissing { .. }
         ));
         let _ = std::fs::remove_dir_all(&scratch);

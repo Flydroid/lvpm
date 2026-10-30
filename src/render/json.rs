@@ -53,6 +53,7 @@ fn to_line(value: serde_json::Value) -> String {
 mod tests {
     use super::*;
     use lvpm_core::events::{Phase, Retarget};
+    use lvpm_core::git::GitOutcome;
     use lvpm_core::ops::venv_cmd::VenvStatus;
     use lvpm_core::target::LvTarget;
     use lvpm_core::venv::Venv;
@@ -163,6 +164,29 @@ mod tests {
         assert_eq!(
             serde_json::json!(Event::InitNoLabview),
             serde_json::json!({"event": "init_no_labview"})
+        );
+    }
+
+    #[test]
+    fn the_git_outcome_is_tagged_by_kind_and_carries_only_its_own_data() {
+        let git = |outcome| serde_json::json!(Event::InitGit { outcome });
+        assert_eq!(
+            git(GitOutcome::Initialized),
+            serde_json::json!({"event": "init_git", "data": {"outcome": {"kind": "initialized"}}})
+        );
+        assert_eq!(
+            git(GitOutcome::InsideWorkTree { top: "repo".into() })["data"]["outcome"],
+            serde_json::json!({"kind": "inside_work_tree", "top": "repo"})
+        );
+        assert_eq!(
+            git(GitOutcome::GitMissing)["data"]["outcome"],
+            serde_json::json!({"kind": "git_missing"})
+        );
+        assert_eq!(
+            git(GitOutcome::Failed {
+                why: "denied".into()
+            })["data"]["outcome"],
+            serde_json::json!({"kind": "failed", "why": "denied"})
         );
     }
 

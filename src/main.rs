@@ -12,7 +12,7 @@ use lvpm_core::ops::relink::RelinkOptions;
 use lvpm_core::ops::route::{self, InstallMode, InstallRequest};
 use lvpm_core::ops::sync::{LockFlags, SyncOptions, strictness};
 use lvpm_core::ops::{self, Destination, DestinationFlags, OpEnv};
-use lvpm_core::{config, launch, target, venv, viserver};
+use lvpm_core::{config, git, launch, target, venv, viserver};
 
 mod render;
 
@@ -583,7 +583,8 @@ fn run(cli: &Cli) -> Result<Report> {
             Ok(Report::said(render::viserver::started(&started), "start"))
         }
         Cmd::Init => {
-            let done = ops::init::run(&env).map_err(|why| anyhow!(render::init::error(&why)))?;
+            let done = ops::init::run(&env, &git::spawn)
+                .map_err(|why| anyhow!(render::init::error(&why)))?;
             Report::new(render::init::initialized(done.labview), &done)
         }
         Cmd::Install {

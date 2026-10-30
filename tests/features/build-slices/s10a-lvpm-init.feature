@@ -51,6 +51,20 @@ Feature: lvpm init starts a project (S10a)
       | abc   |
       | 26.3  |
 
+  Scenario: init makes a git repository and says how to add a remote
+    Given an empty folder with no .git in it or above it
+    When I run "lvpm init --labview-version 2023" in it
+    Then the folder is a git repository in which "git rev-parse HEAD" fails
+    And the output has the line "  add a remote:  git remote add origin <url>"
+    And the output has the line "  first push:    git add -A && git commit -m "lvpm init" && git push -u origin HEAD"
+
+  Scenario: inside a git repository, git is left alone
+    Given a git repository with an empty subfolder "app"
+    When I run "lvpm init --labview-version 2023" in "app"
+    Then it succeeds
+    And "app" has no .git of its own
+    And the output says "already inside a git repository at" and the repository's folder
+
   @labview @interactive-labview
   Scenario: labview is the newest installed
     Given the LabVIEW installations "lvpm targets" lists

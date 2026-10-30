@@ -7,6 +7,7 @@ use crate::support::golden::Output;
 use crate::support::project::MANIFEST_FILE;
 use cucumber::{given, then, when};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 /// Stands for the manifest of the folder the last command ran in.
 const MANIFEST_PATH: &str = "<path of lvpm.toml>";
@@ -207,7 +208,7 @@ async fn folder_has_a_manifest(world: &mut CliWorld, folder: String, name: Strin
     assert_eq!(project_text(&manifest, "name"), name);
 }
 
-#[then(regex = r#"^the output has the line "([^"]+)"$"#)]
+#[then(regex = r#"^the output has the line "(.+)"$"#)]
 async fn output_has_the_line(world: &mut CliWorld, line: String) {
     let output = world.init_output();
     let printed: Vec<&str> = output.stdout.lines().chain(output.stderr.lines()).collect();
@@ -292,4 +293,66 @@ async fn folder_has_no_git_and_no_venv(world: &mut CliWorld) {
 #[then("the folder has no lvpm.toml, no .git and no .lv-venv")]
 async fn folder_has_nothing(world: &mut CliWorld) {
     assert_none_of(world.init_cwd(), &["lvpm.toml", ".git", ".lv-venv"]);
+}
+
+#[given(regex = r"^an empty folder with no \.git in it or above it$")]
+async fn empty_folder_outside_any_repository(world: &mut CliWorld) {
+    let folder = world.sandbox.work_dir().join("Plain");
+    std::fs::create_dir_all(&folder).expect("create the folder");
+    let repository = folder.ancestors().find(|dir| dir.join(".git").exists());
+    assert_eq!(
+        repository, None,
+        "the sandbox is inside a git repository, so init would leave git alone"
+    );
+}
+
+#[given(regex = r#"^a git repository with an empty subfolder "([^"]+)"$"#)]
+async fn repository_with_a_subfolder(world: &mut CliWorld, subfolder: String) {
+    let repository = world.sandbox.work_dir();
+    let made = Command::new("git")
+        .arg("init")
+        .current_dir(&repository)
+        .output()
+        .expect("git runs");
+    assert!(made.status.success(), "git init failed: {made:?}");
+    std::fs::create_dir_all(repository.join(subfolder)).expect("create the subfolder");
+}
+
+#[then(r#"the folder is a git repository in which "git rev-parse HEAD" fails"#)]
+async fn folder_is_a_repository_without_a_commit(world: &mut CliWorld) {
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .args(args)
+            .current_dir(world.init_cwd())
+            .output()
+            .expect("git runs")
+    };
+    assert!(world.init_cwd().join(".git").is_dir(), "no .git directory");
+    let known = git(&["rev-parse", "--git-dir"]);
+    assert!(known.status.success(), "git does not know it: {known:?}");
+    let head = git(&["rev-parse", "HEAD"]);
+    assert!(
+        !head.status.success(),
+        "the repository has a commit: {head:?}"
+    );
+}
+
+#[then(regex = r#"^"([^"]+)" has no \.git of its own$"#)]
+async fn folder_has_no_git_of_its_own(world: &mut CliWorld, folder: String) {
+    assert_none_of(&world.sandbox.work_dir().join(folder), &[".git"]);
+}
+
+#[then(regex = r#"^the output says "([^"]+)" and the repository's folder$"#)]
+async fn output_names_the_repository(world: &mut CliWorld, text: String) {
+    let output = world.init_output();
+    let wanted: Vec<String> = spellings(&world.sandbox.work_dir())
+        .iter()
+        .map(|folder| format!("{text} {folder}"))
+        .collect();
+    assert!(
+        wanted
+            .iter()
+            .any(|w| output.stdout.contains(w) || output.stderr.contains(w)),
+        "none of {wanted:?} is in: {output:?}"
+    );
 }

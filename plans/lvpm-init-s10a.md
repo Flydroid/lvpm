@@ -986,7 +986,7 @@ neither is a cross-cutting change.
 
 #### Wave 2
 - [ ] Slice 2: git repository and venv
-  - [ ] Step 2.1: git
+  - [x] Step 2.1: git
   - [ ] Step 2.2: venv
 
 #### Wave 3
