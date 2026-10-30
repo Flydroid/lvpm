@@ -27,6 +27,7 @@ pub mod spec;
 pub mod target;
 pub mod venv;
 pub mod version;
+pub mod vipc;
 pub mod vipm_interop;
 pub mod viserver;
 

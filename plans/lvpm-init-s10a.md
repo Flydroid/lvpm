@@ -1000,7 +1000,7 @@ neither is a cross-cutting change.
 
 #### Wave 3
 - [ ] Slice 3: `init --from project.vipc`
-  - [ ] Step 3.1: `vipc.rs` reads a `.vipc`
+  - [x] Step 3.1: `vipc.rs` reads a `.vipc`
   - [ ] Step 3.2: `--from .vipc` adds dependencies
   - [ ] Step 3.3: embedded packages, and sync installs them
 

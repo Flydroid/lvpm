@@ -154,7 +154,7 @@ impl std::fmt::Display for Version {
 /// alphanumeric prerelease tail (`0.1.0alpha1`), and an optional trailing
 /// `-N` build segment? An underscore never appears in one, which is what
 /// separates a version from the rest of a package name.
-fn is_version(s: &str) -> bool {
+pub(crate) fn is_version(s: &str) -> bool {
     let core = match s.rsplit_once('-') {
         Some((head, tail)) if !tail.is_empty() && tail.bytes().all(|b| b.is_ascii_digit()) => head,
         _ => s,

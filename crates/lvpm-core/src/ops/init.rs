@@ -36,6 +36,34 @@ pub struct VenvSkip {
     pub why: String,
 }
 
+/// What `--from` read: the one input `run` takes, whatever file made it.
+#[derive(Debug, Clone, Default)]
+pub struct Seed {
+    pub name: Option<String>,
+    pub version: Option<String>,
+    /// The year of the LabVIEW the source file targets; reported, never used.
+    pub source_labview: Option<u32>,
+    /// `[dependencies]`: name, constraint as `lvpm.toml` writes it.
+    pub deps: Vec<(String, String)>,
+    /// `[dev-dependencies]`.
+    pub dev_deps: Vec<(String, String)>,
+    /// How many packages the source marks as another's dependency and so left out.
+    pub skipped: usize,
+    pub nipm: Option<toml_edit::Table>,
+    /// Packages the source file carries, to be imported into the cache.
+    pub embedded: Vec<Embedded>,
+}
+
+/// A package archive inside the `--from` file.
+#[derive(Debug, Clone)]
+pub struct Embedded {
+    pub name: String,
+    pub version: String,
+    /// Where the cache says it came from, e.g. `p.vipc!/Packages/x-1.0.vip`.
+    pub label: String,
+    pub bytes: Vec<u8>,
+}
+
 /// The LabVIEW the manifest names, and how to choose another installation.
 #[derive(Debug, PartialEq)]
 struct Choice {
