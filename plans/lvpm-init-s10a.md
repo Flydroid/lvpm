@@ -930,6 +930,18 @@ neither is a cross-cutting change.
 
 ## Risks & Open Questions
 
+- **Two installation rankings (slice 1 review).** `choose_labview` ranks
+  by (year, bitness); `target::select` takes the first of a year in
+  `detect()` order (version only). They disagree only when a year's 32-bit
+  install has a higher minor version than its 64-bit one. Decision: slice
+  2's venv step binds the installation init chose by path, so init stays
+  consistent; a later plain `lvpm venv create` may still pick the other.
+- **`labview` is a year (`u32`) in `InitManifestWritten`/`Initialized`
+  JSON** but a string elsewhere. Rename to `labview_year` before release
+  if the JSON is published; left as is for now.
+- **Intermittent test failures.** One run of `cargo test --workspace` on
+  2026-10-30 failed one lvpm-core lib test and one test in a 5-test
+  binary; three reruns passed. The failing tests were not identified.
 - **#89 merged into main on 2026-10-30** and is merged into this branch, so slice 4 ships here. (Was: if #89 is still open,
   the first PR ships slices 1, 2, 3 and 5, and slice 4 follows.
 - **Embedded `.vipc` layout unverified.** The design looks for
@@ -968,7 +980,7 @@ neither is a cross-cutting change.
 ### Slices (grouped by wave)
 
 #### Wave 1
-- [ ] Slice 1: `lvpm init` writes the manifest
+- [x] Slice 1: `lvpm init` writes the manifest
   - [x] Step 1.1: one skeleton, `lvpm init` writes it or refuses
   - [x] Step 1.2: choosing LabVIEW and saying how to change it
 
