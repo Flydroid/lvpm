@@ -32,7 +32,7 @@ planned.
 | 7 venv ready | unit: fake 2026 → bound venv and its rendered lines; fake 2023 only → skip naming 2024 Q1; flag year not installed → skip naming it; no LabVIEW → skip; venv already there → skip, venv untouched; S10a "a venv that cannot be made is a hint"; `@labview` "add installs into the venv" | 2.2 |
 | 8 adds what the user chose | S10a outline over the package flags; "init reports what it added and skipped"; "one package added, none skipped"; "a .vipc with no packages" | 3.2 |
 | 9 pinned exact, rest floor | same outline | 3.2 |
-| 10 embedded packages | S10a "an embedded package is imported", "an Included package missing from the zip", "a corrupt embedded package writes nothing"; unit `embed_takes_every_included_archive_and_names_where_each_came_from` (a `Dependency = true` one too), `an_archive_whose_spec_names_another_package_or_version_is_refused`; checked against a real `.vipc` or recorded unverified (gate) | 3.3 |
+| 10 embedded packages | S10a "an embedded package is imported", "an Included package missing from the zip", "a corrupt embedded package writes nothing"; unit `embed_takes_the_included_archives_init_adds_and_names_where_each_came_from` (a `Dependency = true` one is not imported), `an_archive_whose_spec_names_another_package_or_version_is_refused`; checked against a real `.vipc` or recorded unverified (gate) | 3.3 |
 | 11 sync installs them | S10a "lock resolves what init added" (default run); `@labview` "sync installs what init added" | 3.2, 3.3 |
 | 12 `.vipc` LabVIEW reported | S10a "the .vipc's LabVIEW is reported, not used", "no report when the .vipc targets the chosen LabVIEW"; unit "reported with no labview chosen" | 3.2 |
 | 13 bad input writes nothing | unit outline (`vipc.rs`); S10a outline "a bad --from file writes nothing" with exact texts | 3.1, 3.2 |
@@ -604,7 +604,7 @@ Unit level (`vipc.rs`, on zips built in the test):
       | "&amp;" in a <Name>                 | unsupported XML (entity)                       |
       | a config.xml of 2 MiB               | larger than 1 MiB                              |
 
-  Scenario: Vipc::seed applies the rules (also: a name listed twice keeps the last and counts once; Included and Dependency is skipped but embedded — amended in review)
+  Scenario: Vipc::seed applies the rules (also: a name listed twice keeps the last and counts once; Included and Dependency is skipped and not embedded — amended in review, then by the user)
     Given packages chosen-pinned, chosen-floating, dependency-pinned and dependency-floating
     Then seed has two deps, exact and ">=", skipped is 2, and source_labview is the target year
 
@@ -967,8 +967,8 @@ neither is a cross-cutting change.
 - **The duplicate-name rule is unspecified in the spec.** The plan applies
   the last one in the file, through `manifest_edit::set`; "added n" counts
   distinct names. A package both `Included` and `Dependency` is skipped
-  but its archive is imported (amended in the final review: lock needs it
-  when nothing else has it). Both are
+  and its archive is not imported (user, 2026-10-31: an import shadows the
+  feeds machine-wide, so only what lvpm.toml lists is planted). Both are
   inferences, unit-tested in `Vipc::seed`.
 - **Git detection is a `.git` walk, not `git rev-parse`.** A deviation from
   the spec's wording, for the reasons in the design notes.
@@ -989,7 +989,7 @@ neither is a cross-cutting change.
 - **Step 3.3 decisions.** `lvpm cache list` does not exist, so the
   embedded scenarios check the cache with `lvpm search --all` and an empty
   cache directory instead. A package both `Included` and `Dependency` is
-  imported, per the rule above. The archive's own name and version are
+  not imported, per the rule above. The archive's own name and version are
   compared to the `.vipc`'s `<Name>` (added in the final review, against cache
   poisoning). The three embedded scenarios
   end "(synthetic layout)"; AC10 stays unverified.

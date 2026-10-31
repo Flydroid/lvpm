@@ -105,7 +105,7 @@ dependencies. The path is read from the working directory, not from
 | Dependency (of another package)     | Skipped, and counted: the package that needs it brings it            |
 | Pinned                              | An exact version: `demo_lib = "1.5.0.15"`                            |
 | Anything else                       | A floor: `demo_lib = ">=1.5.0.15"`                                   |
-| Included (the archive is inside)    | Imported into the cache, like `lvpm cache add`, a Dependency one too; still added or skipped as above |
+| Included (the archive is inside)    | Imported into the cache, like `lvpm cache add`, unless it is a Dependency; still added or skipped as above |
 
 A package marked Included whose archive is not in the `.vipc` is a warning,
 and one whose archive is not a package, or is another package or version than

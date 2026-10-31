@@ -211,9 +211,11 @@ impl Vipc {
         seed
     }
 
-    /// Add to `seed` the package archives the `.vipc` at `path` holds: those of
-    /// every package it marks `Included`, a `Dependency` one too, so lock finds
-    /// it with no source listing it. A package it names with no archive inside
+    /// Add to `seed` the package archives the `.vipc` at `path` holds for the
+    /// packages init adds that it marks `Included`. A `Dependency` one is left
+    /// to the feeds: an import shadows every feed's versions of that name in
+    /// the shared cache, so only what lvpm.toml lists may be planted. A package
+    /// it names with no archive inside
     /// goes to `not_embedded`; an archive that cannot be taken is an error, and
     /// `seed` is then not to be used.
     pub fn embed(&self, path: &Path, label: &str, seed: &mut Seed) -> Result<()> {
@@ -228,7 +230,9 @@ impl Vipc {
             .iter()
             .enumerate()
             .filter(|(at, p)| {
-                p.included && !all[at + 1..].iter().any(|q| same_name(&q.name, &p.name))
+                p.included
+                    && p.chosen()
+                    && !all[at + 1..].iter().any(|q| same_name(&q.name, &p.name))
             })
             .map(|(_, p)| p)
             .collect();
@@ -761,7 +765,7 @@ mod tests {
     }
 
     #[test]
-    fn embed_takes_every_included_archive_and_names_where_each_came_from() {
+    fn embed_takes_the_included_archives_init_adds_and_names_where_each_came_from() {
         let dir = Dir::new("embed");
         let vip = vip_bytes("demo_lib", "1.0.0");
         let needed = vip_bytes("needed_lib", "4.0.0");
@@ -782,12 +786,11 @@ mod tests {
 
         vipc.embed(&path, "p.vipc", &mut seed).unwrap();
 
-        assert_eq!(seed.embedded.len(), 2);
         assert_eq!(
-            seed.embedded[1].name, "needed_lib",
-            "a Dependency is embedded too"
+            seed.embedded.len(),
+            1,
+            "a Dependency is left to the feeds, though its archive is inside"
         );
-        assert_eq!(seed.embedded[1].bytes, needed);
         let embedded = &seed.embedded[0];
         assert_eq!(
             (
