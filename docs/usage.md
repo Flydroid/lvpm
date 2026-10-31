@@ -107,7 +107,7 @@ dependencies. The path is read from the working directory, not from
 | Anything else                       | A floor: `demo_lib = ">=1.5.0.15"`                                   |
 | Included (the archive is inside)    | Imported into the cache, like `lvpm cache add`, unless it is a Dependency; still added or skipped as above |
 
-A package marked Included whose archive is not in the `.vipc` is a warning,
+A package init adds and marks Included whose archive is not in the `.vipc` is a warning,
 and one whose archive is not a package, or is another package or version than
 the `.vipc` lists, fails. A name listed twice follows its last listing. A
 `config.xml` over 1 MiB, an archive over 256 MiB or archives over 1 GiB in

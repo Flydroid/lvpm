@@ -182,15 +182,24 @@ impl Package {
 }
 
 impl Vipc {
+    /// Each name once, as its last listing, in the order of those last listings.
+    fn listings(&self) -> impl Iterator<Item = &Package> {
+        let all = &self.packages;
+        all.iter()
+            .enumerate()
+            .filter(move |(at, p)| !all[at + 1..].iter().any(|q| same_name(&q.name, &p.name)))
+            .map(|(_, p)| p)
+    }
+
     /// What init takes from it. A `Dependency` package is skipped and counted;
     /// a `Pinned` one gets its exact version and the rest a floor. A name listed
-    /// twice keeps the last one's constraint and counts once.
+    /// twice follows its last listing and counts once.
     pub fn seed(&self) -> Seed {
         let mut seed = Seed {
             source_labview: Some(self.labview_year),
             ..Seed::default()
         };
-        for package in &self.packages {
+        for package in self.listings() {
             if !package.chosen() {
                 seed.skipped += 1;
                 continue;
@@ -199,14 +208,7 @@ impl Vipc {
                 true => package.version.clone(),
                 false => format!(">={}", package.version),
             };
-            match seed
-                .deps
-                .iter_mut()
-                .find(|(name, _)| same_name(name, &package.name))
-            {
-                Some(dep) => dep.1 = constraint,
-                None => seed.deps.push((package.name.clone(), constraint)),
-            }
+            seed.deps.push((package.name.clone(), constraint));
         }
         seed
     }
@@ -215,26 +217,18 @@ impl Vipc {
     /// packages init adds that it marks `Included`. A `Dependency` one is left
     /// to the feeds: an import shadows every feed's versions of that name in
     /// the shared cache, so only what lvpm.toml lists may be planted. A package
-    /// it names with no archive inside
-    /// goes to `not_embedded`; an archive that cannot be taken is an error, and
-    /// `seed` is then not to be used.
+    /// init adds and marks `Included` with no archive inside goes to
+    /// `not_embedded`; an archive that cannot be taken is an error, and `seed`
+    /// is then not to be used.
     pub fn embed(&self, path: &Path, label: &str, seed: &mut Seed) -> Result<()> {
         self.embed_within(path, label, seed, MAX_EMBEDDED_TOTAL)
     }
 
     /// `embed`, refusing archives that together hold more than `total` bytes.
     fn embed_within(&self, path: &Path, label: &str, seed: &mut Seed, total: u64) -> Result<()> {
-        // Like `seed`, a name listed twice counts once, as its last listing.
-        let all = &self.packages;
-        let held: Vec<&Package> = all
-            .iter()
-            .enumerate()
-            .filter(|(at, p)| {
-                p.included
-                    && p.chosen()
-                    && !all[at + 1..].iter().any(|q| same_name(&q.name, &p.name))
-            })
-            .map(|(_, p)| p)
+        let held: Vec<&Package> = self
+            .listings()
+            .filter(|p| p.included && p.chosen())
             .collect();
         if held.is_empty() {
             return Ok(());
@@ -652,9 +646,39 @@ mod tests {
         let seed = read_xml("twice", &demo(&packages)).unwrap().seed();
         assert_eq!(
             seed.deps,
-            [("demo_lib".to_string(), ">=2.0.0.2".to_string())]
+            [("Demo_Lib".to_string(), ">=2.0.0.2".to_string())]
         );
         assert_eq!(seed.skipped, 0);
+    }
+
+    #[test]
+    fn a_name_whose_last_listing_is_a_dependency_is_skipped_and_not_embedded() {
+        let dir = Dir::new("embed-last-dependency");
+        let vip = vip_bytes("demo_lib", "1.0.0");
+        let packages = [
+            package_xml("demo_lib-1.0.0", "true", "false", "false"),
+            package_xml("demo_lib-1.0.0", "true", "true", "false"),
+        ]
+        .concat();
+        let path = dir.vipc(&[
+            ("config.xml", demo(&packages).as_bytes()),
+            ("demo_lib-1.0.0.vip", &vip),
+        ]);
+        let vipc = read(&path, "p.vipc").unwrap();
+        let mut seed = vipc.seed();
+
+        vipc.embed(&path, "p.vipc", &mut seed).unwrap();
+
+        assert_eq!(
+            (
+                seed.deps.len(),
+                seed.skipped,
+                seed.embedded.len(),
+                seed.not_embedded.len()
+            ),
+            (0, 1, 0, 0),
+            "the last listing wins for the constraint and the import alike"
+        );
     }
 
     /// A package archive: a zip whose `spec` names `name` at `version`.
@@ -774,6 +798,7 @@ mod tests {
             package_xml("absent_lib-2.0.0", "true", "false", "false"),
             package_xml("plain_lib-3.0.0", "false", "false", "false"),
             package_xml("needed_lib-4.0.0", "true", "true", "false"),
+            package_xml("ghost_lib-5.0.0", "true", "true", "false"),
         ]
         .concat();
         let path = dir.vipc(&[

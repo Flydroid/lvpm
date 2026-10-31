@@ -58,7 +58,7 @@ a check fails.
    `venv::create` writes today moves into one function both use, so there is
    one manifest template.
 5. With `--from`: add each dependency with `manifest_edit::set`. From a
-   `.vipc`, also import each package it embeds into the cache, the same
+   `.vipc`, also import each embedded package init adds into the cache, the same
    import `lvpm cache add` does. From a `vipm.toml`, also write its
    `[dev-dependencies]` and copy its `[nipm.dependencies]` table unchanged.
 6. `git init`, unless the folder is already inside a git work tree (a `.git`
@@ -121,7 +121,7 @@ the `.vipc`'s LabVIEW differs from the chosen one.
 | `Dependency = true` | VIPM pulled it in for another package: **skipped**. The solver brings it back as a transitive dependency |
 | `Pinned = true` | Exact constraint: `name = "1.5.0.15"` |
 | `Pinned = false` | Floor: `name = ">=1.5.0.15"` |
-| `Included = true` | The `.vip` is inside the `.vipc`: imported into the cache, so `sync` finds it with no feed |
+| `Included = true` | The `.vip` is inside the `.vipc`: for a package init adds (not `Dependency`), imported into the cache, so `sync` finds it with no feed |
 | `Target/Version` | Only reported (the "the .vipc targets" line). It does not set `labview` |
 
 The XML is small and flat; read it with the `zip` crate lvpm already has and
@@ -202,8 +202,8 @@ no citation are inferences and are in the Ambiguity Log.
     is imported into the cache, so `lvpm sync` installs it with no source
     listing it. A `Dependency = true` one is not imported, its archive inside
     or not: an import shadows the feeds for every project on the machine. An archive whose spec names another package or version
-    than its `<Package>` is refused, with nothing written. One marked
-    `Included` whose archive is not inside is a warning, and it is still added
+    than its `<Package>` is refused, with nothing written. One init adds and
+    marks `Included` whose archive is not inside is a warning, and it is still added
     or skipped as AC8 says. A name listed twice follows its last listing, for
     both the constraint and the import. *(inference)*
 11. **Sync installs them.** After `init --from`, `lvpm sync` locks and installs
@@ -263,7 +263,7 @@ The same from a `vipm.toml`. *(user)*
 | Venv cannot be created | `inferable` | inference | Init still succeeds, with the command to run later. The user said "if possible". |
 | No LabVIEW detected | `inferable` | inference | Write the manifest without `labview` and warn. A build machine without LabVIEW can still start a project; `lock` already refuses a manifest without `labview` with its own message. |
 | A manifest in a parent folder | `inferable` | inference | Does not block. #71 says "refuses to overwrite one", and a parent's file is not overwritten. |
-| `Included = true` packages | `inferable` | inference | Import into the cache, as `lvpm cache add`, only for a package init adds. Otherwise `sync` fails for a package that ships only inside the `.vipc`. A `Dependency = true` one is left to the feeds (user, 2026-10-31): an imported entry shadows every feed's versions of that name machine-wide, and one not in `[dependencies]` would be planted unseen. A dependency that ships only inside the `.vipc` then fails at `sync` with "no source lists it". No sample with an embedded package was available; the archive is found as `<Name>-<Version>.vip` at any depth (amended 2026-10-31 in review). |
+| `Included = true` packages | `inferable` | inference | Import into the cache, as `lvpm cache add`, only for a package init adds. Otherwise `sync` fails for a package that ships only inside the `.vipc`. A `Dependency = true` one is left to the feeds (user, 2026-10-31): an imported entry shadows every feed's versions of that name machine-wide, and one not in `[dependencies]` would be planted unseen. A dependency that ships only inside the `.vipc` is then not installed: `sync` warns "<name>, required by <pkg>, is not installed: no source listed it when lvpm.lock was made" and succeeds. No sample with an embedded package was available; the archive is found as `<Name>-<Version>.vip` at any depth (amended 2026-10-31 in review). |
 | An embedded archive that is another package | `inferable` | inference, review 2026-10-31 | Refused. The cache files an import under its spec's name for every project, so an unchecked archive could stand in for any package. |
 | Project `name` and `version` | `inferable` | inference | Folder name and `0.1.0`, as `venv::create`'s skeleton and the usage.md example. |
 | Whether init locks or syncs | `inferable` | inference | Neither. #71's demo runs `lvpm sync` as a second step, and sync locks when there is no lock. |
