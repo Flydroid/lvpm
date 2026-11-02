@@ -277,19 +277,20 @@ Two things follow from LabVIEW reading an addon's contents at launch:
 named package. If it has installed dependencies that are not needed by other
 packages, lvpm asks whether to remove them too. Shared dependencies (and
 dependencies they need) are kept and reported. In a venv, packages declared
-in any `lvpm.toml` dependency group, and their transitive dependencies, are
-also kept. Explicitly uninstalling a declared package warns but proceeds;
-uninstall never edits `lvpm.toml`.
+in any group of its bound project manifest, and their transitive dependencies,
+are also kept. Explicitly uninstalling a declared package warns but proceeds;
+uninstall never edits the manifest.
 
 For scripts, pass `--with-deps` to remove unshared dependencies or
 `--keep-deps` to keep them without prompting. Without either option, an
 uninstall that would prompt fails before removing anything when standard
 input is not a terminal. `uninstall --all` still removes every package.
 
-Dependency information is recorded on new installs. Older installation
-records do not contain it: lvpm warns that the check is incomplete and
-keeps potentially affected dependencies. Uninstall and reinstall those
-packages to record their dependencies.
+Installation records must contain dependency information; old or invalid
+records are rejected rather than ignored. Venvs created before manifest
+bindings must be removed and recreated, then their packages reinstalled.
+For global installations with old records, uninstall the affected packages
+with the previous lvpm version before reinstalling them.
 
 ## What an install does in LabVIEW
 

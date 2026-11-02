@@ -60,9 +60,11 @@ pub fn trials() -> Vec<Trial> {
         ("uninstall: non-interactive choice and keep-deps", uninstall_keep_dependencies),
         ("uninstall: remove unshared and warn about shared", uninstall_shared_dependencies),
         ("uninstall: warn before removing a required package", uninstall_required_package),
-        ("uninstall: old records keep uncertain dependencies", uninstall_legacy_records),
+        ("uninstall: old records fail explicitly", uninstall_legacy_records),
         ("uninstall: --all removes remaining venv packages", uninstall_venv_all),
         ("uninstall: project dependencies and their dependencies are kept", uninstall_project_dependencies),
+        ("uninstall: old bindings require recreation", uninstall_old_binding),
+        ("uninstall: explicit VIPM manifest protects project dependencies", uninstall_vipm_manifest),
         (
             "venv install with relink in a LabVIEW started with -pref",
             venv_install,
@@ -405,15 +407,21 @@ fn uninstall_required_package() -> Check {
 fn uninstall_legacy_records() -> Check {
     ok(&venv(), &["install", "lvpm_e2e_root", "--no-relink"])?;
     let path = record("lvpm_e2e_other")?;
-    let mut data: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&path).map_err(fail)?).map_err(fail)?;
-    data.as_object_mut().ok_or("installation record is not an object")?.remove("dependencies");
-    std::fs::write(&path, serde_json::to_vec_pretty(&data).map_err(fail)?).map_err(fail)?;
-    let result = ok(&venv(), &["uninstall", "lvpm_e2e_root", "--with-deps"])?;
-    contains(&result, "dependency checks are incomplete")?;
-    absent(&record("lvpm_e2e_root")?)?;
-    exists(&record("lvpm_e2e_private")?)?;
-    exists(&record("lvpm_e2e_shared")?)
+    let original = std::fs::read(&path).map_err(fail)?;
+    let result = (|| {
+        let mut data: serde_json::Value = serde_json::from_slice(&original).map_err(fail)?;
+        data.as_object_mut().ok_or("installation record is not an object")?.remove("dependencies");
+        std::fs::write(&path, serde_json::to_vec_pretty(&data).map_err(fail)?).map_err(fail)?;
+        for args in [&["uninstall", "lvpm_e2e_root", "--with-deps"][..], &["uninstall", "--all"][..], &["list"][..]] {
+            let failed = lvpm(&venv(), args).try_failure().map_err(fail)?;
+            contains(&failed, "dependency list required")?;
+        }
+        exists(&record("lvpm_e2e_root")?)?;
+        exists(&record("lvpm_e2e_private")?)?;
+        exists(&record("lvpm_e2e_shared")?)
+    })();
+    std::fs::write(&path, original).map_err(fail)?;
+    result
 }
 
 fn uninstall_venv_all() -> Check {
@@ -452,4 +460,45 @@ fn uninstall_project_dependencies() -> Check {
     })();
     std::fs::write(&path, original).map_err(fail)?;
     result
+}
+
+fn uninstall_old_binding() -> Check {
+    ok(&venv(), &["install", "lvpm_e2e_root", "--no-relink"])?;
+    let path = venv_dir()?.join("venv.json");
+    let original = std::fs::read(&path).map_err(fail)?;
+    let result = (|| {
+        let mut binding: serde_json::Value = serde_json::from_slice(&original).map_err(fail)?;
+        binding.as_object_mut().ok_or("venv binding is not an object")?.remove("manifest");
+        std::fs::write(&path, serde_json::to_vec_pretty(&binding).map_err(fail)?).map_err(fail)?;
+        let failed = lvpm(&venv(), &["uninstall", "lvpm_e2e_root", "--with-deps"])
+            .try_failure().map_err(fail)?;
+        contains(&failed, "unsupported venv binding")?;
+        exists(&record("lvpm_e2e_root")?)?;
+        exists(&record("lvpm_e2e_private")?)?;
+        exists(&record("lvpm_e2e_shared")?)
+    })();
+    std::fs::write(&path, original).map_err(fail)?;
+    result?;
+    ok(&venv(), &["uninstall", "--all"]).map(drop)
+}
+
+fn uninstall_vipm_manifest() -> Check {
+    let dir = env().work.join("vipm-venv");
+    std::fs::create_dir_all(&dir).map_err(fail)?;
+    std::fs::write(dir.join("vipm.toml"),
+        "[project]\nname = \"vipm-e2e\"\nlabview-version = \"2026\"\n\
+         [dependencies]\nlvpm_e2e_private = \"1.0.0.1\"\n").map_err(fail)?;
+    std::fs::write(dir.join("sources.toml"),
+        "[sources]\ndefaults = false\n[dependencies]\nlvpm_e2e_root = \"*\"\n").map_err(fail)?;
+    ok(&dir, &["venv", "create", "--manifest", "vipm.toml"])?;
+    ok(&dir, &["install", "--manifest", "sources.toml", "--no-relink"])?;
+    let result = ok(&dir, &["uninstall", "lvpm_e2e_root", "--with-deps"])?;
+    contains(&result, "keeping lvpm_e2e_private: declared in vipm.toml")?;
+    contains(&result, "keeping lvpm_e2e_shared: required by a package declared in vipm.toml")?;
+    let location = stdout(&ok(&dir, &["config", "get", "venv.dir"])?);
+    let records = dir.join(location.trim()).join("installed");
+    absent(&records.join("lvpm_e2e_root.json"))?;
+    exists(&records.join("lvpm_e2e_private.json"))?;
+    exists(&records.join("lvpm_e2e_shared.json"))?;
+    ok(&dir, &["uninstall", "--all"]).map(drop)
 }

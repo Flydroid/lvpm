@@ -115,7 +115,7 @@ fn install_records_and_uninstall_protects_shared_dependencies() {
 }
 
 #[test]
-fn old_records_are_not_assumed_to_have_no_dependencies() {
+fn old_records_fail_instead_of_being_ignored() {
     let f = Fixture::new("old-records");
     f.package("root", "child");
     f.package("child", "");
@@ -126,9 +126,16 @@ fn old_records_are_not_assumed_to_have_no_dependencies() {
     let mut record = text(&path);
     record.as_object_mut().unwrap().remove("dependencies");
     std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
-    let output = f.run(&["uninstall", "root", "--with-deps"]);
-    success(&output);
-    assert!(String::from_utf8_lossy(&output.stderr).contains("dependency checks are incomplete"));
+    for args in [
+        &["uninstall", "root", "--with-deps"][..],
+        &["uninstall", "--all"][..],
+        &["list"][..],
+    ] {
+        let output = f.run(args);
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("dependency list required"));
+    }
+    assert!(f.record("root").exists());
     assert!(f.record("child").exists());
 }
 

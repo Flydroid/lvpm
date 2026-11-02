@@ -5,10 +5,6 @@
 //! find what could go with a package, then keeps anything another installed
 //! package or the project manifest still needs. The resulting plan contains
 //! no filesystem operations: the CLI can show it before asking the user.
-//!
-//! Older records have no dependency list at all, which is not the same as an
-//! empty list. Such a record might need any candidate, so the plan leaves
-//! optional dependencies in place until the missing information is known.
 
 use crate::install::Manifest;
 use crate::index::{self, Entry};
@@ -25,10 +21,7 @@ pub struct RemovalPlan {
     /// Unshared dependencies, ordered with dependents before their dependencies.
     pub removable: Vec<String>,
     /// Dependencies kept, with installed packages that still require each.
-    /// The owner list can be empty when dependency information is incomplete.
     pub kept: Vec<(String, Vec<String>)>,
-    /// Installed packages whose records predate dependency tracking.
-    pub unknown: Vec<String>,
     /// Whether the project explicitly declares `root` in any dependency group.
     pub project_declared: bool,
     /// Kept dependencies declared by the project or needed transitively by it.
@@ -86,18 +79,10 @@ pub fn removal_plan(
         .iter()
         .filter(|p| {
             key(&p.name) != root_key
-                && p.dependencies
-                    .as_ref()
-                    .is_some_and(|deps| deps.iter().any(|d| key(d) == root_key))
+                && p.dependencies.iter().any(|d| key(d) == root_key)
         })
         .map(|p| p.name.clone())
         .collect();
-    let unknown = installed
-        .iter()
-        .filter(|p| p.dependencies.is_none())
-        .map(|p| p.name.clone())
-        .collect::<Vec<_>>();
-
     // Protect the closure, not just the project declarations: keeping a
     // declared package while removing something it needs would still break it.
     let project_declared = project_roots.iter().any(|name| key(name) == root_key);
@@ -107,86 +92,73 @@ pub fn removal_plan(
         let name = key(&name);
         if project_required.insert(name.clone())
             && let Some(record) = records.get(&name)
-            && let Some(dependencies) = &record.dependencies
         {
-            project_queue.extend(dependencies.iter().cloned());
+            project_queue.extend(record.dependencies.iter().cloned());
         }
     }
 
     // Only installed dependencies reachable from the requested package can
     // be candidates. A missing dependency has no record or files to remove.
     let mut reachable = HashSet::new();
-    let mut queue = root.dependencies.clone().unwrap_or_default();
+    let mut queue = root.dependencies.clone();
     while let Some(name) = queue.pop() {
         let name = key(&name);
         if name == root_key || !reachable.insert(name.clone()) {
             continue;
         }
         if let Some(record) = records.get(&name) {
-            queue.extend(record.dependencies.clone().unwrap_or_default());
+            queue.extend(record.dependencies.iter().cloned());
         } else {
             reachable.remove(&name);
         }
     }
 
-    // Unknown records could depend on any candidate; never guess that a
-    // dependency is safe to remove when the installed graph is incomplete.
     let mut removable = Vec::new();
     let mut kept = Vec::new();
-    if !unknown.is_empty() {
-        let mut names: Vec<_> = reachable.iter().map(|n| records[n].name.clone()).collect();
-        names.sort();
-        kept.extend(names.into_iter().map(|name| (name, Vec::new())));
-    } else {
-        let mut remaining = reachable;
-        // Peel off candidates with no surviving dependents, then repeat: a
-        // dependency may become removable after its owner is removed. What
-        // remains is shared, project-protected, or part of a cycle; leave it
-        // in place rather than guess an order that would break a survivor.
-        loop {
-            let mut ready: Vec<_> = remaining
-                .iter()
-                .filter(|candidate| {
-                    !project_required.contains(*candidate)
-                        && !installed.iter().any(|p| {
-                            let owner = key(&p.name);
-                            owner != root_key
-                                && owner != **candidate
-                                && !removable.iter().any(|r: &String| key(r) == owner)
-                                && p.dependencies
-                                    .as_ref()
-                                    .is_some_and(|deps| deps.iter().any(|d| key(d) == **candidate))
-                        })
-                })
-                .cloned()
-                .collect();
-            ready.sort();
-            if ready.is_empty() {
-                break;
-            }
-            for name in ready {
-                remaining.remove(&name);
-                removable.push(records[&name].name.clone());
-            }
+    let mut remaining = reachable;
+    // Peel off candidates with no surviving dependents, then repeat: a
+    // dependency may become removable after its owner is removed. What
+    // remains is shared, project-protected, or part of a cycle; leave it
+    // in place rather than guess an order that would break a survivor.
+    loop {
+        let mut ready: Vec<_> = remaining
+            .iter()
+            .filter(|candidate| {
+                !project_required.contains(*candidate)
+                    && !installed.iter().any(|p| {
+                        let owner = key(&p.name);
+                        owner != root_key
+                            && owner != **candidate
+                            && !removable.iter().any(|r: &String| key(r) == owner)
+                            && p.dependencies.iter().any(|d| key(d) == **candidate)
+                    })
+            })
+            .cloned()
+            .collect();
+        ready.sort();
+        if ready.is_empty() {
+            break;
         }
-        let mut names: Vec<_> = remaining.into_iter().collect();
-        names.sort();
-        for name in names {
-            let owners = installed
-                .iter()
-                .filter(|p| {
-                    let owner = key(&p.name);
-                    owner != root_key
-                        && owner != name
-                        && !removable.iter().any(|r| key(r) == owner)
-                        && p.dependencies
-                            .as_ref()
-                            .is_some_and(|deps| deps.iter().any(|d| key(d) == name))
-                })
-                .map(|p| p.name.clone())
-                .collect();
-            kept.push((records[&name].name.clone(), owners));
+        for name in ready {
+            remaining.remove(&name);
+            removable.push(records[&name].name.clone());
         }
+    }
+    let mut names: Vec<_> = remaining.into_iter().collect();
+    names.sort();
+    for name in names {
+        let owners = installed
+            .iter()
+            .filter(|p| {
+                let owner = key(&p.name);
+                owner != root_key
+                    && owner != name
+                    && !removable.iter().any(|r| key(r) == owner)
+                    && p.dependencies.iter().any(|d| key(d) == name)
+            })
+            .map(|p| p.name.clone())
+            .collect();
+        kept.push((records[&name].name.clone(), owners));
     }
     let project_kept = kept
         .iter()
@@ -198,7 +170,6 @@ pub fn removal_plan(
         dependents,
         removable,
         kept,
-        unknown,
         project_declared,
         project_kept,
     })
@@ -217,7 +188,11 @@ mod tests {
             installed_at: 0,
             target: "test".into(),
             files: vec![],
-            dependencies: deps.map(|d| d.iter().map(|s| s.to_string()).collect()),
+            dependencies: deps
+                .expect("test packages declare dependencies")
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
             skipped_hooks: vec![],
             relinked: false,
             relink_folders: vec![],
@@ -283,15 +258,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_records_and_cycles_never_cause_unsafe_automatic_removal() {
-        let records = vec![
-            package("root", Some(&["a"])),
-            package("a", Some(&[])),
-            package("old", None),
-        ];
-        let plan = removal_plan(&records, "root", &[]).unwrap();
-        assert!(plan.removable.is_empty());
-        assert_eq!(plan.unknown, ["old"]);
+    fn cycles_are_not_removed_automatically() {
         let records = vec![
             package("root", Some(&["a"])),
             package("a", Some(&["b"])),

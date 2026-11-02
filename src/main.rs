@@ -550,18 +550,17 @@ fn cmd_targets() -> Result<()> {
 }
 
 /// The manifest a command belongs to: `--manifest` names it; else the venv's
-/// repo when one is in effect; else `--project`'s; else the nearest
+/// bound manifest when a venv is in effect; else `--project`'s; else the nearest
 /// `lvpm.toml` at or above the working directory. None is fine — a package
 /// can be installed without a project.
 fn manifest_for(
     cli: &Cli,
     explicit: Option<&Path>,
-    repo: Option<&Path>,
+    venv: Option<&venv::Venv>,
 ) -> Result<Option<(PathBuf, project::Project)>> {
-    let path = match (explicit, repo, &cli.project) {
+    let path = match (explicit, venv, &cli.project) {
         (Some(p), _, _) => Some(p.to_path_buf()),
-        // A venv created with `--manifest` may have no `lvpm.toml` beside it.
-        (None, Some(r), _) => Some(r.join(project::FILE_NAME)).filter(|p| p.is_file()),
+        (None, Some(v), _) => Some(v.manifest_path().context("venv has no bound manifest")?),
         (None, None, Some(dir)) => Some(dir.join(project::FILE_NAME)).filter(|p| p.is_file()),
         (None, None, None) => project::find_manifest(&std::env::current_dir()?),
     };
@@ -653,34 +652,31 @@ fn cmd_uninstall(cli: &Cli, package: Option<&str>, all: bool, with_deps: bool, k
     let roots = dest.store();
     let names: Vec<String> = match (package, all) {
         (Some(p), _) => {
-            let installed = install::list_installed_checked(&roots)?;
-            let project_roots = match &dest {
-                Destination::Venv(v) => project_uninstall_roots(&v.repo)?,
-                _ => Vec::new(),
+            let installed = install::list_installed(&roots)?;
+            let project_manifest = match &dest {
+                Destination::Venv(v) => Some(v.manifest_path().context("venv has no bound manifest")?),
+                _ => None,
             };
+            let project_roots = match &project_manifest {
+                Some(path) => project_uninstall_roots(path)?,
+                None => Vec::new(),
+            };
+            let manifest_name = project_manifest.as_ref().and_then(|p| p.file_name())
+                .map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "project manifest".into());
             let plan = dependency::removal_plan(&installed, p, &project_roots)?;
             if plan.project_declared {
-                eprintln!("warning: {} is declared in {}; uninstall does not edit the manifest", plan.root, project::FILE_NAME);
+                eprintln!("warning: {} is declared in {}; uninstall does not edit the manifest", plan.root, manifest_name);
             }
             if !plan.dependents.is_empty() {
                 eprintln!("warning: {} is required by installed packages: {}", plan.root, plan.dependents.join(", "));
             }
-            if !plan.unknown.is_empty() {
-                eprintln!(
-                    "warning: dependency information is missing for: {}; dependency checks are incomplete. \
-                     Uninstall and reinstall those packages to record their dependencies.",
-                    plan.unknown.join(", ")
-                );
-            }
             for (name, owners) in &plan.kept {
                 if plan.project_kept.iter().any(|kept| kept.eq_ignore_ascii_case(name)) {
                     if project_roots.iter().any(|root| root.eq_ignore_ascii_case(name)) {
-                        eprintln!("keeping {name}: declared in {}", project::FILE_NAME);
+                        eprintln!("keeping {name}: declared in {manifest_name}");
                     } else {
-                        eprintln!("keeping {name}: required by a package declared in {}", project::FILE_NAME);
+                        eprintln!("keeping {name}: required by a package declared in {manifest_name}");
                     }
-                } else if owners.is_empty() {
-                    eprintln!("keeping {name}: dependency information is incomplete");
                 } else {
                     eprintln!("keeping {name}: still required by {}", owners.join(", "));
                 }
@@ -752,12 +748,8 @@ fn cmd_uninstall(cli: &Cli, package: Option<&str>, all: bool, with_deps: bool, k
     Ok(())
 }
 
-fn project_uninstall_roots(repo: &Path) -> Result<Vec<String>> {
-    let path = repo.join(project::FILE_NAME);
-    if !path.try_exists().with_context(|| format!("checking {}", path.display()))? {
-        return Ok(Vec::new());
-    }
-    let manifest = read_manifest(&path)?;
+fn project_uninstall_roots(path: &Path) -> Result<Vec<String>> {
+    let manifest = read_manifest(path)?;
     Ok(manifest.declared_dependency_names().map(str::to_owned).collect())
 }
 
@@ -894,7 +886,7 @@ fn cmd_install(
     // The project this install belongs to, if any: its `[sources]` count even
     // when a single package is named. Inside a project a bare `lvpm install`
     // means the manifest's dependencies — the way `npm install` does.
-    let found = manifest_for(cli, manifest, venv.as_ref().map(|v| v.repo.as_path()))?;
+    let found = manifest_for(cli, manifest, venv.as_ref())?;
     let (wanted, from_manifest) = match (package, &found) {
         (Some(p), _) => {
             let w = match p.split_once('@') {
@@ -1983,12 +1975,41 @@ mod tests {
     fn uninstall_roots_include_main_and_all_named_groups() {
         let dir = std::env::temp_dir().join(format!("lvpm-uninstall-roots-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        assert!(project_uninstall_roots(&dir).unwrap().is_empty());
+        let path = dir.join(project::FILE_NAME);
+        assert!(project_uninstall_roots(&path).is_err());
         std::fs::write(dir.join(project::FILE_NAME),
             "[dependencies]\nmain_package = \"*\"\n[dependencies.test]\ntest_package = \"*\"\n").unwrap();
-        assert_eq!(project_uninstall_roots(&dir).unwrap(), ["main_package", "test_package"]);
+        assert_eq!(project_uninstall_roots(&path).unwrap(), ["main_package", "test_package"]);
         std::fs::write(dir.join(project::FILE_NAME), "invalid = [").unwrap();
-        assert!(project_uninstall_roots(&dir).is_err());
+        assert!(project_uninstall_roots(&path).is_err());
+        let vipm = dir.join("vipm.toml");
+        std::fs::write(&vipm, "[dependencies]\ncommon = \"1.0\"\n[dev-dependencies]\ntest = \"1.0\"\n").unwrap();
+        assert_eq!(project_uninstall_roots(&vipm).unwrap(), ["common", "test"]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn venv_uses_its_bound_manifest_and_reports_when_it_is_missing() {
+        let dir = std::env::temp_dir().join(format!("lvpm-bound-manifest-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let vipm = dir.join("vipm.toml");
+        std::fs::write(&vipm, "[dependencies]\npinned = \"1.0\"\n").unwrap();
+        std::fs::write(dir.join("lvpm.toml"), "[dependencies]\nother = \"*\"\n").unwrap();
+        let cli = Cli::try_parse_from(["lvpm", "install"]).unwrap();
+        let mut v = venv::Venv {
+            repo: dir.clone(), dir: dir.join(".lv-venv"),
+            target: target::LvTarget { version: 26.3, bitness: 64, path: dir.join("LabVIEW") },
+            port: 3456, manifest: Some(PathBuf::from("vipm.toml")),
+        };
+        let (path, project) = manifest_for(&cli, None, Some(&v)).unwrap().unwrap();
+        assert_eq!(path, vipm);
+        assert_eq!(project.declared_dependency_names().collect::<Vec<_>>(), ["pinned"]);
+        let (_, override_project) = manifest_for(&cli, Some(&dir.join("lvpm.toml")), Some(&v)).unwrap().unwrap();
+        assert_eq!(override_project.declared_dependency_names().collect::<Vec<_>>(), ["other"]);
+        std::fs::remove_file(&vipm).unwrap();
+        assert!(manifest_for(&cli, None, Some(&v)).is_err());
+        v.manifest = None;
+        assert!(manifest_for(&cli, None, Some(&v)).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

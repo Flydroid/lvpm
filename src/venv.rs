@@ -24,7 +24,7 @@ const MIN_LV: f64 = 24.0;
 
 #[derive(Debug, Clone)]
 pub struct Venv {
-    /// The repo root — where `lvpm.toml` lives.
+    /// The repo root — where the project manifest lives.
     pub repo: PathBuf,
     /// The configured project environment directory.
     pub dir: PathBuf,
@@ -34,6 +34,8 @@ pub struct Venv {
     /// own, so the user's primary IDE on the default port is never mistaken
     /// for it.
     pub port: u16,
+    /// Manifest filename relative to the repo; absent only when removing an old venv.
+    pub manifest: Option<PathBuf>,
 }
 
 /// What `venv create` pins. The payload is relinked and saved in this
@@ -48,6 +50,8 @@ struct Binding {
     bitness: u8,
     port: u16,
     created_at: u64,
+    #[serde(default)]
+    manifest: Option<PathBuf>,
 }
 
 fn binding_path(dir: &Path) -> PathBuf {
@@ -70,6 +74,11 @@ fn reject_legacy(dir: &Path) -> Result<()> {
 }
 
 impl Venv {
+    /// The manifest pinned at creation, when this binding records one.
+    pub fn manifest_path(&self) -> Option<PathBuf> {
+        self.manifest.as_ref().map(|name| self.repo.join(name))
+    }
+
     /// The LVAddons location holding one addon per package.
     pub fn packages_dir(&self) -> PathBuf {
         self.dir.join("packages")
@@ -213,6 +222,9 @@ fn load_inner(repo: &Path, allow_legacy: bool) -> Result<Venv> {
     let text = std::fs::read_to_string(&bp)
         .with_context(|| format!("no venv in {} — `lvpm venv create` makes one", repo.display()))?;
     let b: Binding = serde_json::from_str(&text).with_context(|| format!("reading {}", bp.display()))?;
+    ensure!(allow_legacy || b.manifest.is_some(),
+        "{} has an unsupported venv binding without a manifest — `lvpm venv remove`, then `lvpm venv create`",
+        bp.display());
 
     let target = target::detect()?
         .into_iter()
@@ -225,7 +237,11 @@ fn load_inner(repo: &Path, allow_legacy: bool) -> Result<Venv> {
                 b.target_path
             )
         })?;
-    Ok(Venv { repo, dir, target, port: b.port })
+    if let Some(name) = &b.manifest {
+        ensure!(name.components().count() == 1 && name.file_name().is_some(),
+            "invalid manifest filename in {}", bp.display());
+    }
+    Ok(Venv { repo, dir, target, port: b.port, manifest: b.manifest })
 }
 
 /// Create the configured venv directory for the project at or above `start` (or at `start`
@@ -314,6 +330,8 @@ pub fn create(
     // absolute paths. Self-ignoring, the way cargo's `target/` is.
     std::fs::write(dir.join(".gitignore"), "*\n")?;
     let port = port_for(&dir);
+    let manifest = PathBuf::from(manifest_path.file_name()
+        .ok_or_else(|| anyhow!("manifest {} has no filename", manifest_path.display()))?);
     let b = Binding {
         target_key: target.key(),
         target_path: target.path.to_string_lossy().into_owned(),
@@ -324,8 +342,9 @@ pub fn create(
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0),
+        manifest: Some(manifest.clone()),
     };
-    let v = Venv { repo, dir, target, port };
+    let v = Venv { repo, dir, target, port, manifest: Some(manifest) };
     // The venv's own ini starts here, as a snapshot of the user's settings
     // for this LabVIEW; from now on it is the venv's, and what is set in the
     // venv IDE stays in it. Written before the binding: the binding is what
@@ -435,10 +454,27 @@ mod tests {
     }
 
     #[test]
+    fn binding_remembers_manifest_and_old_binding_cannot_be_used() {
+        let old = r#"{"target_key":"k","target_path":"p","version":26.0,"bitness":64,"port":3500,"created_at":1}"#;
+        let mut binding: Binding = serde_json::from_str(old).unwrap();
+        assert!(binding.manifest.is_none());
+        let repo = scratch_dir("old-binding");
+        let dir = repo.join(config::DEFAULT_VENV_DIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(binding_path(&dir), old).unwrap();
+        assert!(load_inner(&repo, false).unwrap_err().to_string().contains("unsupported venv binding"));
+        binding.manifest = Some(PathBuf::from("vipm.toml"));
+        let stored = serde_json::to_string(&binding).unwrap();
+        let restored: Binding = serde_json::from_str(&stored).unwrap();
+        assert_eq!(restored.manifest, Some(PathBuf::from("vipm.toml")));
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
     fn environment_paths_and_package_names_are_scoped_to_the_new_layout() {
         let dir = scratch_dir("paths");
         let target = LvTarget { version: 26.3, bitness: 64, path: dir.join("LabVIEW") };
-        let v = Venv { repo: dir.clone(), dir: dir.clone(), target, port: 3456 };
+        let v = Venv { repo: dir.clone(), dir: dir.clone(), target, port: 3456, manifest: None };
         assert_eq!(v.packages_dir(), dir.join("packages"));
         assert_eq!(v.ini_path(), dir.join("labview.ini"));
         assert_eq!(v.objcache_dir(), dir.join("objcache"));
