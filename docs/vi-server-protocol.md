@@ -146,7 +146,13 @@ encoder serves both the wire and any offline path rewriting.
 
 An absolute Windows path contributes its drive letter as the first component:
 `C:\Git\lvpm\tools\X.vi` → `01 "C" 03 "Git" 04 "lvpm" 05 "tools" 06 "X.vi"`.
-The length field covers the count field plus the components.
+The length field covers the count field plus the components. The count field
+is really a `u16` kind (0 absolute, 1 relative, 2 not a path) and a `u16`
+count; an absolute path's kind is 0, so the two read the same.
+
+On Linux there is no drive and no root component: LabVIEW 2026 Q3 for Linux
+sends and takes `/usr/local/x.vi` as `03 "usr" 05 "local" 04 "x.vi"`, kind 0.
+Decoded, such a record has to be rooted again, or it reads as a relative path.
 
 ## `GetVIRef` (3)
 

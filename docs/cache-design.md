@@ -530,6 +530,5 @@ This design is the "package cache shared between venvs" item under
 _Packaging and distribution_, done in a way that also gives the "lvpm.lock"
 item (under _The manifest and the lockfile_) something concrete to key
 against, and takes over from the removed `--repo` flag with `lvpm cache add`
-as described in the
-manifest section of the README. Implementation should land as its own
+as described in [manifest.md](manifest.md#sources). Implementation should land as its own
 roadmap iteration once this draft settles.

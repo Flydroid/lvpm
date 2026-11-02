@@ -17,10 +17,18 @@
 //!
 //! [nipm.dependencies]               # NI Package Manager packages, reported only
 //! ni-daqmx-labview-support = "26.0"
+//!
+//! [dependencies.test]                # installed only when selected (--with test)
+//! jki_lib_caraya = "*"
+//!
+//! [dependencies.ci]
+//! include-groups = ["test"]         # everything in test, plus:
+//! ni_vi_analyzer_tests = "1.2.0.3"
 //! ```
 //!
 //! `labview` is a minimum: a venv binds to that version or a newer one, never
-//! an older one.
+//! an older one. Full reference, including `vipm.toml` compatibility:
+//! `docs/manifest.md`.
 
 use crate::version::Version;
 use anyhow::{Context, Result, bail};
@@ -30,6 +38,12 @@ use std::path::{Path, PathBuf};
 
 /// The manifest's file name — what marks a directory as a project root.
 pub const FILE_NAME: &str = "lvpm.toml";
+
+/// The group name `--with` / `--without` / `--only` use for `[dependencies]`.
+pub const MAIN_GROUP: &str = "main";
+
+/// The reserved key in a group table naming the groups it includes.
+const INCLUDE_KEY: &str = "include-groups";
 
 /// What a dependency line asks for.
 #[derive(Debug, Clone, PartialEq)]
@@ -84,6 +98,27 @@ pub struct Project {
     pub dependencies: Vec<(String, Constraint)>,
     /// `[nipm.dependencies]` names, for reporting only.
     pub nipm: Vec<String>,
+    /// `[dependencies.<name>]` group tables, in file order.
+    pub groups: Vec<(String, Group)>,
+}
+
+/// One `[dependencies.<name>]` table: packages the project needs only
+/// sometimes (tests, CI, builds). Never installed unless selected.
+#[derive(Debug, Default, PartialEq)]
+pub struct Group {
+    /// `include-groups`: groups whose packages this one takes as well.
+    pub include: Vec<String>,
+    /// The group's own packages, in file order, read like `[dependencies]`.
+    pub dependencies: Vec<(String, Constraint)>,
+}
+
+/// What a manifest install takes once groups are chosen.
+#[derive(Debug, PartialEq)]
+pub struct Selection {
+    /// The groups in effect, includes expanded, `main` first when present.
+    pub groups: Vec<String>,
+    /// Their packages merged in that order, each name once.
+    pub dependencies: Vec<(String, Constraint)>,
 }
 
 impl Default for Project {
@@ -96,6 +131,7 @@ impl Default for Project {
             default_sources: true,
             dependencies: Vec::new(),
             nipm: Vec::new(),
+            groups: Vec::new(),
         }
     }
 }
@@ -110,6 +146,90 @@ impl Project {
             }
         }
         Ok(self.sources.iter().map(|(_, s)| s.clone()).collect())
+    }
+
+    /// The packages a manifest install takes. By default only `main`
+    /// (`[dependencies]`); `with` adds groups, `without` removes them after
+    /// includes are expanded, and a non-empty `only` replaces the default.
+    /// A package named by two selected groups must ask for the same version
+    /// in both. Names are trimmed and empty ones dropped, so `--with "a, b"`
+    /// and a trailing comma read as intended.
+    pub fn select(&self, with: &[String], without: &[String], only: &[String]) -> Result<Selection> {
+        fn clean(list: &[String]) -> Vec<&str> {
+            list.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).collect()
+        }
+        let (with, without, only) = (clean(with), clean(without), clean(only));
+        let roots: Vec<&str> = match only.is_empty() {
+            true => std::iter::once(MAIN_GROUP).chain(with.iter().copied()).collect(),
+            false => only,
+        };
+        for g in roots.iter().chain(without.iter()).copied() {
+            self.group_deps(g)?;
+        }
+        let mut order: Vec<&str> = Vec::new();
+        for g in roots {
+            self.expand(g, &mut Vec::new(), &mut order)?;
+        }
+        order.retain(|g| !without.contains(g));
+
+        let mut dependencies: Vec<(String, Constraint)> = Vec::new();
+        let mut owner: Vec<&str> = Vec::new();
+        for &g in &order {
+            for (name, c) in self.group_deps(g)? {
+                match dependencies.iter().position(|(n, _)| n.eq_ignore_ascii_case(name)) {
+                    Some(i) if &dependencies[i].1 == c => {}
+                    Some(i) => bail!(
+                        "{name} is asked for as \"{name}{}\" in {} but \"{name}{c}\" in {g} — \
+                         make them agree",
+                        dependencies[i].1,
+                        owner[i]
+                    ),
+                    None => {
+                        dependencies.push((name.clone(), c.clone()));
+                        owner.push(g);
+                    }
+                }
+            }
+        }
+        Ok(Selection { groups: order.into_iter().map(String::from).collect(), dependencies })
+    }
+
+    fn group_deps(&self, name: &str) -> Result<&[(String, Constraint)]> {
+        if name == MAIN_GROUP {
+            return Ok(&self.dependencies);
+        }
+        match self.groups.iter().find(|(n, _)| n == name) {
+            Some((_, g)) => Ok(&g.dependencies),
+            None => bail!(
+                "no dependency group {name:?} in the manifest (groups: {})",
+                std::iter::once(MAIN_GROUP)
+                    .chain(self.groups.iter().map(|(n, _)| n.as_str()))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }
+    }
+
+    /// Depth-first over `include-groups`: includes land before the group
+    /// that names them, each group once; a group reached again while still
+    /// on `stack` is a cycle.
+    fn expand<'a>(&'a self, name: &'a str, stack: &mut Vec<&'a str>, order: &mut Vec<&'a str>) -> Result<()> {
+        if stack.contains(&name) {
+            stack.push(name);
+            bail!("{INCLUDE_KEY} forms a cycle: {}", stack.join(" -> "));
+        }
+        if order.contains(&name) {
+            return Ok(());
+        }
+        stack.push(name);
+        if let Some((_, g)) = self.groups.iter().find(|(n, _)| n == name) {
+            for inc in &g.include {
+                self.expand(inc, stack, order)?;
+            }
+        }
+        stack.pop();
+        order.push(name);
+        Ok(())
     }
 }
 
@@ -168,14 +288,62 @@ pub fn parse(text: &str) -> Result<Project> {
         }
     }
     for (name, value) in f.dependencies {
-        let toml::Value::String(s) = value else {
-            bail!("[dependencies] {name}: expected a quoted version, got {}", value.type_str());
-        };
-        let c = Constraint::parse(&s).with_context(|| format!("[dependencies] {name}"))?;
-        p.dependencies.push((name, c));
+        match value {
+            toml::Value::String(s) => {
+                let c = Constraint::parse(&s).with_context(|| format!("[dependencies] {name}"))?;
+                p.dependencies.push((name, c));
+            }
+            toml::Value::Table(t) => {
+                let label = format!("[dependencies.{name}]");
+                if name == MAIN_GROUP {
+                    bail!("{label}: `{MAIN_GROUP}` is the name of [dependencies]; pick another");
+                }
+                let mut g = Group::default();
+                for (key, value) in t {
+                    if key == INCLUDE_KEY {
+                        g.include = string_array(&label, &key, value)?;
+                    } else {
+                        let c = dependency(&label, &key, value)?;
+                        g.dependencies.push((key, c));
+                    }
+                }
+                p.groups.push((name, g));
+            }
+            other => bail!(
+                "[dependencies] {name}: expected a quoted version or group table, got {}",
+                other.type_str()
+            ),
+        }
     }
     p.nipm = f.nipm.dependencies.into_iter().map(|(k, _)| k).collect();
+    for (gname, g) in &p.groups {
+        for inc in &g.include {
+            if !p.groups.iter().any(|(n, _)| n == inc) {
+                bail!("[dependencies.{gname}] {INCLUDE_KEY}: no group {inc:?}");
+            }
+        }
+    }
     Ok(p)
+}
+
+fn dependency(label: &str, name: &str, value: toml::Value) -> Result<Constraint> {
+    let toml::Value::String(s) = value else {
+        bail!("{label} {name}: expected a quoted version, got {}", value.type_str());
+    };
+    Constraint::parse(&s).with_context(|| format!("{label} {name}"))
+}
+
+fn string_array(label: &str, key: &str, value: toml::Value) -> Result<Vec<String>> {
+    let toml::Value::Array(items) = value else {
+        bail!("{label} {key}: expected an array of group names, got {}", value.type_str());
+    };
+    items
+        .into_iter()
+        .map(|v| match v {
+            toml::Value::String(s) => Ok(s),
+            other => bail!("{label} {key}: expected group names, got {}", other.type_str()),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -268,5 +436,193 @@ ni-daqmx-labview-support = "26.0.0.49434-0+f282"
 
         let folder = parse("[sources]\nlocal = \"./Dependencies\"\n").unwrap();
         assert!(folder.resolved_sources().is_err(), "a path on disk is not a source");
+    }
+
+    const GROUPS: &str = r#"
+[dependencies]
+delacor_lib_qmh = "7.1.2.1547"
+
+[dependencies.test]
+jki_lib_caraya = "*"
+oglib_error = ">=6.0"
+
+[dependencies.ci]
+include-groups = ["test"]
+ni_vi_analyzer_tests = "1.2.0.3"
+
+[dependencies.build]
+vipm_package_builder = "*"
+"#;
+
+    fn names(s: &Selection) -> Vec<&str> {
+        s.dependencies.iter().map(|(n, _)| n.as_str()).collect()
+    }
+
+    fn strings(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn groups_parse_in_file_order_with_includes() {
+        let p = parse(GROUPS).unwrap();
+        let gnames: Vec<&str> = p.groups.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(gnames, ["test", "ci", "build"]);
+        assert_eq!(p.groups[1].1.include, ["test"]);
+        assert_eq!(
+            p.groups[1].1.dependencies,
+            vec![("ni_vi_analyzer_tests".into(), Constraint::Exact(Version::parse("1.2.0.3")))]
+        );
+        assert_eq!(p.groups[0].1.dependencies[1].1, Constraint::AtLeast(Version::parse("6.0")));
+    }
+
+    #[test]
+    fn selection_defaults_to_main_and_follows_with_without_only() {
+        let p = parse(GROUPS).unwrap();
+        let none: Vec<String> = Vec::new();
+
+        let s = p.select(&none, &none, &none).unwrap();
+        assert_eq!(s.groups, ["main"]);
+        assert_eq!(names(&s), ["delacor_lib_qmh"]);
+
+        let s = p.select(&strings(&["ci"]), &none, &none).unwrap();
+        assert_eq!(s.groups, ["main", "test", "ci"]);
+        assert_eq!(names(&s), ["delacor_lib_qmh", "jki_lib_caraya", "oglib_error", "ni_vi_analyzer_tests"]);
+
+        let s = p.select(&strings(&["ci"]), &strings(&["test"]), &none).unwrap();
+        assert_eq!(s.groups, ["main", "ci"]);
+
+        let s = p.select(&none, &none, &strings(&["build"])).unwrap();
+        assert_eq!(s.groups, ["build"]);
+        assert_eq!(names(&s), ["vipm_package_builder"]);
+
+        let s = p.select(&none, &strings(&["main"]), &none).unwrap();
+        assert!(s.dependencies.is_empty());
+    }
+
+    #[test]
+    fn unknown_groups_cycles_and_disagreements_are_errors() {
+        let p = parse(GROUPS).unwrap();
+        let none: Vec<String> = Vec::new();
+        let err = p.select(&strings(&["dev"]), &none, &none).unwrap_err().to_string();
+        assert!(err.contains("\"dev\"") && err.contains("main, test, ci, build"), "{err}");
+        assert!(p.select(&none, &strings(&["nope"]), &none).is_err());
+
+        let cyc = parse(
+            "[dependencies.a]\ninclude-groups = [\"b\"]\n[dependencies.b]\ninclude-groups = [\"a\"]\n",
+        )
+        .unwrap();
+        let err = cyc.select(&strings(&["a"]), &none, &none).unwrap_err().to_string();
+        assert!(err.contains("a -> b -> a"), "{err}");
+
+        let clash = parse(
+            "[dependencies]\noglib_error = \"6.0\"\n[dependencies.test]\nOGLIB_ERROR = \">=6.0\"\n",
+        )
+        .unwrap();
+        let err = clash.select(&strings(&["test"]), &none, &none).unwrap_err().to_string();
+        assert!(err.contains("in main") && err.contains("in test"), "{err}");
+
+        let same = parse(
+            "[dependencies]\noglib_error = \"6.0\"\n[dependencies.test]\noglib_error = \"6.0\"\n",
+        )
+        .unwrap();
+        assert_eq!(names(&same.select(&strings(&["test"]), &none, &none).unwrap()), ["oglib_error"]);
+    }
+
+    #[test]
+    fn malformed_groups_are_rejected_when_read() {
+        assert!(parse("[dependencies.main]\nx = \"1\"\n").is_err(), "main is reserved");
+        assert!(parse("[dependencies.t]\ninclude-groups = \"u\"\n").is_err(), "not an array");
+        assert!(parse("[dependencies.t]\ninclude-groups = [\"u\"]\n").is_err(), "unknown include");
+        assert!(parse("[dependencies.t]\nx = 1.0\n").is_err(), "unquoted version");
+    }
+
+    #[test]
+    fn several_groups_per_flag_and_duplicates() {
+        let p = parse(GROUPS).unwrap();
+        let none: Vec<String> = Vec::new();
+
+        let s = p.select(&strings(&["test", "build"]), &none, &none).unwrap();
+        assert_eq!(s.groups, ["main", "test", "build"]);
+        assert_eq!(names(&s), ["delacor_lib_qmh", "jki_lib_caraya", "oglib_error", "vipm_package_builder"]);
+
+        let s = p.select(&strings(&["test", "test"]), &none, &none).unwrap();
+        assert_eq!(s.groups, ["main", "test"]);
+        let s = p.select(&strings(&["ci", "test"]), &none, &none).unwrap();
+        assert_eq!(s.groups, ["main", "test", "ci"], "test once, before the group including it");
+        let s = p.select(&strings(&["main"]), &none, &none).unwrap();
+        assert_eq!(s.groups, ["main"]);
+
+        let s = p.select(&strings(&["ci", "build"]), &strings(&["test", "build"]), &none).unwrap();
+        assert_eq!(s.groups, ["main", "ci"]);
+        assert_eq!(names(&s), ["delacor_lib_qmh", "ni_vi_analyzer_tests"]);
+    }
+
+    #[test]
+    fn only_takes_several_groups_and_expands_includes() {
+        let p = parse(GROUPS).unwrap();
+        let none: Vec<String> = Vec::new();
+
+        let s = p.select(&none, &none, &strings(&["main", "build"])).unwrap();
+        assert_eq!(s.groups, ["main", "build"]);
+        let s = p.select(&none, &none, &strings(&["build", "main"])).unwrap();
+        assert_eq!(s.groups, ["build", "main"], "order as given");
+
+        let s = p.select(&none, &none, &strings(&["ci"])).unwrap();
+        assert_eq!(s.groups, ["test", "ci"]);
+        assert_eq!(names(&s), ["jki_lib_caraya", "oglib_error", "ni_vi_analyzer_tests"]);
+        assert!(p.select(&none, &none, &strings(&["nope"])).is_err());
+    }
+
+    #[test]
+    fn without_a_group_that_was_not_selected_changes_nothing() {
+        let p = parse(GROUPS).unwrap();
+        let none: Vec<String> = Vec::new();
+        let s = p.select(&none, &strings(&["build"]), &none).unwrap();
+        assert_eq!(s.groups, ["main"]);
+        let s = p.select(&none, &strings(&["main"]), &strings(&[])).unwrap();
+        assert!(s.groups.is_empty() && s.dependencies.is_empty());
+    }
+
+    #[test]
+    fn a_shared_include_is_expanded_once_in_a_stable_order() {
+        let p = parse(
+            r#"
+[dependencies.d]
+pkg_d = "*"
+[dependencies.b]
+include-groups = ["d"]
+pkg_b = "*"
+[dependencies.c]
+include-groups = ["d"]
+pkg_c = "*"
+[dependencies.a]
+include-groups = ["b", "c"]
+pkg_a = "*"
+"#,
+        )
+        .unwrap();
+        let none: Vec<String> = Vec::new();
+        let s = p.select(&strings(&["a"]), &none, &none).unwrap();
+        assert_eq!(s.groups, ["main", "d", "b", "c", "a"]);
+        assert_eq!(names(&s), ["pkg_d", "pkg_b", "pkg_c", "pkg_a"]);
+
+        let s = p.select(&strings(&["a"]), &strings(&["d"]), &none).unwrap();
+        assert_eq!(s.groups, ["main", "b", "c", "a"], "--without applies after includes");
+    }
+
+    #[test]
+    fn names_are_trimmed_empty_entries_dropped_and_case_kept() {
+        let p = parse(GROUPS).unwrap();
+        let none: Vec<String> = Vec::new();
+
+        let s = p.select(&strings(&[" test", "build ", ""]), &none, &none).unwrap();
+        assert_eq!(s.groups, ["main", "test", "build"]);
+        let s = p.select(&strings(&["ci"]), &strings(&[" test "]), &none).unwrap();
+        assert_eq!(s.groups, ["main", "ci"]);
+        let s = p.select(&none, &strings(&["  "]), &strings(&["", " "])).unwrap();
+        assert_eq!(s.groups, ["main"], "an all-empty --only falls back to the default");
+
+        let err = p.select(&strings(&["Test"]), &none, &none).unwrap_err().to_string();
+        assert!(err.contains("\"Test\""), "group names are case-sensitive: {err}");
     }
 }

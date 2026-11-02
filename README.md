@@ -33,8 +33,10 @@ Not affiliated with JKI or NI. Working, in active development; see
 
 ## Install lvpm
 
-Windows 10/11 with LabVIEW 2020 or later. Linux target detection exists but
-is untested.
+Windows 10/11 with LabVIEW 2020 or later. On Linux, lvpm is verified against
+LabVIEW 2026 Q3 in NI's container image; take `lvpm-<version>-linux-x64.tar.gz`
+from the artifacts of a CI run, or build it from source, and see
+[docs/linux.md](docs/linux.md) for what differs there.
 
 ### With the install script
 
@@ -185,33 +187,10 @@ started for a venv relink running.
 
 ## The project manifest
 
-`lvpm.toml` at the repo root says what a project depends on and which hosted
-indexes to use. Local package folders are configured globally instead. Any
-`lvpm` command run at or below it picks it up; hosted `[sources]` apply to
-`search` and to a single-package `install` as much as to a full one.
-
-```toml
-[project]
-name = "NovaXC"
-version = "0.1.0"
-labview = "2025"                  # the oldest LabVIEW the project is meant for
-
-[sources]                         # repositories beyond the public indexes
-mirror = "http://host:8090/files" # a hosted index.vipr folder
-defaults = true                   # false: only the sources listed here
-
-[dependencies]
-delacor_lib_qmh = "7.1.2.1547"    # exactly this version
-oglib_error = ">=6.0.1"           # the newest version satisfying the floor
-jki_lib_caraya = "*"              # the newest version
-
-[nipm.dependencies]               # NI Package Manager packages: reported, not installed
-ni-daqmx-labview-support = "26.0"
-```
-
-`labview` is a minimum, not a pin: a venv binds to that version or a newer
-one. Dependencies a package carries are always floors, so what a project pins
-exactly stays exact and the rest resolves to the newest version that fits.
+`lvpm.toml` at the repo root says what a project depends on, the minimum
+LabVIEW it targets, and which hosted indexes to use. See
+[docs/manifest.md](docs/manifest.md) for the format, how it is found and
+resolved, and compatibility with VIPM's `vipm.toml`.
 
 ## Per-project dependencies (venvs)
 
@@ -450,6 +429,11 @@ differently in the container than on your machine, `--hooks` is the first
 thing to try; it starts a headless LabVIEW for them. `--relink` likewise
 when the job's output _is_ relinked packages.
 
+NI's Linux image (`nationalinstruments/labview:2026q3-linux`) works the same
+way; [docs/linux.md](docs/linux.md) has the differences, and
+[.github/workflows/build.yml](.github/workflows/build.yml) runs lvpm in it on
+every push.
+
 Two container facts worth knowing. LabVIEW allows one mode at a time per
 machine, headless or IDE, so a headless job cannot share a host with an open
 IDE. And any LabVIEW that is started (by `--hooks`, `--relink`, or the job
@@ -558,7 +542,9 @@ runs.
   but runs to completion reports as ok.
 - A failure part-way through unpacking leaves files behind with no manifest,
   and one failed download aborts the rest of the plan.
-- Windows is the tested platform.
+- Windows is the tested platform. Linux is verified against LabVIEW 2026 Q3
+  in NI's container image only, and does not yet honour a package's
+  `Exclusive_OS` ([docs/linux.md](docs/linux.md)).
 - In a venv, `PostInstall` hooks run in the venv's own LabVIEW but
   `PreInstall` ones do not (that instance only starts once the files are
   down), and file groups aimed at machine locations (`<OS ...>`, `<temp>`) are
@@ -592,6 +578,7 @@ runs.
 | `version.rs`                   | Package version ordering: OGPT `version-release`, VIPM's four-part form; not semver                                     |
 | `src/lv-src/relink-package.vi` | The relink VI embedded into the executable at build time (LabVIEW 2020)                                                 |
 | `scripts/install.ps1`          | Download, verify and install the latest release                                                                         |
+| `e2e/`                         | `lvpm-e2e`: end-to-end checks against LabVIEW for Linux and for Windows in NI's container images, with local test packages and with public ones (the LabVIEW tree must come out of install and uninstall unchanged) |
 
 ## License
 
