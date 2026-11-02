@@ -283,21 +283,29 @@ fn venv_create() -> Check {
 }
 
 fn venv_install() -> Check {
-    ok(&venv(), &["install", "--relink"]).map(drop)
+    ok(&venv(), &["install", "--relink"])?;
+    let dir = venv_dir()?;
+    exists(&dir.join("packages").join("lvpm_linux_test").join("1").join("lvaddoninfo.json"))?;
+    exists(&dir.join("packages").join("lvpm_linux_test").join("1").join("vi.lib")
+        .join("lvpm_linux_test").join("E2E Call VI.vi"))?;
+    exists(&dir.join("installed").join("lvpm_linux_test.json"))?;
+    absent(&dir.join(".lvpm"))
 }
 
 fn venv_ini() -> Check {
     let dir = venv_dir()?;
-    let ini = dir.join(".lvpm").join("labview.ini");
+    let ini = dir.join("labview.ini");
     let text = std::fs::read_to_string(&ini).map_err(|e| format!("{}: {e}", ini.display()))?;
-    let want = format!("LVAddons.AdditionalLocations={}", dir.display());
+    let location = dir.join("packages").display().to_string();
+    let location = if location.contains(' ') { format!("\"{location}\"") } else { location };
+    let want = format!("LVAddons.AdditionalLocations={location}");
     ensure(text.lines().any(|l| l.trim_end() == want), || {
         format!("no `{want}` in {}:\n{text}", ini.display())
     })
 }
 
 fn venv_launch() -> Check {
-    let json = venv_dir()?.join(".lvpm").join("venv.json");
+    let json = venv_dir()?.join("venv.json");
     let v: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&json).map_err(fail)?).map_err(fail)?;
     let port = v["port"].as_u64().ok_or("no port in venv.json")? as u16;

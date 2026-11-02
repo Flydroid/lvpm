@@ -223,27 +223,43 @@ $ lvpm launch MyProject.lvproj    # a LabVIEW that sees the venv
   on a headless machine (see [CI in a container](#ci-in-a-container-docker)).
   Every venv-mode command prints which venv it resolved to.
 - `lvpm launch [<lvproj>]` starts a LabVIEW on the venv: an ini of the
-  venv's own (`.lvpm/labview.ini`, copied from the target's `LabVIEW.ini` by
+  venv's own (`.lv-venv/labview.ini`, copied from the target's `LabVIEW.ini` by
   `lvpm venv create` without its recent-files lists, so the venv IDE never
   offers projects from outside the venv; options you set in the venv IDE
   persist; delete it
   to inherit your global settings again at the next launch) with the venv
   mounted, VI Server on a port of its
   own, and its own compiled-object cache, `LabVIEW Data` folder and temp
-  directory under `.lvpm/`, handed over with `-pref`. Your primary LabVIEW,
+  directory under `.lv-venv/`, handed over with `-pref`. Your primary LabVIEW,
   if open, is untouched, and its autosave files, cache and log
   (`LabVIEW_*_cur.txt`) are never shared with the venv's — look for the
-  venv's log in `.lvpm/temp`. The venv starts with an empty `LabVIEW Data`, so personal
+  venv's log in `.lv-venv/temp`. The venv starts with an empty `LabVIEW Data`, so personal
   customisations kept there (icon templates, right-click plugins) are not
   available in it.
 
-How it works: the venv directory is an [LVAddons](https://labviewwiki.org/wiki/LVAddons)
+The default layout is:
+
+```text
+.lv-venv/
+  packages/<pkg>/1/    package addon and its mirrored LabVIEW tree
+  installed/           package installation records
+  venv.json            LabVIEW binding
+  labview.ini          venv-specific LabVIEW settings
+  objcache/ data/ temp/  isolated LabVIEW runtime files
+```
+
+How it works: the `packages/` directory is an [LVAddons](https://labviewwiki.org/wiki/LVAddons)
 location, one addon per package, each mirroring the LabVIEW install dir
 under `<pkg>/1/`. A LabVIEW started with `LVAddons.AdditionalLocations`
 pointing there overlays them onto its own tree, so a package in the venv
 resolves as `<vilib>/...` exactly as a globally installed one would. The VIs
 you write against it link portably, and `C:\Program Files` never changes.
 Needs LabVIEW 2024 Q1 or later.
+
+Environments created with the old layout must be recreated: close their
+LabVIEW instance, then run `lvpm venv remove`, `lvpm venv create`, and
+`lvpm install`. Removing the venv also removes its installed packages and
+venv-specific settings.
 
 Two things follow from LabVIEW reading an addon's contents at launch:
 

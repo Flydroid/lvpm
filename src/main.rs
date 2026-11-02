@@ -1579,7 +1579,7 @@ fn cmd_venv(cli: &Cli, sub: &VenvCmd) -> Result<()> {
             }
         },
         VenvCmd::Remove { yes } => {
-            let Some(v) = venv::find(cli.project.as_deref(), &cwd)? else {
+            let Some(v) = venv::find_for_removal(cli.project.as_deref(), &cwd)? else {
                 bail!("no venv at or above {}", cwd.display());
             };
             venv::remove(&v, *yes)

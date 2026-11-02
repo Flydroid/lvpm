@@ -419,6 +419,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn uninstall_prunes_package_but_preserves_packages_directory_and_state() {
+        let dir = std::env::temp_dir().join(format!("lvpm-uninstall-layout-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = LvTarget { version: 26.3, bitness: 64, path: dir.join("LabVIEW") };
+        let package = Roots::project(&dir, &target, "example");
+        let store = Roots::project_store(&dir, &target);
+        let payload = package.application.join("vi.lib").join("test.vi");
+        std::fs::create_dir_all(payload.parent().unwrap()).unwrap();
+        std::fs::write(&payload, b"test").unwrap();
+        let manifest = Manifest {
+            name: "example".into(), version: "1".into(), display_name: None, installed_at: 0,
+            target: "test".into(), files: vec![payload.to_string_lossy().into_owned()],
+            skipped_hooks: vec![], relinked: false, relink_folders: vec![],
+            post_install_vi: None, pre_install_vi: None, pre_uninstall_vi: None,
+            post_uninstall_vi: None, skipped_groups: vec![],
+        };
+        write_manifest(&package, &manifest).unwrap();
+        assert_eq!(uninstall(&store, "example").unwrap().0, 1);
+        assert!(!dir.join("packages").join("example").exists());
+        assert!(dir.join("packages").is_dir());
+        assert!(dir.join("installed").is_dir());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn rejects_traversal_and_absolute_paths() {
         assert!(safe_relative("../../etc/passwd").is_err());
         assert!(safe_relative("/etc/passwd").is_err());
