@@ -2,19 +2,17 @@
 # and run lvpm against LabVIEW for Linux in NI's container (docs/linux.md).
 name: build
 
-# Every branch, so a feature branch is tested before it is merged. Tags are
-# left out.
+# Test pull requests and pushes to main without duplicating branch builds.
 on:
   push:
-    branches: ['**']
+    branches: [main]
   pull_request:
-  workflow_dispatch:
 
 permissions:
   contents: read
 
-# A newer push to a branch makes its running build moot. On main each commit
-# gets a group of its own, so none is cancelled or dropped from the queue.
+# A newer update to a pull request makes its running build moot. On main each
+# commit gets a group of its own, so none is cancelled or dropped from the queue.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
   cancel-in-progress: true
@@ -139,16 +137,14 @@ jobs:
   # Windows runs on windows-2022, not windows-latest: the image is built on
   # Server 2022 (10.0.20348) and runs there with process isolation; Server
   # 2025 would need Hyper-V. Pulling it is most of that job, 10 to 16 minutes
-  # for 19.7 GB on disk, so a push to a branch other than main leaves Windows
-  # out: it runs on pull requests, on main, and by hand. (A job's `if` cannot
-  # see the matrix, hence the list built here.)
+  # for 19.7 GB on disk.
   e2e:
     name: e2e (${{ matrix.platform }})
     needs: build
     strategy:
       fail-fast: false
       matrix:
-        platform: ${{ fromJSON((github.event_name != 'push' || github.ref == 'refs/heads/main') && '["linux-x64", "windows-x64"]' || '["linux-x64"]') }}
+        platform: [linux-x64, windows-x64]
     runs-on: ${{ matrix.platform == 'windows-x64' && 'windows-2022' || 'ubuntu-latest' }}
     timeout-minutes: 60
     env:
