@@ -11,7 +11,7 @@ pub const RELINK_PACKAGES_VI: &[u8] = include_bytes!("../../tools/Relink Package
 pub const CALLER_VI: &[u8] = include_bytes!("../../tools/Test - Relink Packages E2E.vi");
 pub const CALL_VI: &[u8] = include_bytes!("../../tools/E2E Call VI.vi");
 
-/// The `local` suite: two packages in `pkgs/`, a caller VI, and a project
+/// The `local` suite: packages in `pkgs/`, a caller VI, and a project
 /// for the global install and one for the venv, with `pkgs/` as their only
 /// source.
 pub fn local(work: &Path) -> Result<()> {
@@ -82,6 +82,24 @@ File 0="Relink Packages.vi"
             ("File Group 1/Relink Packages.vi", RELINK_PACKAGES_VI),
         ],
     )?;
+
+    for (name, requires) in [
+        ("lvpm_e2e_root", "lvpm_e2e_private"),
+        ("lvpm_e2e_private", "lvpm_e2e_shared"),
+        ("lvpm_e2e_other", "lvpm_e2e_shared"),
+        ("lvpm_e2e_shared", ""),
+    ] {
+        vip(
+            work,
+            name,
+            &format!(
+                "[Dependencies]\nRequires=\"{requires}\"\n\n\
+                 [File Group 0]\nTarget Dir=\"<vi.lib>/{name}\"\n\
+                 Num Files=1\nFile 0=\"fixture.txt\"\n"
+            ),
+            &[("File Group 0/fixture.txt", b"dependency uninstall fixture\n")],
+        )?;
+    }
 
     projects(
         work,
@@ -160,6 +178,18 @@ mod tests {
         );
         assert!(spec.contains(r#"Target Dir="<vi.lib>\lvpm_linux_relink_test\sub""#));
         assert_eq!(open("lvpm_linux_test-1.0.0.1.vip").len(), 8);
+        for (name, dependency) in [
+            ("lvpm_e2e_root", "lvpm_e2e_private"),
+            ("lvpm_e2e_private", "lvpm_e2e_shared"),
+            ("lvpm_e2e_other", "lvpm_e2e_shared"),
+            ("lvpm_e2e_shared", ""),
+        ] {
+            let mut archive = open(&format!("{name}-1.0.0.1.vip"));
+            let mut spec = String::new();
+            archive.by_name("spec").unwrap().read_to_string(&mut spec).unwrap();
+            assert!(spec.contains(&format!("Requires=\"{dependency}\"")));
+            assert!(archive.by_name("File Group 0/fixture.txt").is_ok());
+        }
         assert!(work.join("caller").join("caller.vi").is_file());
         let toml = std::fs::read_to_string(work.join("venv").join("lvpm.toml")).unwrap();
         assert!(toml.contains("defaults = false") && toml.contains("lvpm_linux_test = \"*\""));

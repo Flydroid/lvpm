@@ -56,6 +56,13 @@ pub fn trials() -> Vec<Trial> {
             control_broken,
         ),
         ("venv create", venv_create),
+        ("uninstall: install dependency graph in venv", uninstall_setup),
+        ("uninstall: non-interactive choice and keep-deps", uninstall_keep_dependencies),
+        ("uninstall: remove unshared and warn about shared", uninstall_shared_dependencies),
+        ("uninstall: warn before removing a required package", uninstall_required_package),
+        ("uninstall: old records keep uncertain dependencies", uninstall_legacy_records),
+        ("uninstall: --all removes remaining venv packages", uninstall_venv_all),
+        ("uninstall: project dependencies and their dependencies are kept", uninstall_project_dependencies),
         (
             "venv install with relink in a LabVIEW started with -pref",
             venv_install,
@@ -332,4 +339,117 @@ fn overlay_runs() -> Check {
         std::thread::sleep(Duration::from_secs(2));
     }
     ok(&venv(), &["vi-run", &caller(), "--timeout", "60"]).map(drop)
+}
+
+fn record(name: &str) -> Result<PathBuf, libtest_mimic::Failed> {
+    Ok(venv_dir()?.join("installed").join(format!("{name}.json")))
+}
+
+fn addon(name: &str) -> Result<PathBuf, libtest_mimic::Failed> {
+    Ok(venv_dir()?.join("packages").join(name))
+}
+
+fn uninstall_setup() -> Check {
+    contains(&ok(&venv(), &["venv", "status"])?, "not running on this venv")?;
+    ok(&venv(), &["install", "lvpm_e2e_root", "--no-relink"])?;
+    ok(&venv(), &["install", "lvpm_e2e_other", "--no-relink"])?;
+    for (name, dependency) in [
+        ("lvpm_e2e_root", Some("lvpm_e2e_private")),
+        ("lvpm_e2e_private", Some("lvpm_e2e_shared")),
+        ("lvpm_e2e_other", Some("lvpm_e2e_shared")),
+        ("lvpm_e2e_shared", None),
+    ] {
+        let path = record(name)?;
+        let data: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).map_err(fail)?)
+            .map_err(fail)?;
+        let want = dependency.map(|d| vec![d]).unwrap_or_default();
+        ensure(data["dependencies"] == serde_json::json!(want), || {
+            format!("unexpected dependencies in {}: {data}", path.display())
+        })?;
+        exists(&addon(name)?.join("1").join("vi.lib").join(name).join("fixture.txt"))?;
+    }
+    Ok(())
+}
+
+fn uninstall_keep_dependencies() -> Check {
+    let failed = lvpm(&venv(), &["uninstall", "lvpm_e2e_root"]).try_failure().map_err(fail)?;
+    contains(&failed, "--with-deps or --keep-deps")?;
+    exists(&record("lvpm_e2e_root")?)?;
+    ok(&venv(), &["uninstall", "lvpm_e2e_root", "--keep-deps"])?;
+    absent(&record("lvpm_e2e_root")?)?;
+    absent(&addon("lvpm_e2e_root")?)?;
+    exists(&record("lvpm_e2e_private")?)?;
+    exists(&record("lvpm_e2e_shared")?)?;
+    ok(&venv(), &["install", "lvpm_e2e_root", "--no-relink"]).map(drop)
+}
+
+fn uninstall_shared_dependencies() -> Check {
+    let result = ok(&venv(), &["uninstall", "lvpm_e2e_root", "--with-deps"])?;
+    contains(&result, "keeping lvpm_e2e_shared: still required by lvpm_e2e_other")?;
+    for name in ["lvpm_e2e_root", "lvpm_e2e_private"] {
+        absent(&record(name)?)?;
+        absent(&addon(name)?)?;
+    }
+    exists(&record("lvpm_e2e_shared")?)?;
+    exists(&addon("lvpm_e2e_shared")?)?;
+    exists(&record("lvpm_e2e_other")?)
+}
+
+fn uninstall_required_package() -> Check {
+    let result = ok(&venv(), &["uninstall", "lvpm_e2e_shared", "--keep-deps"])?;
+    contains(&result, "required by installed packages: lvpm_e2e_other")?;
+    absent(&record("lvpm_e2e_shared")?)?;
+    exists(&record("lvpm_e2e_other")?)
+}
+
+fn uninstall_legacy_records() -> Check {
+    ok(&venv(), &["install", "lvpm_e2e_root", "--no-relink"])?;
+    let path = record("lvpm_e2e_other")?;
+    let mut data: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).map_err(fail)?).map_err(fail)?;
+    data.as_object_mut().ok_or("installation record is not an object")?.remove("dependencies");
+    std::fs::write(&path, serde_json::to_vec_pretty(&data).map_err(fail)?).map_err(fail)?;
+    let result = ok(&venv(), &["uninstall", "lvpm_e2e_root", "--with-deps"])?;
+    contains(&result, "dependency checks are incomplete")?;
+    absent(&record("lvpm_e2e_root")?)?;
+    exists(&record("lvpm_e2e_private")?)?;
+    exists(&record("lvpm_e2e_shared")?)
+}
+
+fn uninstall_venv_all() -> Check {
+    ok(&venv(), &["uninstall", "--all"])?;
+    for name in ["lvpm_e2e_root", "lvpm_e2e_private", "lvpm_e2e_shared", "lvpm_e2e_other"] {
+        absent(&record(name)?)?;
+        absent(&addon(name)?)?;
+    }
+    contains(&ok(&venv(), &["list"])?, "lvpm has installed nothing into this target")
+}
+
+fn uninstall_project_dependencies() -> Check {
+    let path = venv().join("lvpm.toml");
+    let original = std::fs::read_to_string(&path).map_err(fail)?;
+    let result = (|| {
+        for table in ["dependencies", "dependencies.test"] {
+            let manifest = if table == "dependencies" {
+                original.replace("[dependencies]", "[dependencies]\nlvpm_e2e_private = \"*\"")
+            } else {
+                format!("{original}\n[dependencies.test]\nlvpm_e2e_private = \"*\"\n")
+            };
+            std::fs::write(&path, manifest).map_err(fail)?;
+            ok(&venv(), &["install", "lvpm_e2e_root", "--no-relink"])?;
+            let result = ok(&venv(), &["uninstall", "lvpm_e2e_root", "--with-deps"])?;
+            contains(&result, "keeping lvpm_e2e_private: declared in lvpm.toml")?;
+            contains(&result, "keeping lvpm_e2e_shared: required by a package declared in lvpm.toml")?;
+            absent(&record("lvpm_e2e_root")?)?;
+            exists(&record("lvpm_e2e_private")?)?;
+            exists(&record("lvpm_e2e_shared")?)?;
+            let result = ok(&venv(), &["uninstall", "lvpm_e2e_private", "--keep-deps"])?;
+            contains(&result, "lvpm_e2e_private is declared in lvpm.toml")?;
+            exists(&record("lvpm_e2e_shared")?)?;
+            ok(&venv(), &["uninstall", "--all"])?;
+        }
+        Ok(())
+    })();
+    std::fs::write(&path, original).map_err(fail)?;
+    result
 }

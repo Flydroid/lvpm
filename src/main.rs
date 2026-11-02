@@ -8,6 +8,7 @@ compile_error!("lvpm supports Windows and Linux; macOS is on the roadmap (docs/r
 
 mod cache;
 mod config;
+mod dependency;
 mod fetch;
 mod index;
 mod install;
@@ -25,7 +26,7 @@ mod viserver;
 use anyhow::{Context, Result, bail, ensure};
 use clap::{Parser, Subcommand};
 use std::collections::HashSet;
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use target::Roots;
 use version::Version;
@@ -189,6 +190,12 @@ enum Cmd {
         /// Remove every package installed in this target.
         #[arg(long, conflicts_with = "package")]
         all: bool,
+        /// Remove unshared dependencies too, without prompting.
+        #[arg(long, conflicts_with_all = ["all", "keep_deps"])]
+        with_deps: bool,
+        /// Keep dependencies, without prompting.
+        #[arg(long, conflicts_with_all = ["all", "with_deps"])]
+        keep_deps: bool,
     },
     /// Invoke parameterless Application-class methods by raw id, and report
     /// what LabVIEW says. Re-establishes method ids on a new LabVIEW: 1036
@@ -332,7 +339,8 @@ fn main() -> Result<()> {
             cmd_run_hooks(&cli, package.as_deref(), *all, *timeout)
         }
         Cmd::Refresh { timeout } => cmd_refresh(&cli, *timeout),
-        Cmd::Uninstall { package, all } => cmd_uninstall(&cli, package.as_deref(), *all),
+        Cmd::Uninstall { package, all, with_deps, keep_deps } =>
+            cmd_uninstall(&cli, package.as_deref(), *all, *with_deps, *keep_deps),
         Cmd::AppProbe { ids } => cmd_app_probe(&cli, ids),
         Cmd::ViProbe { vi } => cmd_vi_probe(&cli, vi),
         Cmd::ViSave { vi } => cmd_vi_save(&cli, vi),
@@ -640,10 +648,57 @@ fn cmd_refresh(cli: &Cli, timeout: u64) -> Result<()> {
     Ok(())
 }
 
-fn cmd_uninstall(cli: &Cli, package: Option<&str>, all: bool) -> Result<()> {
-    let roots = destination(cli)?.store();
+fn cmd_uninstall(cli: &Cli, package: Option<&str>, all: bool, with_deps: bool, keep_deps: bool) -> Result<()> {
+    let dest = destination(cli)?;
+    let roots = dest.store();
     let names: Vec<String> = match (package, all) {
-        (Some(p), _) => vec![p.to_string()],
+        (Some(p), _) => {
+            let installed = install::list_installed_checked(&roots)?;
+            let project_roots = match &dest {
+                Destination::Venv(v) => project_uninstall_roots(&v.repo)?,
+                _ => Vec::new(),
+            };
+            let plan = dependency::removal_plan(&installed, p, &project_roots)?;
+            if plan.project_declared {
+                eprintln!("warning: {} is declared in {}; uninstall does not edit the manifest", plan.root, project::FILE_NAME);
+            }
+            if !plan.dependents.is_empty() {
+                eprintln!("warning: {} is required by installed packages: {}", plan.root, plan.dependents.join(", "));
+            }
+            if !plan.unknown.is_empty() {
+                eprintln!(
+                    "warning: dependency information is missing for: {}; dependency checks are incomplete. \
+                     Uninstall and reinstall those packages to record their dependencies.",
+                    plan.unknown.join(", ")
+                );
+            }
+            for (name, owners) in &plan.kept {
+                if plan.project_kept.iter().any(|kept| kept.eq_ignore_ascii_case(name)) {
+                    if project_roots.iter().any(|root| root.eq_ignore_ascii_case(name)) {
+                        eprintln!("keeping {name}: declared in {}", project::FILE_NAME);
+                    } else {
+                        eprintln!("keeping {name}: required by a package declared in {}", project::FILE_NAME);
+                    }
+                } else if owners.is_empty() {
+                    eprintln!("keeping {name}: dependency information is incomplete");
+                } else {
+                    eprintln!("keeping {name}: still required by {}", owners.join(", "));
+                }
+            }
+            let mut names = vec![plan.root];
+            if !plan.removable.is_empty() && !keep_deps {
+                let remove = if with_deps {
+                    true
+                } else {
+                    let stdin = std::io::stdin();
+                    confirm_dependencies(&plan.removable, stdin.is_terminal(), &mut stdin.lock(), &mut std::io::stderr())?
+                };
+                if remove {
+                    names.extend(plan.removable);
+                }
+            }
+            names
+        },
         (None, true) => install::list_installed(&roots)?.into_iter().map(|m| m.name).collect(),
         (None, false) => bail!("give a package name, or --all"),
     };
@@ -660,6 +715,9 @@ fn cmd_uninstall(cli: &Cli, package: Option<&str>, all: bool) -> Result<()> {
             // One bad package must not strand the rest of an --all sweep. A
             // single named package still fails the command with its own error.
             Err(e) => {
+                if !all {
+                    return Err(e);
+                }
                 if names.len() > 1 {
                     println!("uninstall {name} FAILED: {e:#}");
                 }
@@ -692,6 +750,30 @@ fn cmd_uninstall(cli: &Cli, package: Option<&str>, all: bool) -> Result<()> {
         failed.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", ")
     );
     Ok(())
+}
+
+fn project_uninstall_roots(repo: &Path) -> Result<Vec<String>> {
+    let path = repo.join(project::FILE_NAME);
+    if !path.try_exists().with_context(|| format!("checking {}", path.display()))? {
+        return Ok(Vec::new());
+    }
+    let manifest = read_manifest(&path)?;
+    Ok(manifest.dependencies.into_iter().map(|(name, _)| name)
+        .chain(manifest.groups.into_iter().flat_map(|(_, group)| group.dependencies.into_iter().map(|(name, _)| name)))
+        .collect())
+}
+
+fn confirm_dependencies(
+    names: &[String], interactive: bool, input: &mut impl std::io::BufRead, output: &mut impl Write,
+) -> Result<bool> {
+    ensure!(interactive,
+        "dependencies can be removed: {}. Pass --with-deps or --keep-deps in non-interactive mode",
+        names.join(", "));
+    write!(output, "remove unshared dependencies ({}) too? [y/N] ", names.join(", "))?;
+    output.flush()?;
+    let mut answer = String::new();
+    input.read_line(&mut answer)?;
+    Ok(answer.trim().eq_ignore_ascii_case("y") || answer.trim().eq_ignore_ascii_case("yes"))
 }
 
 /// Remove one package and run its uninstall hooks. Returns the file count, so
@@ -1078,7 +1160,7 @@ fn cmd_install(
                 }
                 std::io::stdout().flush().ok();
             }
-            let m = install::apply(&roots, &spec, &mut zip, &p, pre.as_deref())?;
+            let m = install::apply(&roots, &spec, &mut zip, &p, pre.as_deref(), dependency_names(e, spec.requires.as_deref()))?;
             println!("{} files", m.files.len());
             relink_work.push((e.name.clone(), m.relink_folders.iter().map(PathBuf::from).collect()));
             if hooks_on && let Some(hook) = &m.post_install_vi {
@@ -1927,6 +2009,18 @@ fn cmd_vi_run(
     result
 }
 
+fn dependency_names(entry: &index::Entry, spec_requires: Option<&str>) -> Vec<String> {
+    let mut names = Vec::new();
+    for requirement in entry.requires.iter().cloned()
+        .chain(spec_requires.into_iter().flat_map(index::parse_requires))
+    {
+        if !names.iter().any(|name: &String| name.eq_ignore_ascii_case(&requirement.name)) {
+            names.push(requirement.name);
+        }
+    }
+    names
+}
+
 fn read_spec(zip: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>) -> Result<String> {
     // Almost always literally "spec" at the archive root.
     let idx = (0..zip.len()).find(|i| {
@@ -1945,6 +2039,38 @@ fn read_spec(zip: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>) -> Result<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dependency_confirmation_accepts_yes_and_defaults_to_no() {
+        let names = vec!["dependency".to_string()];
+        for (answer, expected) in [("y\n", true), ("YES\n", true), ("\n", false), ("no\n", false)] {
+            let mut input = std::io::Cursor::new(answer.as_bytes());
+            let mut output = Vec::new();
+            assert_eq!(confirm_dependencies(&names, true, &mut input, &mut output).unwrap(), expected);
+            assert!(String::from_utf8(output).unwrap().contains("dependency"));
+        }
+        assert!(confirm_dependencies(&names, false, &mut std::io::empty(), &mut Vec::new()).is_err());
+    }
+
+    #[test]
+    fn uninstall_dependency_flags_conflict_with_each_other_and_all() {
+        assert!(Cli::try_parse_from(["lvpm", "uninstall", "pkg", "--with-deps", "--keep-deps"]).is_err());
+        assert!(Cli::try_parse_from(["lvpm", "uninstall", "--all", "--with-deps"]).is_err());
+        assert!(Cli::try_parse_from(["lvpm", "uninstall", "pkg", "--with-deps"]).is_ok());
+    }
+
+    #[test]
+    fn uninstall_roots_include_main_and_all_named_groups() {
+        let dir = std::env::temp_dir().join(format!("lvpm-uninstall-roots-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(project_uninstall_roots(&dir).unwrap().is_empty());
+        std::fs::write(dir.join(project::FILE_NAME),
+            "[dependencies]\nmain_package = \"*\"\n[dependencies.test]\ntest_package = \"*\"\n").unwrap();
+        assert_eq!(project_uninstall_roots(&dir).unwrap(), ["main_package", "test_package"]);
+        std::fs::write(dir.join(project::FILE_NAME), "invalid = [").unwrap();
+        assert!(project_uninstall_roots(&dir).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     fn install(args: &[&str]) -> Result<GroupArgs, clap::Error> {
         let cli = Cli::try_parse_from(["lvpm", "install"].iter().chain(args))?;

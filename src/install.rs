@@ -22,6 +22,9 @@ pub struct Manifest {
     pub target: String,
     /// Absolute paths, forward-slashed.
     pub files: Vec<String>,
+    /// Direct package requirements. None means this record predates dependency tracking.
+    #[serde(default)]
+    pub dependencies: Option<Vec<String>>,
     /// Hooks the package declares that were not run: every one in a venv
     /// (hooks act on a LabVIEW installation, and a venv is not one), and
     /// globally only a PostInstall that failed. Uninstall hooks are not
@@ -137,6 +140,25 @@ pub fn list_installed(roots: &Roots) -> Result<Vec<Manifest>> {
     Ok(out)
 }
 
+/// Read every record, failing rather than making dependency decisions from an incomplete store.
+pub fn list_installed_checked(roots: &Roots) -> Result<Vec<Manifest>> {
+    let dir = roots.store_dir();
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut manifests = Vec::new();
+    for entry in std::fs::read_dir(&dir).with_context(|| format!("reading {}", dir.display()))? {
+        let path = entry?.path();
+        if path.extension().is_some_and(|ext| ext == "json") {
+            let text = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+            manifests.push(serde_json::from_str::<Manifest>(&text)
+                .with_context(|| format!("reading installation record {}", path.display()))?);
+        }
+    }
+    manifests.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(manifests)
+}
+
 type Archive = zip::ZipArchive<std::io::Cursor<Vec<u8>>>;
 
 pub fn open_archive(vip_bytes: Vec<u8>) -> Result<Archive> {
@@ -221,6 +243,7 @@ pub fn apply(
     zip: &mut Archive,
     plan: &Plan,
     pre_install_vi: Option<&Path>,
+    dependencies: Vec<String>,
 ) -> Result<Manifest> {
     let mut written = Vec::new();
 
@@ -283,6 +306,7 @@ pub fn apply(
             None => format!("scratch {}", roots.application.display()),
         },
         files: written,
+        dependencies: Some(dependencies),
         skipped_hooks: match roots.venv() {
             Some(_) => spec.script_vis.iter().map(|(h, v)| format!("{h}={v}")).collect(),
             // PreInstall has run by now, PostInstall runs after the relink
@@ -430,7 +454,7 @@ mod tests {
         std::fs::write(&payload, b"test").unwrap();
         let manifest = Manifest {
             name: "example".into(), version: "1".into(), display_name: None, installed_at: 0,
-            target: "test".into(), files: vec![payload.to_string_lossy().into_owned()],
+            target: "test".into(), files: vec![payload.to_string_lossy().into_owned()], dependencies: Some(vec![]),
             skipped_hooks: vec![], relinked: false, relink_folders: vec![],
             post_install_vi: None, pre_install_vi: None, pre_uninstall_vi: None,
             post_uninstall_vi: None, skipped_groups: vec![],

@@ -412,7 +412,7 @@ fn parse_into(body: &str, base_url: &str, out: &mut Vec<Entry>) {
 }
 
 /// `jki_lib_state_machine>=2.0.0,oglib_error>=4.2.0.23`
-fn parse_requires(s: &str) -> Vec<Requirement> {
+pub fn parse_requires(s: &str) -> Vec<Requirement> {
     s.split(',')
         .filter_map(|part| {
             let part = part.trim();

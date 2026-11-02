@@ -154,7 +154,7 @@ is the reference and the term-by-term map from OGPT to lvpm.
 | ---------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
 | `lvpm install <name>[@<version>]`                    | Resolve the package and its dependencies, download, verify MD5, unpack, relink, run hooks                                                    |
 | `lvpm install`                                       | Inside a project: install everything `lvpm.toml` lists, as one plan with one relink pass (`--manifest <FILE>` names the manifest explicitly) |
-| `lvpm uninstall <name>` / `--all`                    | Remove exactly the files that were installed and prune empty folders                                                                         |
+| `lvpm uninstall <name>` / `--all`                    | Remove installed files; optionally remove unshared dependencies                                                                              |
 | `lvpm list`                                          | What lvpm has installed into the selected target, and which hooks it did not run                                                             |
 | `lvpm search <query>`                                | Search the package indexes                                                                                                                   |
 | `lvpm targets`                                       | Detected LabVIEW installations                                                                                                               |
@@ -270,6 +270,26 @@ Two things follow from LabVIEW reading an addon's contents at launch:
 - The real installation always wins over the overlay: a package installed
   both globally and in the venv loads from the global copy, whatever its
   version. Keep the target installation clean of what the venv provides.
+
+### Uninstalling dependencies
+
+`lvpm uninstall <name>` warns if another installed package requires the
+named package. If it has installed dependencies that are not needed by other
+packages, lvpm asks whether to remove them too. Shared dependencies (and
+dependencies they need) are kept and reported. In a venv, packages declared
+in any `lvpm.toml` dependency group, and their transitive dependencies, are
+also kept. Explicitly uninstalling a declared package warns but proceeds;
+uninstall never edits `lvpm.toml`.
+
+For scripts, pass `--with-deps` to remove unshared dependencies or
+`--keep-deps` to keep them without prompting. Without either option, an
+uninstall that would prompt fails before removing anything when standard
+input is not a terminal. `uninstall --all` still removes every package.
+
+Dependency information is recorded on new installs. Older installation
+records do not contain it: lvpm warns that the check is incomplete and
+keeps potentially affected dependencies. Uninstall and reinstall those
+packages to record their dependencies.
 
 ## What an install does in LabVIEW
 

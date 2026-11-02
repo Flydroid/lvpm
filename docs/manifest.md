@@ -151,6 +151,15 @@ using the project's `[sources]`, but does not add it to the manifest yet.
 `lvpm install` is additive: it never removes a package that is installed but
 no longer listed. Use `lvpm uninstall <name>`, or `lvpm uninstall --all`
 followed by `lvpm install`, until `lvpm sync` exists (see [To do](#to-do)).
+Uninstall can also remove unshared dependencies after confirmation; use
+`--with-deps` or `--keep-deps` for non-interactive use. It warns about
+dependents and keeps shared dependencies. Older install records without
+dependency information are reported as incomplete; uninstall and reinstall
+those packages to record it.
+In a venv, packages declared in any dependency group and their installed
+transitive dependencies are kept during automatic dependency removal.
+Explicitly uninstalling a declared package warns and leaves the manifest
+unchanged. `uninstall --all` still removes every package.
 
 ## Named dependency groups
 
