@@ -5,6 +5,11 @@ edition = "2024"
 description = "Open-source package manager for LabVIEW (.vip) packages"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Flydroid/lvpm"
+
+# e2e/ is the end-to-end test runner for NI's LabVIEW containers; it is not
+# part of a release, and a plain `cargo test` here does not build it.
+[workspace]
+members = ["e2e"]
 [dependencies]
 anyhow = "1.0.104"
 clap = { version = "4.6.6", features = ["derive"] }
