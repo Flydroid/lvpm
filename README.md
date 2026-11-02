@@ -539,8 +539,10 @@ runs.
 
 | Module                         | Responsibility                                                                                                          |
 | ------------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
-| `main.rs`                      | The CLI: commands, target and venv selection, the install plan                                                          |
+| `main.rs`                      | The CLI: commands, target and venv selection, and install/uninstall orchestration                                       |
 | `index.rs`                     | Fetch and parse package directories (`.ogpd` / `index.vipr`), resolve names to versions                                |
+| `resolve.rs`                   | Resolve requested packages and dependencies into an installation order                                                  |
+| `dependency.rs`                | Package dependency metadata and dependency-aware uninstall planning                                                     |
 | `fetch.rs`                     | Acquire package bytes: cache lookup, downloads, integrity verification, and cache population                            |
 | `cache.rs`                     | The cache: the SQLite index of known sources and the content-addressed store of what they served                        |
 | `spec.rs`                      | The `spec` manifest inside a package (the OGPT `.ogp` format and VIPM's `.vip` dialect)                                 |

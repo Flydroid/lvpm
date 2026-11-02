@@ -16,6 +16,7 @@ mod launch;
 mod project;
 mod refresh;
 mod relink;
+mod resolve;
 mod spec;
 mod target;
 mod venv;
@@ -25,7 +26,6 @@ mod viserver;
 
 use anyhow::{Context, Result, bail, ensure};
 use clap::{Parser, Subcommand};
-use std::collections::HashSet;
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use target::Roots;
@@ -758,9 +758,7 @@ fn project_uninstall_roots(repo: &Path) -> Result<Vec<String>> {
         return Ok(Vec::new());
     }
     let manifest = read_manifest(&path)?;
-    Ok(manifest.dependencies.into_iter().map(|(name, _)| name)
-        .chain(manifest.groups.into_iter().flat_map(|(_, group)| group.dependencies.into_iter().map(|(name, _)| name)))
-        .collect())
+    Ok(manifest.declared_dependency_names().map(str::to_owned).collect())
 }
 
 fn confirm_dependencies(
@@ -855,35 +853,6 @@ fn uninstall_one(
 /// Uninstall has no --relink-timeout to borrow, and a hook is one VI run.
 const HOOK_TIMEOUT_SECS: u64 = 300;
 
-/// What one resolution step asks of the index.
-enum Req {
-    /// This version and no other — a root written as an exact pin.
-    Exact(Version),
-    /// The newest version not below the floor; no floor means the newest.
-    Floor(Option<Version>),
-}
-
-impl From<&project::Constraint> for Req {
-    fn from(c: &project::Constraint) -> Req {
-        use project::Constraint::*;
-        match c {
-            Exact(v) => Req::Exact(v.clone()),
-            AtLeast(v) => Req::Floor(Some(v.clone())),
-            Any => Req::Floor(None),
-        }
-    }
-}
-
-impl std::fmt::Display for Req {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Req::Exact(v) => write!(f, "@{}", v.raw),
-            Req::Floor(Some(v)) => write!(f, " >={}", v.raw),
-            Req::Floor(None) => Ok(()),
-        }
-    }
-}
-
 fn cmd_install(
     cli: &Cli,
     package: Option<&str>,
@@ -974,70 +943,33 @@ fn cmd_install(
     let idx = load_index(cli, found.as_ref())?;
     eprintln!("  {} package versions known", idx.entries.len());
 
-    // Depth-first over the dependency graph, from every root at once. No
-    // conflict resolution: the first resolution of a name wins, and a floor
-    // resolves to the newest version satisfying it. Roots are seeded in
-    // reverse so the plan comes out in the order they were written.
-    //
-    // A root asks for what its constraint says; a dependency carried by a
-    // package is always a floor.
-    let mut queue: Vec<(String, Req, bool)> =
-        wanted.iter().rev().map(|(n, c)| (n.clone(), Req::from(c), true)).collect();
-    let mut done: HashSet<String> = HashSet::new();
-    let mut plan: Vec<index::Entry> = Vec::new();
-    let mut unresolved: Vec<String> = Vec::new();
-
-    while let Some((n, req, is_root)) = queue.pop() {
-        if !done.insert(n.to_lowercase()) {
-            continue;
+    let resolution = resolve::install(&idx, &wanted, lv_gate, no_deps, |name| {
+        let path = install::manifest_path(&store, name);
+        if !path.try_exists().with_context(|| format!("checking {}", path.display()))? {
+            return Ok(None);
         }
-        // A dependency the installed version already satisfies stays as it
-        // is: `install foo` upgrades foo, not everything foo happens to need.
-        // Roots go through — asking for a package means asking for the
-        // version the index resolves, and the install loop decides whether
-        // that is a no-op, an upgrade, or a refused downgrade.
-        if !is_root
-            && let Req::Floor(min) = &req
-            && let Ok(have) = install::read_manifest(&store, &n)
-            && min.as_ref().is_none_or(|m| &Version::parse(&have.version) >= m)
-        {
-            eprintln!("  = {} {} already installed, satisfies dependency", have.name, have.version);
-            continue;
+        let manifest = install::read_manifest(&store, name)?;
+        Ok(Some(resolve::Installed { name: manifest.name, version: manifest.version }))
+    })?;
+    for notice in &resolution.notices {
+        match notice {
+            resolve::Notice::Satisfied { name, version } =>
+                eprintln!("  = {name} {version} already installed, satisfies dependency"),
+            resolve::Notice::UnresolvedDependency(name) =>
+                eprintln!("  ! dependency {name} unresolved, skipping"),
         }
-        let entry = match &req {
-            Req::Exact(v) => idx.versions_of(&n).into_iter().find(|e| &e.version == v).cloned(),
-            Req::Floor(min) => idx.best(&n, min.as_ref(), lv_gate).cloned(),
-        };
-
-        let Some(entry) = entry else {
-            if is_root {
-                // One missing root must not throw away fifty good ones:
-                // collect them all and fail once, with the whole list.
-                unresolved.push(format!("{n}{req}"));
-            } else {
-                eprintln!("  ! dependency {n} unresolved, skipping");
-            }
-            continue;
-        };
-        if !no_deps {
-            for r in &entry.requires {
-                queue.push((r.name.clone(), Req::Floor(r.min.clone()), false));
-            }
-        }
-        plan.push(entry);
     }
-
-    if !unresolved.is_empty() {
+    if !resolution.unresolved_roots.is_empty() {
         bail!(
             "not found in the configured indexes:\n  {}\n\
              hint: `lvpm search <name>` to see what is available; a [sources] entry \
              in {} adds a repository",
-            unresolved.join("\n  "),
+            resolution.unresolved_roots.join("\n  "),
             project::FILE_NAME
         );
     }
 
-    plan.reverse(); // dependencies before dependents
+    let plan = resolution.plan;
 
     println!("\nresolved {} package{}:", plan.len(), if plan.len() == 1 { "" } else { "s" });
     for e in &plan {
@@ -1160,7 +1092,7 @@ fn cmd_install(
                 }
                 std::io::stdout().flush().ok();
             }
-            let m = install::apply(&roots, &spec, &mut zip, &p, pre.as_deref(), dependency_names(e, spec.requires.as_deref()))?;
+            let m = install::apply(&roots, &spec, &mut zip, &p, pre.as_deref(), dependency::package_dependency_names(e, spec.requires.as_deref()))?;
             println!("{} files", m.files.len());
             relink_work.push((e.name.clone(), m.relink_folders.iter().map(PathBuf::from).collect()));
             if hooks_on && let Some(hook) = &m.post_install_vi {
@@ -2007,18 +1939,6 @@ fn cmd_vi_run(
     conn.release(vi_ref)?;
     conn.close();
     result
-}
-
-fn dependency_names(entry: &index::Entry, spec_requires: Option<&str>) -> Vec<String> {
-    let mut names = Vec::new();
-    for requirement in entry.requires.iter().cloned()
-        .chain(spec_requires.into_iter().flat_map(index::parse_requires))
-    {
-        if !names.iter().any(|name: &String| name.eq_ignore_ascii_case(&requirement.name)) {
-            names.push(requirement.name);
-        }
-    }
-    names
 }
 
 fn read_spec(zip: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>) -> Result<String> {

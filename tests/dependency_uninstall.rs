@@ -131,3 +131,16 @@ fn old_records_are_not_assumed_to_have_no_dependencies() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("dependency checks are incomplete"));
     assert!(f.record("child").exists());
 }
+
+#[test]
+fn corrupt_installed_dependency_record_fails_the_install_explicitly() {
+    let f = Fixture::new("corrupt-record");
+    f.package("root", "child");
+    f.package("child", "");
+    success(&f.run(&["install", "root", "--no-relink"]));
+    std::fs::write(f.record("child"), b"invalid json").unwrap();
+    let output = f.run(&["install", "root", "--no-relink"]);
+    assert!(!output.status.success());
+    assert!(f.record("root").exists());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("expected value"));
+}
