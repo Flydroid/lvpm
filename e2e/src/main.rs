@@ -1,11 +1,11 @@
 //! End-to-end checks of lvpm against LabVIEW in NI's container images, the
 //! same checks on Linux and on Windows, in two suites:
 //!
-//! - `local`: two packages made from the VIs in tools/, from a local folder;
+//! - `local`: packages made from fixtures and the VIs in tools/, from a local folder;
 //!   no index is contacted. Detection, a headless global install with relink
 //!   and hooks, palette and menu refresh, relink, uninstall, and a venv
 //!   install whose overlay is proven by a VI that links into <vilib> running
-//!   on the venv's LabVIEW and not on the plain one.
+//!   on the venv's LabVIEW and not on the plain one; dependency-aware uninstall.
 //! - `public`: real packages (LUnit and G-Image) from the public indexes. A
 //!   headless install with hooks, every recorded file on disk, relink, an
 //!   uninstall after which the LabVIEW tree is as it was, and the same set

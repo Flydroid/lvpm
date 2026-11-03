@@ -13,7 +13,7 @@ document is the checklist.
 
 ## Per-project dependencies (venvs)
 
-A project keeps its packages under `.lv-venv/` by default, mounted into LabVIEW as an
+A project keeps its packages under `.lv-venv/packages/` by default, mounted into LabVIEW as an
 LVAddons location. Background and the measurements behind the design: the
 overlay gives `<vilib>`-relative linkage (portable, identical to a global
 install); LabVIEW reads addon contents at launch; the real install always
@@ -42,7 +42,7 @@ wins over the overlay; `LVAddons.AdditionalLocations` needs LabVIEW 2024 Q1.
 - **Instance isolation — done.** A venv's LabVIEW gets its own
   compiled-object cache (`CompiledObjCacheRoot`), `LabVIEW Data`
   (`DefaultDataFileLocation`: autosave, `ExtraVILib`, crash reports) and
-  `TEMP`/`TMP`, all under `.lvpm/`. Measured on 2025 and 2026: nothing lands
+  `TEMP`/`TMP`, all under `.lv-venv/`. Measured on 2025 and 2026: nothing lands
   in the user's folders, and a venv instance next to the primary IDE no
   longer shares its cache database, offers to recover its autosave files or
   writes into its log.
@@ -59,7 +59,7 @@ wins over the overlay; `LVAddons.AdditionalLocations` needs LabVIEW 2024 Q1.
   - Is a folder the right unit? Some of these are better delivered as
     packages (dev-dependencies) than copied from one developer's machine.
 - **The venv keeps its own ini — done.** A venv LabVIEW writes its options
-  back to `.lvpm/labview.ini` when it closes (measured on 2026), so that file
+  back to `.lv-venv/labview.ini` when it closes (measured on 2026), so that file
   — copied from the target's ini by `venv create` — is now the base of every
   launch; only lvpm's keys are reapplied. Deleting it inherits the target's
   settings afresh at the next launch.
@@ -449,8 +449,8 @@ cache is already safe (SQLite in WAL mode, downloads renamed into place).
 - **One writer per target.** Every operation that changes a target
   (install, uninstall, relink, run-hooks, refresh, venv create or remove)
   takes an exclusive lock on the target's record directory
-  (`%ProgramData%\lvpm\<target>`, `/var/lib/lvpm/<target>`, or the venv's
-  `.lvpm`). A file lock (`LockFileEx`, `flock`), so the OS releases it when
+  (`%ProgramData%\lvpm\<target>`, `/var/lib/lvpm/<target>`, or the venv
+  root). A file lock (`LockFileEx`, `flock`), so the OS releases it when
   the process dies and no stale lock is left. Different targets, and
   different venvs, run in parallel.
 - **Readers take no lock.** `list`, `search` and the Browse view read

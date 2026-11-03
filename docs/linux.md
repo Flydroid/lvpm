@@ -131,8 +131,8 @@ in progress.
   each platform: `lvpm-e2e` with that platform's executable, in
   `nationalinstruments/labview:2026q3-linux` or `2026q3-windows` (pinned),
   each of its two suites in a fresh container:
-  - **local** — the checks under [Verified](#verified), with two packages
-    made from the VIs in `tools/`.
+  - **local** — the checks under [Verified](#verified), with packages
+    made from the VIs in `tools/` and local dependency-uninstall fixtures.
   - **public** — LUnit and G-Image from the public indexes: a headless
     `install --hooks` (G-Image needs its PostInstall) in which every hook
     must run and every recorded file must be on disk, `relink --all`, an
