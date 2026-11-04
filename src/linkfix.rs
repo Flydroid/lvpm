@@ -38,9 +38,10 @@ use anyhow::{bail, ensure, Context, Result};
 use md5::{Digest, Md5};
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
-use std::collections::{BTreeMap, HashMap};
-use std::io::{Cursor, Read};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // RSRC container: read every section, keep the info table verbatim, repack.
@@ -91,7 +92,7 @@ impl Rsrc {
         let mut sections = Vec::new();
         for i in 0..nblocks {
             let hdr = base + 4 + 12 * i;
-            let ident: [u8; 4] = info[hdr..hdr + 4].try_into()?;
+            let ident: [u8; 4] = info.get(hdr..hdr + 4).context("truncated block header")?.try_into()?;
             let scount = be32(&info, hdr + 4)? as usize + 1;
             let soff = be32(&info, hdr + 8)? as usize;
             for j in 0..scount {
@@ -396,6 +397,11 @@ pub fn separate_compiled_code(rsrc: &mut Rsrc) -> Result<bool> {
         return Ok(flags & SOURCE_ONLY != 0 && tag_source_only(rsrc)?);
     }
     ensure!(rsrc.version()? >= (10, 0), "separate compiled code needs LabVIEW 2010 or later");
+    ensure!(
+        &rsrc.head[8..12] != b"LVIN"
+            || [b"BDHP", b"BDHb", b"BDHc"].iter().any(|ident| rsrc.section(ident).is_some()),
+        "block diagram is absent; keeping compiled code so the VI can still run"
+    );
     tag_source_only(rsrc)?;
     if flags & SOURCE_ONLY != 0 {
         rsrc.edit_blocks(&COMPILED_BLOCKS, None)?;
@@ -821,16 +827,12 @@ fn fix_parent_paths(o: &mut LinkObj, ver: (u32, u32), heap: bool, tree: &Tree) -
     let mut a = parse_api_tail(&o.tail, o.tail_pos, ver, heap)?;
     let Some(parents) = a.parents.as_mut() else { return Ok(false) };
     let mut changed = false;
-    for (_, pth, _) in parents.iter_mut() {
+    for (qual, pth, _) in parents.iter_mut() {
         if !pth.is_drive() {
             continue;
         }
-        let name = String::from_utf8_lossy(pth.comps.last().map(|c| c.as_slice()).unwrap_or(b"")).into_owned();
-        let Some(v) = tree.by_name.get(&lower(&name)) else { continue };
-        if v.len() != 1 {
-            continue;
-        }
-        let Some(e) = tree.exists(&v[0]) else { continue };
+        let Some(target) = tree.only_one_qualified(pth, qual, false) else { continue };
+        let Some(e) = tree.exists(&target) else { continue };
         let Some(abs) = absolute_comps(&e.physical) else { continue };
         if abs != pth.comps {
             pth.comps = abs;
@@ -969,6 +971,13 @@ impl Tree {
         let mut by_name: HashMap<String, Vec<String>> = HashMap::new();
         for (i, root) in roots.iter().enumerate() {
             for (physical, logical) in walk(root)? {
+                if let Some(existing) = files.get(&lower(&logical))
+                    && (is_vi_like(&physical) || is_library_xml(&physical)
+                        || physical.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("llb")))
+                {
+                    let existing: &Entry = existing;
+                    bail!("ambiguous installed path {logical}: {} and {}", existing.physical.display(), physical.display());
+                }
                 by_name.entry(lower(basename(&logical))).or_default().push(logical.clone());
                 files.insert(lower(&logical), Entry { logical, physical, root: i });
             }
@@ -1038,6 +1047,10 @@ impl Tree {
             Some(v) if v.len() == 1 => Some(v[0].clone()),
             _ => None,
         }
+    }
+
+    fn only_one_qualified(&self, p: &Pth, qual: &[Vec<u8>], api: bool) -> Option<String> {
+        self.only_one_named(p).filter(|target| self.qualified_as(target, qual, api))
     }
 
     /// Does `qual`, a link's qualified name, fit `logical` as far as it names
@@ -1282,13 +1295,19 @@ fn llb_members(data: &[u8]) -> Vec<(String, &[u8])> {
 /// the LabVIEW folder (`vi.lib/...`). An `.llb` is listed as one file and not
 /// entered here; `Tree::read_llbs` indexes its members for resolution only.
 fn walk(root: &Path) -> Result<Vec<(PathBuf, String)>> {
+    ensure!(!std::fs::symlink_metadata(root)?.file_type().is_symlink(), "linked root is not supported: {}", root.display());
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         for e in std::fs::read_dir(&dir).with_context(|| format!("reading {}", dir.display()))? {
-            let p = e?.path();
+            let e = e?;
+            let kind = e.file_type()?;
+            if kind.is_symlink() {
+                continue;
+            }
+            let p = e.path();
             let rel = p.strip_prefix(root).unwrap_or(&p).to_string_lossy().replace('\\', "/");
-            if p.is_dir() {
+            if kind.is_dir() {
                 stack.push(p);
             } else {
                 out.push((p, rel));
@@ -1447,10 +1466,10 @@ pub fn fix_vi(bytes: &[u8], vi_logical: &str, tree: &Tree, m: Methods) -> Result
                 // name, and so do we. A same-named file in another library is
                 // not it (opengds' proxies name an older DQMH's libraries).
                 resolve_relative(&vi_dir, &o.path.comps).filter(|l| tree.resolvable(l)).or_else(|| {
-                    tree.only_one_named(&o.path).filter(|t| tree.qualified_as(t, &o.qual, is_api_kind(&o.ident)))
+                    tree.only_one_qualified(&o.path, &o.qual, is_api_kind(&o.ident))
                 })
             } else if o.path.is_drive() {
-                tree.only_one_named(&o.path)
+                tree.only_one_qualified(&o.path, &o.qual, is_api_kind(&o.ident))
             } else {
                 None
             };
@@ -1762,6 +1781,15 @@ pub struct Outcome {
 }
 
 pub fn fix_tree(roots: &[PathBuf], dry_run: bool, m: Methods) -> Result<(Tree, Vec<Outcome>)> {
+    fix_selected(roots, None, dry_run, m)
+}
+
+pub fn fix_files(roots: &[PathBuf], files: &[PathBuf], dry_run: bool, m: Methods) -> Result<(Tree, Vec<Outcome>)> {
+    let selected: HashSet<_> = files.iter().cloned().collect();
+    fix_selected(roots, Some(&selected), dry_run, m)
+}
+
+fn fix_selected(roots: &[PathBuf], selected: Option<&HashSet<PathBuf>>, dry_run: bool, m: Methods) -> Result<(Tree, Vec<Outcome>)> {
     let tree = Tree::index(roots)?;
     let mut outcomes = Vec::new();
     // Anything addressed through an `.llb` path component stays as it is:
@@ -1772,7 +1800,8 @@ pub fn fix_tree(roots: &[PathBuf], dry_run: bool, m: Methods) -> Result<(Tree, V
         .files
         .values()
         .filter(|e| {
-            (is_vi_like(&e.physical) || m.source_only && is_library_xml(&e.physical))
+            selected.is_none_or(|files| files.contains(&e.physical))
+                && (is_vi_like(&e.physical) || m.source_only && is_library_xml(&e.physical))
                 && !lower(&e.logical).contains(".llb/")
         })
         .collect();
@@ -1801,6 +1830,25 @@ pub fn fix_tree(roots: &[PathBuf], dry_run: bool, m: Methods) -> Result<(Tree, V
     Ok((tree, outcomes))
 }
 
+fn write_replacement(path: &Path, bytes: &[u8]) -> Result<()> {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let mut name = path.file_name().context("file has no name")?.to_os_string();
+    name.push(format!(".lvpm-{}-{}.tmp", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+    let tmp = path.with_file_name(name);
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+    let result = (|| {
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
 /// Fix one file of the tree; `None` for a file that turns out not to be ours.
 fn fix_entry(e: &Entry, tree: &Tree, dry_run: bool, m: Methods) -> Option<Outcome> {
     let bytes = match std::fs::read(&e.physical) {
@@ -1812,9 +1860,7 @@ fn fix_entry(e: &Entry, tree: &Tree, dry_run: bool, m: Methods) -> Option<Outcom
             let mut changes = Changes::default();
             if let Some(new) = new {
                 if !dry_run {
-                    let tmp = e.physical.with_extension("lvpm-tmp");
-                    std::fs::write(&tmp, &new)?;
-                    std::fs::rename(&tmp, &e.physical)?;
+                    write_replacement(&e.physical, &new)?;
                 }
                 changes.separated = 1;
             }
@@ -1829,9 +1875,7 @@ fn fix_entry(e: &Entry, tree: &Tree, dry_run: bool, m: Methods) -> Option<Outcom
             if let Some(new) = new
                 && !dry_run
             {
-                let tmp = e.physical.with_extension("lvpm-tmp");
-                std::fs::write(&tmp, &new)?;
-                std::fs::rename(&tmp, &e.physical)?;
+                write_replacement(&e.physical, &new)?;
             }
             Ok(ch)
         })
@@ -1843,10 +1887,13 @@ fn fix_entry(e: &Entry, tree: &Tree, dry_run: bool, m: Methods) -> Option<Outcom
 pub fn venv_roots(store: &Path) -> Result<Vec<PathBuf>> {
     let mut roots = Vec::new();
     for e in std::fs::read_dir(store)? {
-        let p = e?.path();
-        if p.is_dir() && !p.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.')) {
+        let e = e?;
+        let p = e.path();
+        if e.file_type()?.is_dir() && !e.file_type()?.is_symlink()
+            && !p.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.'))
+        {
             let one = p.join("1");
-            if one.is_dir() {
+            if std::fs::symlink_metadata(&one).is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink()) {
                 roots.push(one);
             }
         }
@@ -1872,6 +1919,143 @@ pub fn summarize(outcomes: &[Outcome]) -> BTreeMap<&'static str, usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diagram_removed_vi_keeps_its_compiled_code() {
+        let mut head = [0; 32];
+        head[8..12].copy_from_slice(b"LVIN");
+        let mut rsrc = Rsrc {
+            head,
+            info: Vec::new(),
+            sections: vec![
+                Section { ident: *b"LVSR", off_field: 0, data: [0x2000_8000u32.to_be_bytes().as_slice(), &[0; 8]].concat() },
+                Section { ident: *b"VICD", off_field: 0, data: vec![1, 2, 3] },
+            ],
+        };
+        let error = separate_compiled_code(&mut rsrc).unwrap_err();
+        assert!(error.to_string().contains("block diagram is absent"));
+        assert_eq!(rsrc.section(b"VICD").unwrap().data, vec![1, 2, 3]);
+        assert!(rsrc.section(b"VITS").is_none());
+        assert_eq!(be32(&rsrc.section(b"LVSR").unwrap().data, 8).unwrap(), 0);
+    }
+
+    #[test]
+    fn duplicate_logical_paths_are_reported_without_rewriting() {
+        let root = std::env::temp_dir().join(format!("lvpm-linkfix-duplicates-{}", std::process::id()));
+        let roots = vec![root.join("a"), root.join("z")];
+        let xml = b"<Library LVVersion=\"24008000\"></Library>";
+        for dir in &roots {
+            std::fs::create_dir_all(dir.join("vi.lib")).unwrap();
+            std::fs::write(dir.join("vi.lib/X.lvlib"), xml).unwrap();
+        }
+        let files = vec![roots[0].join("vi.lib/X.lvlib")];
+        let error = fix_files(&roots, &files, false, Methods::of(&Method::ALL)).err().unwrap();
+        assert!(error.to_string().contains("ambiguous installed path"));
+        for dir in &roots {
+            assert_eq!(std::fs::read(dir.join("vi.lib/X.lvlib")).unwrap(), xml);
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn directory_links_are_not_followed() {
+        fn link(target: &Path, path: &Path) {
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(target, path).unwrap();
+            #[cfg(windows)]
+            {
+                let output = std::process::Command::new("cmd")
+                    .args(["/C", "mklink", "/J"])
+                    .arg(path).arg(target).output().unwrap();
+                assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            }
+        }
+        let root = std::env::temp_dir().join(format!("lvpm-linkfix-symlinks-{}", std::process::id()));
+        let tree = root.join("tree");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&tree).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let xml = b"<Library LVVersion=\"24008000\"></Library>";
+        std::fs::write(outside.join("External.lvlib"), xml).unwrap();
+        link(&outside, &tree.join("external"));
+        link(&tree, &tree.join("loop"));
+        assert!(fix_tree(&[tree.join("external")], false, Methods::of(&Method::ALL)).is_err());
+        let (_, outcomes) = fix_tree(&[tree], false, Methods::of(&Method::ALL)).unwrap();
+        assert!(outcomes.is_empty());
+        assert_eq!(std::fs::read(outside.join("External.lvlib")).unwrap(), xml);
+        let store = root.join("store");
+        let package = root.join("package");
+        std::fs::create_dir_all(package.join("1")).unwrap();
+        std::fs::create_dir_all(store.join("regular")).unwrap();
+        link(&package, &store.join("linked-package"));
+        link(&outside, &store.join("regular").join("1"));
+        assert!(venv_roots(&store).unwrap().is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn truncated_block_header_is_an_error_not_a_panic() {
+        let mut bytes = vec![0; 84];
+        bytes[..6].copy_from_slice(b"RSRC\r\n");
+        bytes[8..12].copy_from_slice(b"LVIN");
+        bytes[16..20].copy_from_slice(&32u32.to_be_bytes());
+        bytes[20..24].copy_from_slice(&52u32.to_be_bytes());
+        bytes[24..28].copy_from_slice(&32u32.to_be_bytes());
+        let header = bytes[..32].to_vec();
+        bytes[32..64].copy_from_slice(&header);
+        bytes[76..80].copy_from_slice(&48u32.to_be_bytes());
+        assert!(Rsrc::parse(&bytes).is_err());
+    }
+
+    #[test]
+    fn parallel_replacements_keep_same_stem_files_distinct() {
+        let root = std::env::temp_dir().join(format!("lvpm-linkfix-writes-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let vi = root.join("Foo.vi");
+        let ctl = root.join("Foo.ctl");
+        let sentinel = root.join("Foo.lvpm-tmp");
+        std::fs::write(&vi, b"old vi").unwrap();
+        std::fs::write(&ctl, b"old ctl").unwrap();
+        std::fs::write(&sentinel, b"leave alone").unwrap();
+        std::thread::scope(|scope| {
+            scope.spawn(|| write_replacement(&vi, b"new vi").unwrap());
+            scope.spawn(|| write_replacement(&ctl, b"new ctl").unwrap());
+        });
+        assert_eq!(std::fs::read(&vi).unwrap(), b"new vi");
+        assert_eq!(std::fs::read(&ctl).unwrap(), b"new ctl");
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"leave alone");
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 3);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn selected_files_leave_existing_files_untouched() {
+        let root = std::env::temp_dir().join(format!("lvpm-linkfix-selected-{}", std::process::id()));
+        let dir = root.join("vi.lib");
+        std::fs::create_dir_all(&dir).unwrap();
+        let installed = dir.join("New.lvlib");
+        let existing = dir.join("Existing.lvlib");
+        let xml = b"<Library LVVersion=\"24008000\"></Library>";
+        std::fs::write(&installed, xml).unwrap();
+        std::fs::write(&existing, xml).unwrap();
+        let roots = vec![root.clone()];
+        let files = vec![installed.clone()];
+        let methods = Methods::of(&Method::ALL);
+
+        let (_, preview) = fix_files(&roots, &files, true, methods).unwrap();
+        assert_eq!(preview.len(), 1);
+        assert_eq!(preview[0].result.as_ref().unwrap().separated, 1);
+        assert_eq!(std::fs::read(&installed).unwrap(), xml);
+
+        let (_, outcomes) = fix_files(&roots, &files, false, methods).unwrap();
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].path, installed);
+        assert_eq!(outcomes[0].result.as_ref().unwrap().separated, 1);
+        assert_eq!(std::fs::read(&existing).unwrap(), xml);
+        let (_, again) = fix_files(&roots, &files, false, methods).unwrap();
+        assert_eq!(again[0].result.as_ref().unwrap().total(), 0);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     fn sample() -> Option<Vec<u8>> {
         let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("tools").join("Relink Packages.vi");
@@ -1942,6 +2126,27 @@ mod tests {
         let again = Rsrc::parse(&a.write()).unwrap();
         assert_eq!(again.section(b"ZZZZ").unwrap().data, vec![1, 2, 3]);
         assert_eq!(again.sections.len(), r.sections.len() + 1);
+    }
+
+    #[test]
+    fn source_only_preserves_source_sections_and_saved_version() {
+        let bytes = sample().expect("the real VI fixture is present");
+        let original = Rsrc::parse(&bytes).unwrap();
+        let mut with_compiled_block = original.clone();
+        with_compiled_block.edit_blocks(&[], Some((*b"VICD", b"synthetic compiled block".to_vec()))).unwrap();
+        let tree = Tree { files: HashMap::new(), owner: HashMap::new(), by_name: HashMap::new() };
+        let (prepared, changes) = fix_vi(&with_compiled_block.write(), "vi.lib/Fixture.vi", &tree, Methods::of(&[Method::SourceOnly])).unwrap();
+        assert_eq!(changes.separated, 1);
+        let prepared = Rsrc::parse(&prepared.unwrap()).unwrap();
+        assert_eq!(prepared.version().unwrap(), original.version().unwrap());
+        assert_eq!(prepared.head[8..12], original.head[8..12]);
+        assert!(COMPILED_BLOCKS.iter().all(|ident| prepared.section(ident).is_none()));
+        let source_sections = |rsrc: &Rsrc| rsrc.sections.iter()
+            .filter(|section| !COMPILED_BLOCKS.contains(&section.ident)
+                && !matches!(&section.ident, b"LVSR" | b"BDPW" | b"VITS"))
+            .map(|section| (section.ident, section.data.clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(source_sections(&prepared), source_sections(&original));
     }
 
     #[test]
@@ -2051,13 +2256,17 @@ mod tests {
             files.insert(lower(l), Entry { logical: l.to_string(), physical: PathBuf::from(l), root: 0 });
         }
         let owner = HashMap::from([(lower(vi), lib.to_string()), (lower(class), lib.to_string())]);
-        let tree = Tree { files, owner, by_name: HashMap::new() };
+        let by_name = HashMap::from([("global.vi".to_string(), vec![vi.to_string()])]);
+        let tree = Tree { files, owner, by_name };
         let q = |s: &[&str]| s.iter().map(|e| e.as_bytes().to_vec()).collect::<Vec<_>>();
         assert!(tree.qualified_as(vi, &q(&["New.lvlib", "Global.vi"]), false));
         assert!(tree.qualified_as(vi, &q(&["Global.vi"]), false), "a caller in the same library leaves it out");
         assert!(!tree.qualified_as(vi, &q(&["Old.lvlib", "Global.vi"]), false));
         assert!(tree.qualified_as(class, &q(&["C.lvclass", "\x07\x00"]), true));
         assert!(!tree.qualified_as(class, &q(&["D.lvclass", "\x07\x00"]), true));
+        let absolute = Pth { tp: 0, comps: q(&["C", "build", "Old", "Global.vi"]), zero: false };
+        assert!(tree.only_one_qualified(&absolute, &q(&["Old.lvlib", "Global.vi"]), false).is_none());
+        assert_eq!(tree.only_one_qualified(&absolute, &q(&["New.lvlib", "Global.vi"]), false), Some(vi.to_string()));
     }
 
     #[test]

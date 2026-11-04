@@ -5,7 +5,7 @@ stable, and what is still missing. The [README](../README.md#commands) is
 the user reference; this file is for deciding. The code changes ride on the
 `main.rs` split in [refactor-main.md](refactor-main.md).
 
-State as of `main` at `39a5aaf` (0.2.1).
+Includes the linkfix install default on `feature/linkfix` (0.2.1).
 
 ## What "stable" will promise
 
@@ -30,10 +30,12 @@ lvpm [--labview-version YYYY] [--prefix DIR | --project DIR] [--global] [--refre
   search <query>                search the indexes
   list                          what lvpm installed into the target
   install [<pkg>[@ver]] [--manifest FILE] [--dry-run] [--no-deps]
-          [--no-relink | --relink] [--hooks] [--allow-downgrade]
+          [--no-linkfix] [--relink] [--no-hooks | --hooks] [--allow-downgrade]
           [--relink-timeout SECS] [--relink-progress NAME] [--keep-open]
   uninstall <pkg> | --all
   relink <pkg> | --all          [--relink-timeout] [--relink-progress] [--keep-open]
+  linkfix [--tree DIR] [--dry-run] [--verbose] [--keep-compiled-code]
+     [--fix owner,paths,qualifiers,source-only] [--report FILE]
   run-hooks <pkg> | --all       [--timeout SECS]
   refresh                       [--timeout SECS]
   start                         [--wait SECS]
@@ -116,11 +118,23 @@ as a hidden alias. Breaking: no.
 
 ### 6. Relink and hooks: one flag each, three values
 
-`install` has `--no-relink`, `--relink` and `--hooks`, and the default of
-each depends on `LV_RTE_HEADLESS`.
+`install` runs Rust linkfix by default after copying and before PostInstall:
+repair links and prepare source-only files without starting LabVIEW.
+`--no-linkfix` opts out. This pass only edits files written by the install in
+the LabVIEW tree; the explicit `linkfix` command considers the selected tree.
+Unknown layouts and conversion exceptions are reported, not guessed.
+The [linkfix reference](linkfix.md) describes the
+changes, boundaries and inspection commands.
+
+The separate LabVIEW load/save pass is off by default and enabled by
+`--relink`, regardless of `LV_RTE_HEADLESS`. The hidden legacy `--no-relink`
+is accepted and ignored; it does not disable linkfix. Hooks normally run on
+developer machines and are skipped headless unless `--hooks` is passed;
+`--no-hooks` disables them explicitly.
 
 Proposed: `--relink auto|always|never` and `--hooks auto|always|never`,
-`auto` being today's behaviour. `--no-relink` stays as an alias for
+`auto` would need an explicit policy; this proposal does not change the
+independent linkfix default. `--no-relink` would become an alias for
 `--relink never`. Breaking: `--relink` and `--hooks` without a value would
 need a value; clap's `default_missing_value = "always"` keeps them working.
 

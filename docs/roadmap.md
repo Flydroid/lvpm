@@ -49,7 +49,7 @@ wins over the overlay; `LVAddons.AdditionalLocations` needs LabVIEW 2024 Q1.
   venv (the instance only starts once the files are down), snapshotting the
   real installation to catch a hook that writes outside the overlay, and
   per-dependency `hooks = "run" | "skip"` in the manifest.
-- ~~**Relink by default.**~~ Inverted: the relink pass is now opt-in behind
+- ~~**LabVIEW relink by default.**~~ Inverted: the LabVIEW load/save pass is opt-in behind
   `--relink`. Measured across 10 packages saved between LabVIEW 8.6 and 2020,
   unrelinked VIs load and run from a venv untouched, and of 2412 installed
   files only the 3 that were saved by hand ever changed. `tools/linkfix/audit.py`
@@ -60,10 +60,19 @@ wins over the overlay; `LVAddons.AdditionalLocations` needs LabVIEW 2024 Q1.
   7649 VIs carried a relative or empty owner path, relative subVI paths, or
   links into other libraries without the qualifier — everything a project
   load rewrites and then asks to save. The fixer writes all of it in the
-  file's own version; verified with `Save.To Buffer`. Open: 17 class-API
-  link tails of a shape not yet decoded (skipped, reported); make `linkfix`
-  the default install step for venvs once the IDE close of NovaXC confirms
-  it; the `.llb` folders lvpm unpacks instead of building real LLBs.
+  file's own version; selected cases checked with `Save.To Buffer`.
+  **Default install preparation:** linkfix now runs after copying the whole
+  plan and before PostInstall, for venv, global and scratch installs. It
+  changes only newly written LabVIEW-tree files; `--no-linkfix` opts out.
+  Source-only conversion removes embedded compiled code where supported so
+  LabVIEW can cache a fresh compilation without changing the saved source.
+  Pre-2010 VIs stay as packaged; diagram-removed VIs keep their compiled code.
+  Unknown layouts and unverifiable conversions are reported, not guessed.
+  Review regressions cover parallel staging, qualified-path matching,
+  malformed block headers, duplicate logical paths and selected-file scope.
+  Open: unknown class-API tail layouts (17 in the earlier NovaXC measurement,
+  skipped and reported); broader IDE load/close validation of the default;
+  the `.llb` folders lvpm unpacks instead of building real LLBs.
 - **Do not inherit `SaveChanges_ApplyToAll`.** `launch::write_ini` copies the
   target's `LabVIEW.ini` wholesale, so a sticky "apply to all" from the user's
   own IDE lets a venv dependency be upgraded and saved with no dialog —

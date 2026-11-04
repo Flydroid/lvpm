@@ -124,8 +124,8 @@ enum Cmd {
         package: Option<String>,
         /// Install every package listed in an `lvpm.toml`'s `[dependencies]`.
         ///
-        /// All of them resolve into one plan and relink as one pass, so no
-        /// package is relinked before a later one's files are on disk.
+        /// All packages resolve into one plan. Linkfix runs after every
+        /// package's files are on disk, before PostInstall hooks.
         #[arg(long, value_name = "FILE", conflicts_with = "package")]
         manifest: Option<PathBuf>,
         /// Show what would be written, then stop.
@@ -134,13 +134,13 @@ enum Cmd {
         /// Do not install dependencies.
         #[arg(long)]
         no_deps: bool,
-        /// Run the relink pass after copying. Off by default: measured across
-        /// 10 packages from LabVIEW 8.6 to 2020, unrelinked VIs load and run
-        /// from a venv untouched, and LabVIEW resolves what the linker tables
-        /// miss by searching vi.lib. Relinking only warms that cache.
+        /// Leave package files as copied: skip link repair and source-only preparation.
+        #[arg(long)]
+        no_linkfix: bool,
+        /// Also load and save installed VIs in LabVIEW. Linkfix runs without LabVIEW by default.
         #[arg(long = "relink")]
         relink_pass: bool,
-        /// Accepted and ignored: skipping the relink is now the default.
+        /// Accepted and ignored: LabVIEW relink is opt-in. Does not skip linkfix.
         #[arg(long, hide = true)]
         no_relink: bool,
         /// Copy the files but skip the packages' install hooks.
@@ -163,8 +163,7 @@ enum Cmd {
     /// Relink an already-installed package, without reinstalling it.
     ///
     /// The install manifest records what went where, so this is the same pass
-    /// `install` runs — useful after `--no-relink`, or after LabVIEW was not
-    /// running when the install happened.
+    /// `install --relink` runs. Separate from the default Rust linkfix pass.
     Relink {
         /// Package to relink. Omit when using --all.
         package: Option<String>,
@@ -367,6 +366,7 @@ fn main() -> Result<()> {
             manifest,
             dry_run,
             no_deps,
+            no_linkfix,
             relink_pass,
             no_relink: _,
             no_hooks,
@@ -380,6 +380,7 @@ fn main() -> Result<()> {
             manifest.as_deref(),
             *dry_run,
             *no_deps,
+            *no_linkfix,
             *relink_pass,
             *no_hooks,
             *run_hooks,
@@ -895,6 +896,7 @@ fn cmd_install(
     manifest: Option<&Path>,
     dry_run: bool,
     no_deps: bool,
+    no_linkfix: bool,
     relink_pass: bool,
     no_hooks: bool,
     run_hooks: bool,
@@ -1075,6 +1077,7 @@ fn cmd_install(
     // happens after every package is on disk, so no package can be relinked
     // against a dependency that is not there yet.
     let mut relink_work: Vec<(String, Vec<PathBuf>)> = Vec::new();
+    let mut linkfix_files = Vec::new();
 
     for e in &plan {
         // In a venv every package is an addon of its own; the store is shared.
@@ -1131,6 +1134,7 @@ fn cmd_install(
         let p = install::plan(&roots, &spec, &mut zip)?;
 
         total_writes += p.writes.len();
+        linkfix_files.extend(p.writes.iter().filter(|w| w.dest.starts_with(&roots.application)).map(|w| w.dest.clone()));
 
         if dry_run {
             println!("{} files would be written", p.writes.len());
@@ -1233,6 +1237,26 @@ fn cmd_install(
         c.close();
     }
 
+    if !linkfix_files.is_empty() {
+        if no_linkfix {
+            println!("\nlinkfix: skipped (--no-linkfix); files left as copied");
+        } else if dry_run {
+            println!("\nlinkfix: would prepare newly written LabVIEW-tree files (repair links and separate compiled code; no LabVIEW needed)");
+        } else {
+            let roots = match &venv {
+                Some(v) => linkfix::venv_roots(&v.dir),
+                None => Ok(vec![store.application.clone()]),
+            };
+            println!("\nlinkfix: preparing installed files (repair links and separate compiled code; no LabVIEW needed)");
+            match roots.and_then(|roots| {
+                linkfix::fix_files(&roots, &linkfix_files, false, linkfix::Methods::of(&linkfix::Method::ALL))
+            }) {
+                Ok((_, outcomes)) => report_linkfix(&outcomes, false, true, &linkfix::Method::ALL, None)?,
+                Err(error) => println!("  linkfix could not complete: {error:#}; package files remain installed. Retry with `lvpm linkfix --tree <DIR> --verbose`."),
+            }
+        }
+    }
+
     // Relinking and the PostInstall hooks are the second phase, and both need
     // a LabVIEW: a scratch tree has none, so both are skipped there. They
     // share one instance, because starting a venv's LabVIEW twice costs more
@@ -1242,9 +1266,7 @@ fn cmd_install(
     let want_relink = relink_pass && folders > 0;
 
     if folders > 0 && !relink_pass {
-        println!("\nrelink: skipped (the default — pass `--relink` to run it). Measured across");
-        println!("      10 packages, unrelinked VIs load and run; LabVIEW resolves what the");
-        println!("      linker tables miss by searching vi.lib.");
+        println!("\nLabVIEW relink: skipped (pass --relink to also load and save VIs in LabVIEW)");
     }
 
     if dry_run {
@@ -1839,8 +1861,8 @@ fn cmd_linkfix(
         None => match destination(cli)? {
             Destination::Venv(v) => linkfix::venv_roots(&v.dir)?,
             Destination::Global(_) | Destination::Scratch(_) => bail!(
-                "linkfix works on a venv, or on a folder given with --tree; a real LabVIEW \
-                 installation is relinked by LabVIEW itself"
+                "give --tree <DIR> for an explicit LabVIEW-shaped tree, or run linkfix inside a venv; \
+                 install prepares newly written files automatically"
             ),
         },
     };
@@ -1857,10 +1879,20 @@ fn cmd_linkfix(
     );
 
     let (_tree, outcomes) = linkfix::fix_tree(&roots, dry_run, linkfix::Methods::of(methods))?;
+    report_linkfix(&outcomes, dry_run, verbose, methods, report)
+}
+
+fn report_linkfix(
+    outcomes: &[linkfix::Outcome],
+    dry_run: bool,
+    verbose: bool,
+    methods: &[linkfix::Method],
+    report: Option<&Path>,
+) -> Result<()> {
     let mut total = linkfix::Changes::default();
     let (mut changed, mut clean, mut skipped, mut not_separated) = (0usize, 0usize, 0usize, 0usize);
     let mut files = Vec::new();
-    for o in &outcomes {
+    for o in outcomes {
         // Always shown, not only with --verbose: the file keeps its embedded
         // compiled code, and LabVIEW may still ask to save it.
         if let Ok(c) = &o.result
@@ -1931,7 +1963,7 @@ fn cmd_linkfix(
         total.owner, total.relative, total.absolute, total.qualifier, total.vils, total.separated
     );
     if not_separated > 0 {
-        println!("  compiled code left embedded in {not_separated} file(s), listed above with the reason; their links were fixed");
+        println!("  compiled code left embedded in {not_separated} file(s), listed above with the reason; link repairs were still attempted");
     }
     if skipped > 0 && !verbose {
         println!("  (--verbose names the skipped files and why)");

@@ -6,8 +6,10 @@ lvpm resolves `.vip` / `.ogp` packages by name from the public package
 directories, hosted indexes, or local package folders configured globally.
 It downloads hosted packages, verifies the MD5 and unpacks them into a
 LabVIEW installation or a project's own venv.
-It then relinks the installed VIs and runs the packages' install hooks
-through LabVIEW's VI Server.
+It then prepares the installed LabVIEW files with **linkfix**: repair packaged
+dependency links and separate embedded compiled code, without starting LabVIEW.
+Package install hooks run through LabVIEW's VI Server; a LabVIEW load/save
+relink pass is available separately with `--relink`.
 
 ```console
 $ lvpm targets
@@ -22,7 +24,7 @@ resolved 48 packages:
 ...
 done. 8766 files written.
 
-relinking 82 folder(s)  (27 covered by a parent)
+linkfix: preparing installed files (repair links and separate compiled code; no LabVIEW needed)
 ...
 running 15 post-install hook(s)
   delacor_lib_qmh ... ok (0.4s)
@@ -144,16 +146,17 @@ the design, its documents and its source are still public at
 
 lvpm goes back to that model and finishes it: same formats, so today's `.vip`
 and `.ogp` packages and the public `.ogpd` / `.vipr` directories work as-is,
-with the LabVIEW-side work (fixing VI links, running hook VIs) done over VI
-Server, a documented TCP protocol. [docs/ogpm-model.md](docs/ogpm-model.md)
+with link preparation in Rust and LabVIEW-side work (running hook VIs and
+optional load/save relinking) over VI Server, a documented TCP protocol. [docs/ogpm-model.md](docs/ogpm-model.md)
 is the reference and the term-by-term map from OGPT to lvpm.
 
 ## Commands
 
 | Command                                              | What it does                                                                                                                                 |
 | ---------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| `lvpm install <name>[@<version>]`                    | Resolve the package and its dependencies, download, verify MD5, unpack, relink, run hooks                                                    |
-| `lvpm install`                                       | Inside a project: install everything `lvpm.toml` lists, as one plan with one relink pass (`--manifest <FILE>` names the manifest explicitly) |
+| `lvpm install <name>[@<version>]`                    | Resolve dependencies, download, verify MD5, unpack, prepare links and source-only files, run hooks |
+| `lvpm install`                                       | Inside a project: install everything `lvpm.toml` lists, preparing links after the whole plan is copied (`--manifest <FILE>` selects a manifest) |
+| `lvpm linkfix` / `--tree <DIR>`                     | Prepare an existing venv or explicit LabVIEW-shaped tree; supports dry runs and per-file reports |
 | `lvpm uninstall <name>` / `--all`                    | Remove exactly the files that were installed and prune empty folders                                                                         |
 | `lvpm list`                                          | What lvpm has installed into the selected target, and which hooks it did not run                                                             |
 | `lvpm search <query>`                                | Search the package indexes                                                                                                                   |
@@ -173,13 +176,15 @@ Flags that apply to every command:
 | `--labview-version <YYYY>` | Install into this LabVIEW version (see `lvpm targets`)                                                    |
 | `--project <DIR>`          | Use that project's venv instead of looking upwards from the current directory                             |
 | `--global`                 | Use the LabVIEW installation itself, even from inside a project that has a venv                           |
-| `--prefix <DIR>`           | Install into a scratch directory instead of LabVIEW (file copy only; nothing to relink or run hooks with) |
+| `--prefix <DIR>`           | Install into a scratch directory instead of LabVIEW; linkfix still runs, but LabVIEW relink and hooks cannot |
 | `--refresh`                | Ask each index whether it changed (a conditional request) instead of trusting the cache in `%LOCALAPPDATA%\lvpm\cache` |
 
 `install` flags: `--dry-run` shows every file, relink folder and hook and
 changes nothing; `--no-deps` skips dependencies; `--allow-downgrade` permits
-replacing an installed package with an older version; `--no-relink` skips the
-relink pass and `--relink` forces it where it is off by default; `--hooks`
+replacing an installed package with an older version; `--no-linkfix` leaves
+package files as copied, skipping link repair and source-only preparation.
+`--relink` additionally loads and saves VIs in LabVIEW (off by default);
+the legacy `--no-relink` is accepted but does not disable linkfix. `--hooks`
 runs install hooks where they are off by default (both: a headless LabVIEW,
 see [CI in a container](#ci-in-a-container-docker)). `--relink-timeout <SECS>`
 (default 900) bounds one folder's relink; `--keep-open` leaves the LabVIEW
@@ -257,20 +262,36 @@ Two things follow from LabVIEW reading an addon's contents at launch:
 
 ## What an install does in LabVIEW
 
+### Linkfix: normal package preparation
+
+**Linkfix runs by default after copying, before PostInstall hooks.** It makes
+newly written LabVIEW-tree files ready for their location: repair dependency
+links and separate embedded compiled code where supported, without opening
+LabVIEW. Source logic and the saved LabVIEW version are preserved; package
+archives and existing unrelated files are not changed. The output shows
+edits and skips rather than guessing unsupported layouts.
+
+Use `lvpm install --no-linkfix` to opt out, or `lvpm linkfix --dry-run --verbose`
+to inspect an existing tree. This reduces avoidable searches and save prompts,
+but is not a replacement for setup hooks or a guarantee of package
+compatibility. See [Linkfix](docs/linkfix.md) for what changes, supported
+boundaries, per-file reports and the exact scope of automated validation.
+
 ### Relinking
 
 Freshly unpacked VIs still declare the paths their build machine wrote —
 `<vilib>`-style tokens for the most part, plus a residue of absolutes from the
 build machine.
 
-**Relinking is opt-in, behind `--relink`.** Measured across 10 packages saved
+**The LabVIEW load/save pass is opt-in, behind `--relink`, and runs after
+linkfix.** In measurements across 10 packages saved
 between LabVIEW 8.6 and 2020, unrelinked VIs load and run from a venv
 untouched: LabVIEW resolves what the linker tables miss by searching vi.lib,
-and an LVAddons overlay *is* vi.lib. Relinking replaces those absolutes with
-tokens and records the dependencies the packaged VI never listed (~0.9 paths
-per VI as packaged, ~4.4 relinked), which is a load-time cache, not
-correctness. `tools/linkfix/audit.py` reports what a package would need;
-`tools/linkfix/deptree.py check` is the correctness gate.
+and an LVAddons overlay *is* vi.lib. LabVIEW can also record dependencies that
+the packaged file did not list. Those observations do not mean every package
+is correct without preparation or that linkfix reproduces every LabVIEW save.
+`tools/linkfix/audit.py` inspects packaged paths;
+`tools/linkfix/deptree.py check` checks declared dependency resolution.
 
 With `--relink`, the pass drives a small relink VI over every installed
 package folder through VI Server — load, let LabVIEW resolve the links, save —
@@ -291,39 +312,6 @@ saved for LabVIEW 2020, so any LabVIEW from 2020 on can load it.
   install beside the executable; `LVPM_RELINK_VI=<path>` runs a VI from disk
   instead.
 
-### `lvpm linkfix` — the relink without LabVIEW
-
-Unrelinked VIs load and run, but a project that loads them still asks to save
-them on close: LabVIEW fills in what the packaged link tables left out and
-wants to persist it. Measured on the 66 VIs the IDE saved out of the NovaXC
-venv, that is exactly four things — the VI's own owning library path in the
-`<vilib>` token form, relative subVI paths in token form, the library
-qualifier plus owner path on links into other libraries, and the build
-machine's absolutes replaced. `lvpm linkfix` writes those four things into the
-`.vi` files directly, in each file's own LabVIEW version, using the block
-layouts pylabview documents (`src/linkfix.rs`). Files reached through an
-`.llb` path are left alone: LLB-relative links are canonical.
-
-A VI saved with its compiled code embedded asks to be saved for another
-reason: a newer LabVIEW recompiles it. `linkfix` also makes such a VI
-source-only, as LabVIEW would save it: it sets the "separate compiled code"
-flag (recomputing the block-diagram password hashes that cover it), adds the
-`NI.LV.All.SourceOnly` VI tag, and removes the embedded code blocks. The same
-source-only property is set on `.lvlib` and `.lvclass` XML files;
-`--keep-compiled-code` skips both changes.
-
-```console
-$ lvpm linkfix                         # the venv in effect
-$ lvpm linkfix --tree .project --dry-run --verbose
-```
-
-On the NovaXC venv: 6647 VIs, 5174 rewritten, 17 skipped (class-API link
-tails of a shape not yet decoded — reported, never guessed). Verified with
-LabVIEW's own `Save.To Buffer` on the fixed files: what it would save is what
-is on disk. `tools/linkfix/predict_dirty.py` predicts which packaged VIs need this
-(100% recall on the IDE's list), `tools/linkfix/linkobjs.py oracle` compares a fixed
-tree with IDE-saved files link by link.
-
 ### Script-VI hooks
 
 The install hooks a package declares are extracted from the archive and run
@@ -335,7 +323,7 @@ dialogs over the install.
 | Hook               | Moment                                                                                                            |
 | ------------------ | ----------------------------------------------------------------------------------------------------------------- |
 | `PreInstall.vi`    | before the package's files are copied (not in a venv — its LabVIEW only starts once the files are down)           |
-| `PostInstall.vi`   | after the relink pass, in a venv's own LabVIEW when a venv is in effect                                           |
+| `PostInstall.vi`   | after linkfix and any requested LabVIEW relink, in the venv's own LabVIEW when a venv is in effect |
 | `PreUninstall.vi`  | before the package's files are removed                                                                            |
 | `PostUninstall.vi` | after removal (uninstall hooks are extracted at install time; the archive is long gone when uninstall needs them) |
 
@@ -418,8 +406,9 @@ on one line and each overridable (the relink pass is off on both, behind
 | palettes and menus                 | rebuilt after the install                                                           | not rebuilt: no one sees a palette                                                                                                   | `lvpm refresh`                   |
 
 Together those mean a headless `lvpm install` never starts LabVIEW: it is
-downloads, MD5 checks and file copies, and takes seconds. Measured on a DQMH
-project: two minutes with hooks, twelve with relink as well, and the mass
+downloads, MD5 checks, file copies and linkfix preparation. Earlier DQMH timings
+before default linkfix were:
+two minutes with hooks, twelve with relink as well, and the mass
 compile afterwards reported nothing wrong either way.
 
 The hook skip is the one with a caveat. A hook is arbitrary LabVIEW code,

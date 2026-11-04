@@ -4,7 +4,7 @@ Analysis scripts used to work out what VIPM actually asks LabVIEW to do during a
 package install. Not part of the lvpm build — plain Python 3, no dependencies.
 
 `Relink Package.vi` is the exception: it is not analysis, it is shipped code —
-`include_bytes!`-ed into the `lvpm` binary from here, so editing it and
+`include_bytes!`-ed into the `lvpm` binary from `src/lv-src/relink-package.vi`, so editing it and
 rebuilding is all it takes to ship a new one.
 
 ## `Relink Package.vi`
@@ -18,10 +18,15 @@ interface is one control and one indicator:
 | in | `Folder to relink` | string |
 | out | `Done` | boolean |
 
-`lvpm install` runs it over each newly installed package once every package's
+`lvpm install --relink` runs it over each newly installed package once every package's
 files are on disk, one call per package folder, and polls `Done` while it works
 (`src/relink.rs`). `lvpm relink <package>` runs the same pass on its own, from
 what the install manifest recorded.
+
+The default install preparation is Rust linkfix, not this VI. It repairs
+supported link records and prepares source-only files without LabVIEW;
+`--no-linkfix` skips that preparation. The user-facing scope, exceptions and
+inspection commands are in the [linkfix reference](../docs/linkfix.md).
 
 It travels inside the executable and is extracted to
 `%LOCALAPPDATA%\lvpm\tools\<md5>\Relink Package.vi` the first time a relink
