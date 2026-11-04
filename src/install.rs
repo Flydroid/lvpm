@@ -22,6 +22,8 @@ pub struct Manifest {
     pub target: String,
     /// Absolute paths, forward-slashed.
     pub files: Vec<String>,
+    /// Direct package requirements, including an empty list when there are none.
+    pub dependencies: Vec<String>,
     /// Hooks the package declares that were not run: every one in a venv
     /// (hooks act on a LabVIEW installation, and a venv is not one), and
     /// globally only a PostInstall that failed. Uninstall hooks are not
@@ -115,7 +117,7 @@ pub fn read_manifest(roots: &Roots, name: &str) -> Result<Manifest> {
     let p = manifest_path(roots, name);
     let text = std::fs::read_to_string(&p)
         .with_context(|| format!("{name} is not installed in this target ({})", p.display()))?;
-    Ok(serde_json::from_str(&text)?)
+    serde_json::from_str(&text).with_context(|| format!("reading installation record {} (dependency list required)", p.display()))
 }
 
 pub fn list_installed(roots: &Roots) -> Result<Vec<Manifest>> {
@@ -123,18 +125,17 @@ pub fn list_installed(roots: &Roots) -> Result<Vec<Manifest>> {
     if !dir.exists() {
         return Ok(Vec::new());
     }
-    let mut out = Vec::new();
-    for e in std::fs::read_dir(&dir)? {
-        let p = e?.path();
-        if p.extension().is_some_and(|x| x == "json")
-            && let Ok(text) = std::fs::read_to_string(&p)
-            && let Ok(m) = serde_json::from_str::<Manifest>(&text)
-        {
-            out.push(m);
+    let mut manifests = Vec::new();
+    for entry in std::fs::read_dir(&dir).with_context(|| format!("reading {}", dir.display()))? {
+        let path = entry?.path();
+        if path.extension().is_some_and(|ext| ext == "json") {
+            let text = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+            manifests.push(serde_json::from_str::<Manifest>(&text)
+                .with_context(|| format!("reading installation record {} (dependency list required)", path.display()))?);
         }
     }
-    out.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(out)
+    manifests.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(manifests)
 }
 
 type Archive = zip::ZipArchive<std::io::Cursor<Vec<u8>>>;
@@ -221,6 +222,7 @@ pub fn apply(
     zip: &mut Archive,
     plan: &Plan,
     pre_install_vi: Option<&Path>,
+    dependencies: Vec<String>,
 ) -> Result<Manifest> {
     let mut written = Vec::new();
 
@@ -283,6 +285,7 @@ pub fn apply(
             None => format!("scratch {}", roots.application.display()),
         },
         files: written,
+        dependencies,
         skipped_hooks: match roots.venv() {
             Some(_) => spec.script_vis.iter().map(|(h, v)| format!("{h}={v}")).collect(),
             // PreInstall has run by now, PostInstall runs after the relink
@@ -417,6 +420,31 @@ pub fn uninstall(roots: &Roots, name: &str) -> Result<(usize, Manifest)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uninstall_prunes_package_but_preserves_packages_directory_and_state() {
+        let dir = std::env::temp_dir().join(format!("lvpm-uninstall-layout-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = LvTarget { version: 26.3, bitness: 64, path: dir.join("LabVIEW") };
+        let package = Roots::project(&dir, &target, "example");
+        let store = Roots::project_store(&dir, &target);
+        let payload = package.application.join("vi.lib").join("test.vi");
+        std::fs::create_dir_all(payload.parent().unwrap()).unwrap();
+        std::fs::write(&payload, b"test").unwrap();
+        let manifest = Manifest {
+            name: "example".into(), version: "1".into(), display_name: None, installed_at: 0,
+            target: "test".into(), files: vec![payload.to_string_lossy().into_owned()], dependencies: vec![],
+            skipped_hooks: vec![], relinked: false, relink_folders: vec![],
+            post_install_vi: None, pre_install_vi: None, pre_uninstall_vi: None,
+            post_uninstall_vi: None, skipped_groups: vec![],
+        };
+        write_manifest(&package, &manifest).unwrap();
+        assert_eq!(uninstall(&store, "example").unwrap().0, 1);
+        assert!(!dir.join("packages").join("example").exists());
+        assert!(dir.join("packages").is_dir());
+        assert!(dir.join("installed").is_dir());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn rejects_traversal_and_absolute_paths() {

@@ -1883,8 +1883,18 @@ fn fix_entry(e: &Entry, tree: &Tree, dry_run: bool, m: Methods) -> Option<Outcom
     Some(Outcome { path: e.physical.clone(), result })
 }
 
-/// Group roots: every `<store>/<package>/1` under a venv store.
+/// Group roots from a venv directory or its package store.
 pub fn venv_roots(store: &Path) -> Result<Vec<PathBuf>> {
+    let metadata = std::fs::symlink_metadata(store)?;
+    ensure!(metadata.is_dir() && !metadata.file_type().is_symlink(), "{} is not a regular package store", store.display());
+    let packages = store.join("packages");
+    let store = if store.join("venv.json").is_file() {
+        let metadata = std::fs::symlink_metadata(&packages)?;
+        ensure!(metadata.is_dir() && !metadata.file_type().is_symlink(), "{} is not a regular package store", packages.display());
+        packages.as_path()
+    } else {
+        store
+    };
     let mut roots = Vec::new();
     for e in std::fs::read_dir(store)? {
         let e = e?;
@@ -1919,6 +1929,27 @@ pub fn summarize(outcomes: &[Outcome]) -> BTreeMap<&'static str, usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn venv_layout_roots_include_newly_installed_files() {
+        let root = std::env::temp_dir().join(format!("lvpm-linkfix-venv-layout-{}", std::process::id()));
+        let packages = root.join("packages");
+        let package = packages.join("fixture").join("1");
+        let named_packages = packages.join("packages").join("1");
+        let library = package.join("vi.lib/Fixture.lvlib");
+        std::fs::create_dir_all(library.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(&named_packages).unwrap();
+        std::fs::write(root.join("venv.json"), b"{}").unwrap();
+        std::fs::write(&library, b"<Library LVVersion=\"24008000\"></Library>").unwrap();
+        let roots = venv_roots(&root).unwrap();
+        assert_eq!(roots, vec![package, named_packages]);
+        assert_eq!(venv_roots(&packages).unwrap(), roots);
+        let (_, outcomes) = fix_files(&roots, &[library.clone()], false, Methods::of(&Method::ALL)).unwrap();
+        assert_eq!(outcomes.len(), 1);
+        assert!(outcomes[0].result.is_ok());
+        assert!(std::fs::read_to_string(&library).unwrap().contains("NI.LV.All.SourceOnly"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn diagram_removed_vi_keeps_its_compiled_code() {
@@ -1990,6 +2021,14 @@ mod tests {
         link(&package, &store.join("linked-package"));
         link(&outside, &store.join("regular").join("1"));
         assert!(venv_roots(&store).unwrap().is_empty());
+        let linked_store = root.join("linked-store");
+        link(&store, &linked_store);
+        assert!(venv_roots(&linked_store).is_err());
+        let nested_store = root.join("nested-store");
+        std::fs::create_dir_all(&nested_store).unwrap();
+        std::fs::write(nested_store.join("venv.json"), b"{}").unwrap();
+        link(&store, &nested_store.join("packages"));
+        assert!(venv_roots(&nested_store).is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -21,6 +21,7 @@ compile_error!("lvpm supports Windows and Linux; macOS is on the roadmap (docs/r
 
 mod cache;
 mod config;
+mod dependency;
 mod fetch;
 mod index;
 mod install;
@@ -29,6 +30,7 @@ mod linkfix;
 mod project;
 mod refresh;
 mod relink;
+mod resolve;
 mod spec;
 mod target;
 mod venv;
@@ -38,8 +40,7 @@ mod viserver;
 
 use anyhow::{Context, Result, bail, ensure};
 use clap::{Parser, Subcommand};
-use std::collections::HashSet;
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use target::Roots;
 use version::Version;
@@ -206,6 +207,12 @@ enum Cmd {
         /// Remove every package installed in this target.
         #[arg(long, conflicts_with = "package")]
         all: bool,
+        /// Remove unshared dependencies too, without prompting.
+        #[arg(long, conflicts_with_all = ["all", "keep_deps"])]
+        with_deps: bool,
+        /// Keep dependencies, without prompting.
+        #[arg(long, conflicts_with_all = ["all", "with_deps"])]
+        keep_deps: bool,
     },
     /// Invoke parameterless Application-class methods by raw id, and report
     /// what LabVIEW says. Re-establishes method ids on a new LabVIEW: 1036
@@ -393,7 +400,8 @@ fn main() -> Result<()> {
             cmd_run_hooks(&cli, package.as_deref(), *all, *timeout)
         }
         Cmd::Refresh { timeout } => cmd_refresh(&cli, *timeout),
-        Cmd::Uninstall { package, all } => cmd_uninstall(&cli, package.as_deref(), *all),
+        Cmd::Uninstall { package, all, with_deps, keep_deps } =>
+            cmd_uninstall(&cli, package.as_deref(), *all, *with_deps, *keep_deps),
         Cmd::AppProbe { ids } => cmd_app_probe(&cli, ids),
         Cmd::ViProbe { vi, timeout } => cmd_vi_probe(&cli, vi, *timeout),
         Cmd::ViSave { vi } => cmd_vi_save(&cli, vi),
@@ -624,18 +632,17 @@ fn cmd_targets() -> Result<()> {
 }
 
 /// The manifest a command belongs to: `--manifest` names it; else the venv's
-/// repo when one is in effect; else `--project`'s; else the nearest
+/// bound manifest when a venv is in effect; else `--project`'s; else the nearest
 /// `lvpm.toml` at or above the working directory. None is fine — a package
 /// can be installed without a project.
 fn manifest_for(
     cli: &Cli,
     explicit: Option<&Path>,
-    repo: Option<&Path>,
+    venv: Option<&venv::Venv>,
 ) -> Result<Option<(PathBuf, project::Project)>> {
-    let path = match (explicit, repo, &cli.project) {
+    let path = match (explicit, venv, &cli.project) {
         (Some(p), _, _) => Some(p.to_path_buf()),
-        // A venv created with `--manifest` may have no `lvpm.toml` beside it.
-        (None, Some(r), _) => Some(r.join(project::FILE_NAME)).filter(|p| p.is_file()),
+        (None, Some(v), _) => Some(v.manifest_path().context("venv has no bound manifest")?),
         (None, None, Some(dir)) => Some(dir.join(project::FILE_NAME)).filter(|p| p.is_file()),
         (None, None, None) => project::find_manifest(&std::env::current_dir()?),
     };
@@ -722,10 +729,54 @@ fn cmd_refresh(cli: &Cli, timeout: u64) -> Result<()> {
     Ok(())
 }
 
-fn cmd_uninstall(cli: &Cli, package: Option<&str>, all: bool) -> Result<()> {
-    let roots = destination(cli)?.store();
+fn cmd_uninstall(cli: &Cli, package: Option<&str>, all: bool, with_deps: bool, keep_deps: bool) -> Result<()> {
+    let dest = destination(cli)?;
+    let roots = dest.store();
     let names: Vec<String> = match (package, all) {
-        (Some(p), _) => vec![p.to_string()],
+        (Some(p), _) => {
+            let installed = install::list_installed(&roots)?;
+            let project_manifest = match &dest {
+                Destination::Venv(v) => Some(v.manifest_path().context("venv has no bound manifest")?),
+                _ => None,
+            };
+            let project_roots = match &project_manifest {
+                Some(path) => project_uninstall_roots(path)?,
+                None => Vec::new(),
+            };
+            let manifest_name = project_manifest.as_ref().and_then(|p| p.file_name())
+                .map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "project manifest".into());
+            let plan = dependency::removal_plan(&installed, p, &project_roots)?;
+            if plan.project_declared {
+                eprintln!("warning: {} is declared in {}; uninstall does not edit the manifest", plan.root, manifest_name);
+            }
+            if !plan.dependents.is_empty() {
+                eprintln!("warning: {} is required by installed packages: {}", plan.root, plan.dependents.join(", "));
+            }
+            for (name, owners) in &plan.kept {
+                if plan.project_kept.iter().any(|kept| kept.eq_ignore_ascii_case(name)) {
+                    if project_roots.iter().any(|root| root.eq_ignore_ascii_case(name)) {
+                        eprintln!("keeping {name}: declared in {manifest_name}");
+                    } else {
+                        eprintln!("keeping {name}: required by a package declared in {manifest_name}");
+                    }
+                } else {
+                    eprintln!("keeping {name}: still required by {}", owners.join(", "));
+                }
+            }
+            let mut names = vec![plan.root];
+            if !plan.removable.is_empty() && !keep_deps {
+                let remove = if with_deps {
+                    true
+                } else {
+                    let stdin = std::io::stdin();
+                    confirm_dependencies(&plan.removable, stdin.is_terminal(), &mut stdin.lock(), &mut std::io::stderr())?
+                };
+                if remove {
+                    names.extend(plan.removable);
+                }
+            }
+            names
+        },
         (None, true) => install::list_installed(&roots)?.into_iter().map(|m| m.name).collect(),
         (None, false) => bail!("give a package name, or --all"),
     };
@@ -742,6 +793,9 @@ fn cmd_uninstall(cli: &Cli, package: Option<&str>, all: bool) -> Result<()> {
             // One bad package must not strand the rest of an --all sweep. A
             // single named package still fails the command with its own error.
             Err(e) => {
+                if !all {
+                    return Err(e);
+                }
                 if names.len() > 1 {
                     println!("uninstall {name} FAILED: {e:#}");
                 }
@@ -774,6 +828,24 @@ fn cmd_uninstall(cli: &Cli, package: Option<&str>, all: bool) -> Result<()> {
         failed.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", ")
     );
     Ok(())
+}
+
+fn project_uninstall_roots(path: &Path) -> Result<Vec<String>> {
+    let manifest = read_manifest(path)?;
+    Ok(manifest.declared_dependency_names().map(str::to_owned).collect())
+}
+
+fn confirm_dependencies(
+    names: &[String], interactive: bool, input: &mut impl std::io::BufRead, output: &mut impl Write,
+) -> Result<bool> {
+    ensure!(interactive,
+        "dependencies can be removed: {}. Pass --with-deps or --keep-deps in non-interactive mode",
+        names.join(", "));
+    write!(output, "remove unshared dependencies ({}) too? [y/N] ", names.join(", "))?;
+    output.flush()?;
+    let mut answer = String::new();
+    input.read_line(&mut answer)?;
+    Ok(answer.trim().eq_ignore_ascii_case("y") || answer.trim().eq_ignore_ascii_case("yes"))
 }
 
 /// Remove one package and run its uninstall hooks. Returns the file count, so
@@ -861,35 +933,6 @@ fn uninstall_one(
 /// Uninstall has no --relink-timeout to borrow, and a hook is one VI run.
 const HOOK_TIMEOUT_SECS: u64 = 300;
 
-/// What one resolution step asks of the index.
-enum Req {
-    /// This version and no other — a root written as an exact pin.
-    Exact(Version),
-    /// The newest version not below the floor; no floor means the newest.
-    Floor(Option<Version>),
-}
-
-impl From<&project::Constraint> for Req {
-    fn from(c: &project::Constraint) -> Req {
-        use project::Constraint::*;
-        match c {
-            Exact(v) => Req::Exact(v.clone()),
-            AtLeast(v) => Req::Floor(Some(v.clone())),
-            Any => Req::Floor(None),
-        }
-    }
-}
-
-impl std::fmt::Display for Req {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Req::Exact(v) => write!(f, "@{}", v.raw),
-            Req::Floor(Some(v)) => write!(f, " >={}", v.raw),
-            Req::Floor(None) => Ok(()),
-        }
-    }
-}
-
 fn cmd_install(
     cli: &Cli,
     package: Option<&str>,
@@ -925,7 +968,7 @@ fn cmd_install(
     // The project this install belongs to, if any: its `[sources]` count even
     // when a single package is named. Inside a project a bare `lvpm install`
     // means the manifest's dependencies — the way `npm install` does.
-    let found = manifest_for(cli, manifest, venv.as_ref().map(|v| v.repo.as_path()))?;
+    let found = manifest_for(cli, manifest, venv.as_ref())?;
     let (wanted, from_manifest) = match (package, &found) {
         (Some(p), _) => {
             let w = match p.split_once('@') {
@@ -974,70 +1017,33 @@ fn cmd_install(
     let idx = load_index(cli, found.as_ref())?;
     eprintln!("  {} package versions known", idx.entries.len());
 
-    // Depth-first over the dependency graph, from every root at once. No
-    // conflict resolution: the first resolution of a name wins, and a floor
-    // resolves to the newest version satisfying it. Roots are seeded in
-    // reverse so the plan comes out in the order they were written.
-    //
-    // A root asks for what its constraint says; a dependency carried by a
-    // package is always a floor.
-    let mut queue: Vec<(String, Req, bool)> =
-        wanted.iter().rev().map(|(n, c)| (n.clone(), Req::from(c), true)).collect();
-    let mut done: HashSet<String> = HashSet::new();
-    let mut plan: Vec<index::Entry> = Vec::new();
-    let mut unresolved: Vec<String> = Vec::new();
-
-    while let Some((n, req, is_root)) = queue.pop() {
-        if !done.insert(n.to_lowercase()) {
-            continue;
+    let resolution = resolve::install(&idx, &wanted, lv_gate, no_deps, |name| {
+        let path = install::manifest_path(&store, name);
+        if !path.try_exists().with_context(|| format!("checking {}", path.display()))? {
+            return Ok(None);
         }
-        // A dependency the installed version already satisfies stays as it
-        // is: `install foo` upgrades foo, not everything foo happens to need.
-        // Roots go through — asking for a package means asking for the
-        // version the index resolves, and the install loop decides whether
-        // that is a no-op, an upgrade, or a refused downgrade.
-        if !is_root
-            && let Req::Floor(min) = &req
-            && let Ok(have) = install::read_manifest(&store, &n)
-            && min.as_ref().is_none_or(|m| &Version::parse(&have.version) >= m)
-        {
-            eprintln!("  = {} {} already installed, satisfies dependency", have.name, have.version);
-            continue;
+        let manifest = install::read_manifest(&store, name)?;
+        Ok(Some(resolve::Installed { name: manifest.name, version: manifest.version }))
+    })?;
+    for notice in &resolution.notices {
+        match notice {
+            resolve::Notice::Satisfied { name, version } =>
+                eprintln!("  = {name} {version} already installed, satisfies dependency"),
+            resolve::Notice::UnresolvedDependency(name) =>
+                eprintln!("  ! dependency {name} unresolved, skipping"),
         }
-        let entry = match &req {
-            Req::Exact(v) => idx.versions_of(&n).into_iter().find(|e| &e.version == v).cloned(),
-            Req::Floor(min) => idx.best(&n, min.as_ref(), lv_gate).cloned(),
-        };
-
-        let Some(entry) = entry else {
-            if is_root {
-                // One missing root must not throw away fifty good ones:
-                // collect them all and fail once, with the whole list.
-                unresolved.push(format!("{n}{req}"));
-            } else {
-                eprintln!("  ! dependency {n} unresolved, skipping");
-            }
-            continue;
-        };
-        if !no_deps {
-            for r in &entry.requires {
-                queue.push((r.name.clone(), Req::Floor(r.min.clone()), false));
-            }
-        }
-        plan.push(entry);
     }
-
-    if !unresolved.is_empty() {
+    if !resolution.unresolved_roots.is_empty() {
         bail!(
             "not found in the configured indexes:\n  {}\n\
              hint: `lvpm search <name>` to see what is available; a [sources] entry \
              in {} adds a repository",
-            unresolved.join("\n  "),
+            resolution.unresolved_roots.join("\n  "),
             project::FILE_NAME
         );
     }
 
-    plan.reverse(); // dependencies before dependents
+    let plan = resolution.plan;
 
     println!("\nresolved {} package{}:", plan.len(), if plan.len() == 1 { "" } else { "s" });
     for e in &plan {
@@ -1174,7 +1180,7 @@ fn cmd_install(
                 }
                 std::io::stdout().flush().ok();
             }
-            let m = install::apply(&roots, &spec, &mut zip, &p, pre.as_deref())?;
+            let m = install::apply(&roots, &spec, &mut zip, &p, pre.as_deref(), dependency::package_dependency_names(e, spec.requires.as_deref()))?;
             println!("{} files", m.files.len());
             relink_work.push((e.name.clone(), m.relink_folders.iter().map(PathBuf::from).collect()));
             // A venv's hooks run too: the paths handed to them in `Files
@@ -1742,7 +1748,7 @@ fn cmd_venv(cli: &Cli, sub: &VenvCmd) -> Result<()> {
             }
         },
         VenvCmd::Remove { yes } => {
-            let Some(v) = venv::find(cli.project.as_deref(), &cwd)? else {
+            let Some(v) = venv::find_for_removal(cli.project.as_deref(), &cwd)? else {
                 bail!("no venv at or above {}", cwd.display());
             };
             venv::remove(&v, *yes)
@@ -2269,6 +2275,67 @@ fn read_spec(zip: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>) -> Result<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dependency_confirmation_accepts_yes_and_defaults_to_no() {
+        let names = vec!["dependency".to_string()];
+        for (answer, expected) in [("y\n", true), ("YES\n", true), ("\n", false), ("no\n", false)] {
+            let mut input = std::io::Cursor::new(answer.as_bytes());
+            let mut output = Vec::new();
+            assert_eq!(confirm_dependencies(&names, true, &mut input, &mut output).unwrap(), expected);
+            assert!(String::from_utf8(output).unwrap().contains("dependency"));
+        }
+        assert!(confirm_dependencies(&names, false, &mut std::io::empty(), &mut Vec::new()).is_err());
+    }
+
+    #[test]
+    fn uninstall_dependency_flags_conflict_with_each_other_and_all() {
+        assert!(Cli::try_parse_from(["lvpm", "uninstall", "pkg", "--with-deps", "--keep-deps"]).is_err());
+        assert!(Cli::try_parse_from(["lvpm", "uninstall", "--all", "--with-deps"]).is_err());
+        assert!(Cli::try_parse_from(["lvpm", "uninstall", "pkg", "--with-deps"]).is_ok());
+    }
+
+    #[test]
+    fn uninstall_roots_include_main_and_all_named_groups() {
+        let dir = std::env::temp_dir().join(format!("lvpm-uninstall-roots-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(project::FILE_NAME);
+        assert!(project_uninstall_roots(&path).is_err());
+        std::fs::write(dir.join(project::FILE_NAME),
+            "[dependencies]\nmain_package = \"*\"\n[dependencies.test]\ntest_package = \"*\"\n").unwrap();
+        assert_eq!(project_uninstall_roots(&path).unwrap(), ["main_package", "test_package"]);
+        std::fs::write(dir.join(project::FILE_NAME), "invalid = [").unwrap();
+        assert!(project_uninstall_roots(&path).is_err());
+        let vipm = dir.join("vipm.toml");
+        std::fs::write(&vipm, "[dependencies]\ncommon = \"1.0\"\n[dev-dependencies]\ntest = \"1.0\"\n").unwrap();
+        assert_eq!(project_uninstall_roots(&vipm).unwrap(), ["common", "test"]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn venv_uses_its_bound_manifest_and_reports_when_it_is_missing() {
+        let dir = std::env::temp_dir().join(format!("lvpm-bound-manifest-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let vipm = dir.join("vipm.toml");
+        std::fs::write(&vipm, "[dependencies]\npinned = \"1.0\"\n").unwrap();
+        std::fs::write(dir.join("lvpm.toml"), "[dependencies]\nother = \"*\"\n").unwrap();
+        let cli = Cli::try_parse_from(["lvpm", "install"]).unwrap();
+        let mut v = venv::Venv {
+            repo: dir.clone(), dir: dir.join(".lv-venv"),
+            target: target::LvTarget { version: 26.3, bitness: 64, path: dir.join("LabVIEW") },
+            port: 3456, manifest: Some(PathBuf::from("vipm.toml")),
+        };
+        let (path, project) = manifest_for(&cli, None, Some(&v)).unwrap().unwrap();
+        assert_eq!(path, vipm);
+        assert_eq!(project.declared_dependency_names().collect::<Vec<_>>(), ["pinned"]);
+        let (_, override_project) = manifest_for(&cli, Some(&dir.join("lvpm.toml")), Some(&v)).unwrap().unwrap();
+        assert_eq!(override_project.declared_dependency_names().collect::<Vec<_>>(), ["other"]);
+        std::fs::remove_file(&vipm).unwrap();
+        assert!(manifest_for(&cli, None, Some(&v)).is_err());
+        v.manifest = None;
+        assert!(manifest_for(&cli, None, Some(&v)).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     fn install(args: &[&str]) -> Result<GroupArgs, clap::Error> {
         let cli = Cli::try_parse_from(["lvpm", "install"].iter().chain(args))?;

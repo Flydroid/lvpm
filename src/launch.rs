@@ -150,7 +150,9 @@ pub fn write_ini(v: &Venv, extra: &[(String, String)]) -> Result<PathBuf> {
     for d in [&objcache, &data] {
         std::fs::create_dir_all(d).with_context(|| format!("creating {}", d.display()))?;
     }
-    let location = ini_path(&v.dir);
+    let packages = v.packages_dir();
+    std::fs::create_dir_all(&packages).with_context(|| format!("creating {}", packages.display()))?;
+    let location = ini_path(&packages);
     let objcache = ini_path(&objcache);
     let data = ini_path(&data);
     let port = v.port.to_string();
@@ -452,13 +454,13 @@ mod tests {
         let ini = "[LabVIEW]\r\nserver.tcp.port=3364\r\nserver.tcp.acl=\"+*\"\r\nserver.tcp.port = 9\r\n";
         let out = override_keys(
             ini,
-            &[("server.tcp.port", "3400"), ("LVAddons.AdditionalLocations", "C:\\r\\.lv-venv")],
+            &[("server.tcp.port", "3400"), ("LVAddons.AdditionalLocations", "C:\\r\\.lv-venv\\packages")],
         );
         assert_eq!(
             out,
             format!(
                 "[LabVIEW]{EOL}server.tcp.port=3400{EOL}server.tcp.acl=\"+*\"{EOL}\
-                 LVAddons.AdditionalLocations=C:\\r\\.lv-venv{EOL}"
+                 LVAddons.AdditionalLocations=C:\\r\\.lv-venv\\packages{EOL}"
             )
         );
     }
@@ -473,14 +475,14 @@ mod tests {
     fn reapplying_to_a_persisted_ini_changes_only_our_keys() {
         // The venv's own ini is the base from the second launch on: what the
         // venv IDE wrote stays, lvpm's keys are refreshed in place.
-        let keys = [("server.tcp.port", "3412"), ("CompiledObjCacheRoot", "C:\\v\\.lvpm\\objcache")];
+        let keys = [("server.tcp.port", "3412"), ("CompiledObjCacheRoot", "C:\\v\\.lv-venv\\objcache")];
         let first = override_keys("[LabVIEW]\r\nserver.tcp.port=3364\r\n", &keys);
         let edited = format!("{first}useLocaleDecimalPt=False{EOL}");
         let moved = [("server.tcp.port", "3500"), keys[1]];
         assert_eq!(
             override_keys(&edited, &moved),
             format!(
-                "[LabVIEW]{EOL}server.tcp.port=3500{EOL}CompiledObjCacheRoot=C:\\v\\.lvpm\\objcache{EOL}\
+                "[LabVIEW]{EOL}server.tcp.port=3500{EOL}CompiledObjCacheRoot=C:\\v\\.lv-venv\\objcache{EOL}\
                  useLocaleDecimalPt=False{EOL}"
             )
         );

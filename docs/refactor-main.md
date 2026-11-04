@@ -11,9 +11,16 @@ This is the first step of the [roadmap](roadmap.md)'s Terminal UI work, and
 the CLI changes in [cli.md](cli.md) land in the files it creates. Line
 numbers below are as of `main` at `39a5aaf`.
 
+The install resolver has since moved to `src/resolve.rs`, with tests for
+resolution and structured notices for the CLI. `Project` also exposes declared
+dependency names across all groups, and `src/dependency.rs` owns package
+dependency metadata and uninstall planning. The remaining split below is
+still planned. Unlike the original resolver, an unreadable or invalid
+installed dependency record now fails explicitly instead of being ignored.
+
 ## Why now
 
-- **The resolver is buried in `cmd_install`.** The depth-first walk
+- **The resolver was buried in `cmd_install`.** The depth-first walk
   ([main.rs:820-881](../src/main.rs#L820-L881)) sits inside a 412-line
   function. The lockfile, `lvpm update` and `lvpm tree` all need it as a
   callable function, and extracting it is what makes it testable.
@@ -92,8 +99,8 @@ and uninstall call it as much as `lvpm refresh` does.
    Linux; the e2e suite once at the end. One pull request, reviewed as a
    move (`git diff --color-moved`).
 2. **Cleanups**, as separate commits:
-   - extract `resolve()` and add tests for it (exact pins, `>=` floors, `*`,
-     installed versions that satisfy a dependency, downgrades);
+   - extract `resolve()` and add tests for it — done; downgrade decisions
+     remain in install orchestration;
    - switch `Install` and `ViRun` to `Args` structs;
    - add `require_target()` and the shared relink helper to remove the
      duplication;

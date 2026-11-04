@@ -151,6 +151,19 @@ using the project's `[sources]`, but does not add it to the manifest yet.
 `lvpm install` is additive: it never removes a package that is installed but
 no longer listed. Use `lvpm uninstall <name>`, or `lvpm uninstall --all`
 followed by `lvpm install`, until `lvpm sync` exists (see [To do](#to-do)).
+Uninstall can also remove unshared dependencies after confirmation; use
+`--with-deps` or `--keep-deps` for non-interactive use. It warns about
+dependents and keeps shared dependencies. Old installation records without
+dependency information are rejected. Recreate affected venvs and reinstall
+their packages, or uninstall affected global packages with the previous lvpm
+version before reinstalling them.
+In a venv, packages declared in any dependency group and their installed
+transitive dependencies are kept during automatic dependency removal.
+Explicitly uninstalling a declared package warns and leaves the manifest
+unchanged. `uninstall --all` still removes every package.
+Venvs remember the manifest used at creation, including an explicitly named
+`vipm.toml` or other file. Venvs whose bindings do not identify their
+manifest must be removed and recreated.
 
 ## Named dependency groups
 
@@ -234,9 +247,11 @@ there is marked as unknown.
 
 ### Reading a `vipm.toml` with lvpm
 
-lvpm never discovers `vipm.toml`. Named with `--manifest`, it is converted
-into lvpm's model first (`src/vipm_interop.rs`) and then used exactly like
-an `lvpm.toml`. Every command that reads one says so:
+lvpm does not discover `vipm.toml` by walking project directories. Named with
+`--manifest`, it is converted into lvpm's model first (`src/vipm_interop.rs`)
+and then used like an `lvpm.toml`. A newly created venv remembers an
+explicitly named manifest for subsequent commands. Every command that reads
+a `vipm.toml` says so:
 
 ```console
 manifest: C:\proj\vipm.toml (VIPM format, converted)
@@ -255,7 +270,8 @@ $ lvpm install --manifest vipm.toml --with dev # plus its [dev-dependencies], as
 ```
 
 `venv create --manifest` writes no `lvpm.toml` skeleton: a skeleton is
-written only when `venv create` has no manifest to read.
+written only when `venv create` has no manifest to read. New venvs remember
+the chosen manifest for subsequent installs and dependency-aware uninstalls.
 
 | `vipm.toml` content                                  | lvpm                                                                                             |
 | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------ |

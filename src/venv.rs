@@ -1,6 +1,6 @@
 //! A project's own package tree — the LabVIEW counterpart of a virtualenv.
 //!
-//! `.lv-venv/` by default is an LVAddons *location*: one addon per
+//! `.lv-venv/packages/` by default is an LVAddons *location*: one addon per
 //! package, each mirroring the LabVIEW install dir under `<pkg>/1/`. A LabVIEW
 //! started with `LVAddons.AdditionalLocations` pointing here overlays them onto
 //! its own tree, so a package in the venv links exactly as it would from the
@@ -24,9 +24,9 @@ const MIN_LV: f64 = 24.0;
 
 #[derive(Debug, Clone)]
 pub struct Venv {
-    /// The repo root — where `lvpm.toml` lives.
+    /// The repo root — where the project manifest lives.
     pub repo: PathBuf,
-    /// The configured project directory, used as an LVAddons location.
+    /// The configured project environment directory.
     pub dir: PathBuf,
     /// The LabVIEW this venv's payload is saved for.
     pub target: LvTarget,
@@ -34,6 +34,8 @@ pub struct Venv {
     /// own, so the user's primary IDE on the default port is never mistaken
     /// for it.
     pub port: u16,
+    /// Manifest filename relative to the repo; absent only when removing an old venv.
+    pub manifest: Option<PathBuf>,
 }
 
 /// What `venv create` pins. The payload is relinked and saved in this
@@ -48,18 +50,45 @@ struct Binding {
     bitness: u8,
     port: u16,
     created_at: u64,
+    #[serde(default)]
+    manifest: Option<PathBuf>,
 }
 
 fn binding_path(dir: &Path) -> PathBuf {
+    dir.join("venv.json")
+}
+
+fn legacy_binding_path(dir: &Path) -> PathBuf {
     dir.join(".lvpm").join("venv.json")
 }
 
+fn reject_legacy(dir: &Path) -> Result<()> {
+    if legacy_binding_path(dir).exists() {
+        bail!(
+            "{} uses the old venv layout; close its LabVIEW, then run `lvpm venv remove` \
+             and `lvpm venv create`, followed by `lvpm install`",
+            dir.display()
+        );
+    }
+    Ok(())
+}
+
 impl Venv {
+    /// The manifest pinned at creation, when this binding records one.
+    pub fn manifest_path(&self) -> Option<PathBuf> {
+        self.manifest.as_ref().map(|name| self.repo.join(name))
+    }
+
+    /// The LVAddons location holding one addon per package.
+    pub fn packages_dir(&self) -> PathBuf {
+        self.dir.join("packages")
+    }
+
     /// Roots for installing one package: its own addon under the venv.
     pub fn roots_for_pkg(&self, pkg: &str) -> Result<Roots> {
-        // The name becomes a directory LabVIEW enumerates; 
         ensure!(
-            !pkg.is_empty() && pkg.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)),
+            !pkg.is_empty() && pkg != "." && pkg != ".."
+                && pkg.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)),
             "package name {pkg:?} cannot be an addon folder name"
         );
         Ok(Roots::project(&self.dir, &self.target, pkg))
@@ -72,7 +101,7 @@ impl Venv {
 
     /// The ini a LabVIEW on this venv is started with.
     pub fn ini_path(&self) -> PathBuf {
-        self.dir.join(".lvpm").join("labview.ini")
+        self.dir.join("labview.ini")
     }
 
     /// The compiled-object cache of a LabVIEW on this venv. Its own, because
@@ -80,7 +109,7 @@ impl Venv {
     /// SQLITE_BUSY on every insert, and the venv's compiled code would mix
     /// with the primary IDE's.
     pub fn objcache_dir(&self) -> PathBuf {
-        self.dir.join(".lvpm").join("objcache")
+        self.dir.join("objcache")
     }
 
     /// The `LabVIEW Data` folder of a LabVIEW on this venv — autosave,
@@ -88,19 +117,19 @@ impl Venv {
     /// recover another's files. Fresh: the user's own customisations there
     /// (icon templates, right-click plugins) are not carried over.
     pub fn data_dir(&self) -> PathBuf {
-        self.dir.join(".lvpm").join("data")
+        self.dir.join("data")
     }
 
     /// `TEMP`/`TMP` of a LabVIEW on this venv. LabVIEW names its log after
     /// version and user only (`LabVIEW_64_<ver>_<user>_cur.txt`), so two
     /// instances on the shared `%TEMP%` would write into the same file.
     pub fn temp_dir(&self) -> PathBuf {
-        self.dir.join(".lvpm").join("temp")
+        self.dir.join("temp")
     }
 
     /// The process id of the LabVIEW lvpm last started on this venv.
     pub fn pid_path(&self) -> PathBuf {
-        self.dir.join(".lvpm").join("labview.pid")
+        self.dir.join("labview.pid")
     }
 
     /// The one line every venv-mode command prints first, so an implicit
@@ -130,7 +159,7 @@ pub fn probe(cwd: &Path) -> Result<Found> {
 
 fn probe_in(cwd: &Path, venv_dir: &Path) -> Found {
     for dir in cwd.ancestors() {
-        if binding_path(&dir.join(venv_dir)).is_file() {
+        if binding_path(&dir.join(venv_dir)).is_file() || legacy_binding_path(&dir.join(venv_dir)).is_file() {
             return Found::Venv(dir.to_path_buf());
         }
         if dir.join(project::FILE_NAME).is_file() {
@@ -161,23 +190,41 @@ pub fn locate(cwd: &Path) -> Result<Option<PathBuf>> {
 /// The venv a command means, if any: `--project` names the repo outright,
 /// otherwise it is looked up from `cwd`.
 pub fn find(project: Option<&Path>, cwd: &Path) -> Result<Option<Venv>> {
+    find_inner(project, cwd, false)
+}
+
+/// Removal also accepts the old layout, without treating it as usable.
+pub fn find_for_removal(project: Option<&Path>, cwd: &Path) -> Result<Option<Venv>> {
+    find_inner(project, cwd, true)
+}
+
+fn find_inner(project: Option<&Path>, cwd: &Path, allow_legacy: bool) -> Result<Option<Venv>> {
     match project {
-        Some(repo) => load(repo).map(Some),
+        Some(repo) => load_inner(repo, allow_legacy).map(Some),
         None => match locate(cwd)? {
-            Some(repo) => load(&repo).map(Some),
+            Some(repo) => load_inner(&repo, allow_legacy).map(Some),
             None => Ok(None),
         },
     }
 }
 
-/// Read a venv's binding and find the LabVIEW it names on this machine.
-pub fn load(repo: &Path) -> Result<Venv> {
+fn load_inner(repo: &Path, allow_legacy: bool) -> Result<Venv> {
     let repo = std::path::absolute(repo)?;
     let dir = repo.join(config::load()?.venv_dir);
-    let bp = binding_path(&dir);
+    if !allow_legacy {
+        reject_legacy(&dir)?;
+    }
+    let bp = if allow_legacy && legacy_binding_path(&dir).is_file() {
+        legacy_binding_path(&dir)
+    } else {
+        binding_path(&dir)
+    };
     let text = std::fs::read_to_string(&bp)
         .with_context(|| format!("no venv in {} — `lvpm venv create` makes one", repo.display()))?;
     let b: Binding = serde_json::from_str(&text).with_context(|| format!("reading {}", bp.display()))?;
+    ensure!(allow_legacy || b.manifest.is_some(),
+        "{} has an unsupported venv binding without a manifest — `lvpm venv remove`, then `lvpm venv create`",
+        bp.display());
 
     let target = target::detect()?
         .into_iter()
@@ -190,7 +237,11 @@ pub fn load(repo: &Path) -> Result<Venv> {
                 b.target_path
             )
         })?;
-    Ok(Venv { repo, dir, target, port: b.port })
+    if let Some(name) = &b.manifest {
+        ensure!(name.components().count() == 1 && name.file_name().is_some(),
+            "invalid manifest filename in {}", bp.display());
+    }
+    Ok(Venv { repo, dir, target, port: b.port, manifest: b.manifest })
 }
 
 /// Create the configured venv directory for the project at or above `start` (or at `start`
@@ -224,6 +275,7 @@ pub fn create(
         }
     };
     let dir = repo.join(config::load()?.venv_dir);
+    reject_legacy(&dir)?;
     if binding_path(&dir).is_file() {
         bail!(
             "{} already has a venv — `lvpm venv remove` first to bind it afresh",
@@ -273,11 +325,13 @@ pub fn create(
         eprintln!("wrote {}", manifest_path.display());
     }
 
-    std::fs::create_dir_all(dir.join(".lvpm")).with_context(|| format!("creating {}", dir.display()))?;
+    std::fs::create_dir_all(dir.join("packages")).with_context(|| format!("creating {}", dir.display()))?;
     // The payload is disposable and machine-bound: the manifests inside hold
     // absolute paths. Self-ignoring, the way cargo's `target/` is.
     std::fs::write(dir.join(".gitignore"), "*\n")?;
     let port = port_for(&dir);
+    let manifest = PathBuf::from(manifest_path.file_name()
+        .ok_or_else(|| anyhow!("manifest {} has no filename", manifest_path.display()))?);
     let b = Binding {
         target_key: target.key(),
         target_path: target.path.to_string_lossy().into_owned(),
@@ -288,8 +342,9 @@ pub fn create(
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0),
+        manifest: Some(manifest.clone()),
     };
-    let v = Venv { repo, dir, target, port };
+    let v = Venv { repo, dir, target, port, manifest: Some(manifest) };
     // The venv's own ini starts here, as a snapshot of the user's settings
     // for this LabVIEW; from now on it is the venv's, and what is set in the
     // venv IDE stays in it. Written before the binding: the binding is what
@@ -375,11 +430,70 @@ mod tests {
 
         // Once created, found from anywhere below.
         let venv_dir = repo.join(config::DEFAULT_VENV_DIR);
-        std::fs::create_dir_all(venv_dir.join(".lvpm")).unwrap();
+        std::fs::create_dir_all(&venv_dir).unwrap();
         std::fs::write(binding_path(&venv_dir), "{}").unwrap();
         assert_eq!(locate(&deep).unwrap().as_deref(), Some(repo.as_path()));
         assert_eq!(locate(&repo).unwrap().as_deref(), Some(repo.as_path()));
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn legacy_venv_is_discovered_but_requires_recreation() {
+        let root = scratch_dir("legacy");
+        let dir = root.join(config::DEFAULT_VENV_DIR);
+        std::fs::create_dir_all(dir.join(".lvpm")).unwrap();
+        std::fs::write(legacy_binding_path(&dir), "{}").unwrap();
+        assert!(matches!(probe_in(&root, Path::new(config::DEFAULT_VENV_DIR)), Found::Venv(ref d) if d == &root));
+        let error = reject_legacy(&dir).unwrap_err().to_string();
+        assert!(error.contains("lvpm venv remove"));
+        assert!(error.contains("lvpm venv create"));
+        assert!(load_inner(&root, false).unwrap_err().to_string().contains("old venv layout"));
+        assert!(create(&root, None, None).unwrap_err().to_string().contains("old venv layout"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn binding_remembers_manifest_and_old_binding_cannot_be_used() {
+        let old = r#"{"target_key":"k","target_path":"p","version":26.0,"bitness":64,"port":3500,"created_at":1}"#;
+        let mut binding: Binding = serde_json::from_str(old).unwrap();
+        assert!(binding.manifest.is_none());
+        let repo = scratch_dir("old-binding");
+        let dir = repo.join(config::DEFAULT_VENV_DIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(binding_path(&dir), old).unwrap();
+        assert!(load_inner(&repo, false).unwrap_err().to_string().contains("unsupported venv binding"));
+        binding.manifest = Some(PathBuf::from("vipm.toml"));
+        let stored = serde_json::to_string(&binding).unwrap();
+        let restored: Binding = serde_json::from_str(&stored).unwrap();
+        assert_eq!(restored.manifest, Some(PathBuf::from("vipm.toml")));
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn environment_paths_and_package_names_are_scoped_to_the_new_layout() {
+        let dir = scratch_dir("paths");
+        let target = LvTarget { version: 26.3, bitness: 64, path: dir.join("LabVIEW") };
+        let v = Venv { repo: dir.clone(), dir: dir.clone(), target, port: 3456, manifest: None };
+        assert_eq!(v.packages_dir(), dir.join("packages"));
+        assert_eq!(v.ini_path(), dir.join("labview.ini"));
+        assert_eq!(v.objcache_dir(), dir.join("objcache"));
+        assert_eq!(v.data_dir(), dir.join("data"));
+        assert_eq!(v.temp_dir(), dir.join("temp"));
+        assert_eq!(v.pid_path(), dir.join("labview.pid"));
+        assert!(v.roots_for_pkg(".").is_err());
+        assert!(v.roots_for_pkg("..").is_err());
+        assert_eq!(v.roots_for_pkg("pkg").unwrap().application, dir.join("packages").join("pkg").join("1"));
+
+        std::fs::write(v.ini_path(), "[LabVIEW]\ncustom=True\n").unwrap();
+        crate::launch::write_ini(&v, &[]).unwrap();
+        let ini = std::fs::read_to_string(v.ini_path()).unwrap();
+        let location = v.packages_dir().to_string_lossy().into_owned();
+        let location = if location.contains(' ') { format!("\"{location}\"") } else { location };
+        assert!(ini.lines().any(|line| line == format!("LVAddons.AdditionalLocations={location}")));
+        assert!(ini.contains("custom=True"));
+        assert!(v.packages_dir().is_dir());
+        assert!(!dir.join(".lvpm").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

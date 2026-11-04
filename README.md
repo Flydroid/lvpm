@@ -157,7 +157,7 @@ is the reference and the term-by-term map from OGPT to lvpm.
 | `lvpm install <name>[@<version>]`                    | Resolve dependencies, download, verify MD5, unpack, prepare links and source-only files, run hooks |
 | `lvpm install`                                       | Inside a project: install everything `lvpm.toml` lists, preparing links after the whole plan is copied (`--manifest <FILE>` selects a manifest) |
 | `lvpm linkfix` / `--tree <DIR>`                     | Prepare an existing venv or explicit LabVIEW-shaped tree; supports dry runs and per-file reports |
-| `lvpm uninstall <name>` / `--all`                    | Remove exactly the files that were installed and prune empty folders                                                                         |
+| `lvpm uninstall <name>` / `--all`                    | Remove installed files; optionally remove unshared dependencies                                                                              |
 | `lvpm list`                                          | What lvpm has installed into the selected target, and which hooks it did not run                                                             |
 | `lvpm search <query>`                                | Search the package indexes                                                                                                                   |
 | `lvpm targets`                                       | Detected LabVIEW installations                                                                                                               |
@@ -228,27 +228,43 @@ $ lvpm launch MyProject.lvproj    # a LabVIEW that sees the venv
   on a headless machine (see [CI in a container](#ci-in-a-container-docker)).
   Every venv-mode command prints which venv it resolved to.
 - `lvpm launch [<lvproj>]` starts a LabVIEW on the venv: an ini of the
-  venv's own (`.lvpm/labview.ini`, copied from the target's `LabVIEW.ini` by
+  venv's own (`.lv-venv/labview.ini`, copied from the target's `LabVIEW.ini` by
   `lvpm venv create` without its recent-files lists, so the venv IDE never
   offers projects from outside the venv; options you set in the venv IDE
   persist; delete it
   to inherit your global settings again at the next launch) with the venv
   mounted, VI Server on a port of its
   own, and its own compiled-object cache, `LabVIEW Data` folder and temp
-  directory under `.lvpm/`, handed over with `-pref`. Your primary LabVIEW,
+  directory under `.lv-venv/`, handed over with `-pref`. Your primary LabVIEW,
   if open, is untouched, and its autosave files, cache and log
   (`LabVIEW_*_cur.txt`) are never shared with the venv's — look for the
-  venv's log in `.lvpm/temp`. The venv starts with an empty `LabVIEW Data`, so personal
+  venv's log in `.lv-venv/temp`. The venv starts with an empty `LabVIEW Data`, so personal
   customisations kept there (icon templates, right-click plugins) are not
   available in it.
 
-How it works: the venv directory is an [LVAddons](https://labviewwiki.org/wiki/LVAddons)
+The default layout is:
+
+```text
+.lv-venv/
+  packages/<pkg>/1/    package addon and its mirrored LabVIEW tree
+  installed/           package installation records
+  venv.json            LabVIEW binding
+  labview.ini          venv-specific LabVIEW settings
+  objcache/ data/ temp/  isolated LabVIEW runtime files
+```
+
+How it works: the `packages/` directory is an [LVAddons](https://labviewwiki.org/wiki/LVAddons)
 location, one addon per package, each mirroring the LabVIEW install dir
 under `<pkg>/1/`. A LabVIEW started with `LVAddons.AdditionalLocations`
 pointing there overlays them onto its own tree, so a package in the venv
 resolves as `<vilib>/...` exactly as a globally installed one would. The VIs
 you write against it link portably, and `C:\Program Files` never changes.
 Needs LabVIEW 2024 Q1 or later.
+
+Environments created with the old layout must be recreated: close their
+LabVIEW instance, then run `lvpm venv remove`, `lvpm venv create`, and
+`lvpm install`. Removing the venv also removes its installed packages and
+venv-specific settings.
 
 Two things follow from LabVIEW reading an addon's contents at launch:
 
@@ -259,6 +275,27 @@ Two things follow from LabVIEW reading an addon's contents at launch:
 - The real installation always wins over the overlay: a package installed
   both globally and in the venv loads from the global copy, whatever its
   version. Keep the target installation clean of what the venv provides.
+
+### Uninstalling dependencies
+
+`lvpm uninstall <name>` warns if another installed package requires the
+named package. If it has installed dependencies that are not needed by other
+packages, lvpm asks whether to remove them too. Shared dependencies (and
+dependencies they need) are kept and reported. In a venv, packages declared
+in any group of its bound project manifest, and their transitive dependencies,
+are also kept. Explicitly uninstalling a declared package warns but proceeds;
+uninstall never edits the manifest.
+
+For scripts, pass `--with-deps` to remove unshared dependencies or
+`--keep-deps` to keep them without prompting. Without either option, an
+uninstall that would prompt fails before removing anything when standard
+input is not a terminal. `uninstall --all` still removes every package.
+
+Installation records must contain dependency information; old or invalid
+records are rejected rather than ignored. Venvs created before manifest
+bindings must be removed and recreated, then their packages reinstalled.
+For global installations with old records, uninstall the affected packages
+with the previous lvpm version before reinstalling them.
 
 ## What an install does in LabVIEW
 
@@ -551,8 +588,10 @@ runs.
 
 | Module                         | Responsibility                                                                                                          |
 | ------------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
-| `main.rs`                      | The CLI: commands, target and venv selection, the install plan                                                          |
+| `main.rs`                      | The CLI: commands, target and venv selection, and install/uninstall orchestration                                       |
 | `index.rs`                     | Fetch and parse package directories (`.ogpd` / `index.vipr`), resolve names to versions                                |
+| `resolve.rs`                   | Resolve requested packages and dependencies into an installation order                                                  |
+| `dependency.rs`                | Package dependency metadata and dependency-aware uninstall planning                                                     |
 | `fetch.rs`                     | Acquire package bytes: cache lookup, downloads, integrity verification, and cache population                            |
 | `cache.rs`                     | The cache: the SQLite index of known sources and the content-addressed store of what they served                        |
 | `spec.rs`                      | The `spec` manifest inside a package (the OGPT `.ogp` format and VIPM's `.vip` dialect)                                 |

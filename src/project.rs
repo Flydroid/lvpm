@@ -137,6 +137,13 @@ impl Default for Project {
 }
 
 impl Project {
+    /// Every declared package name, including groups not selected for an install.
+    pub fn declared_dependency_names(&self) -> impl Iterator<Item = &str> {
+        self.dependencies.iter().map(|(name, _)| name.as_str()).chain(
+            self.groups.iter().flat_map(|(_, group)| group.dependencies.iter().map(|(name, _)| name.as_str()))
+        )
+    }
+
     /// The `[sources]` as index arguments. Only hosted index folders: a path
     /// on disk is refused here rather than silently resolving nothing.
     pub fn resolved_sources(&self) -> Result<Vec<String>> {
@@ -349,6 +356,19 @@ fn string_array(label: &str, key: &str, value: toml::Value) -> Result<Vec<String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn declared_dependency_names_include_unselected_groups() {
+        let project = parse(
+            "[dependencies]\nmain_package = \"*\"\n[dependencies.test]\ntest_package = \"*\"\n\
+             [dependencies.build]\nbuild_package = \"*\"\n"
+        ).unwrap();
+        assert_eq!(
+            project.declared_dependency_names().collect::<Vec<_>>(),
+            ["main_package", "test_package", "build_package"]
+        );
+        assert_eq!(project.select(&[], &[], &[]).unwrap().dependencies.len(), 1);
+    }
 
     #[test]
     fn reads_every_table_in_file_order() {
