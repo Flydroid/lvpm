@@ -18,7 +18,8 @@ interface is one control and one indicator:
 | in | `Folder to relink` | string |
 | out | `Done` | boolean |
 
-`lvpm install --relink` runs it over each newly installed package once every package's
+`lvpm install --relink` selects this pass instead of linkfix. It runs over
+each newly installed package once every package's
 files are on disk, one call per package folder, and polls `Done` while it works
 (`src/relink.rs`). `lvpm relink <package>` runs the same pass on its own, from
 what the install manifest recorded.

@@ -41,7 +41,9 @@ fn install_prepares_new_files_by_default_with_an_opt_out() {
         ("default", vec![]),
         ("legacy", vec!["--no-relink"]),
         ("opt-out", vec!["--no-linkfix"]),
+        ("relink", vec!["--relink"]),
         ("preview", vec!["--dry-run"]),
+        ("relink-preview", vec!["--relink", "--dry-run"]),
     ] {
         let prefix = root.join(name);
         let existing = prefix.join("LabVIEW/vi.lib/Existing.lvlib");
@@ -86,13 +88,24 @@ fn install_prepares_new_files_by_default_with_an_opt_out() {
                     "{stdout}"
                 );
             }
-            "opt-out" => {
-                assert!(stdout.contains("linkfix: skipped (--no-linkfix)"));
+            "opt-out" | "relink" => {
+                let reason = if name == "opt-out" {
+                    "--no-linkfix"
+                } else {
+                    "--relink selects LabVIEW instead"
+                };
+                assert!(stdout.contains(&format!("linkfix: skipped ({reason})")));
+                assert!(!stdout.contains("linkfix: preparing"));
                 assert_eq!(std::fs::read(&installed).unwrap(), xml);
                 assert_eq!(std::fs::read(&installed_vi).unwrap(), vi);
             }
             _ => {
-                assert!(stdout.contains("linkfix: would prepare"));
+                if name == "relink-preview" {
+                    assert!(stdout.contains("linkfix: skipped (--relink selects LabVIEW instead)"));
+                    assert!(!stdout.contains("linkfix: would prepare"));
+                } else {
+                    assert!(stdout.contains("linkfix: would prepare"));
+                }
                 assert!(!installed.exists());
                 assert!(!installed_vi.exists());
             }

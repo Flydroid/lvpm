@@ -5,7 +5,8 @@
 //! or in LabVIEW's own templates, says nothing about lvpm (LUnit ships one on
 //! purpose), and a mass compile would write into the tree the uninstall check
 //! compares. What is asked is whether lvpm put every file in place, ran every
-//! hook, relinked, and took it all out again.
+//! hook, prepared with linkfix or relink on separate installs, and took it
+//! all out again.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -40,7 +41,10 @@ pub fn trials() -> Vec<Trial> {
             "every file in the install records is on disk",
             records_on_disk,
         ),
-        ("relink --all over the installed packages", relink_all),
+        ("uninstall linkfixed packages", uninstall_all),
+        ("linkfix left no changes after uninstall", global_tree_unchanged),
+        ("fresh global install without linkfix", global_install_for_relink),
+        ("relink --all over un-linkfixed packages", relink_all),
         ("lvpm list shows every package relinked", list_relinked),
         ("uninstall --all", uninstall_all),
         (
@@ -48,7 +52,10 @@ pub fn trials() -> Vec<Trial> {
             global_tree_unchanged,
         ),
         ("venv create", venv_create),
-        ("venv install --relink", venv_install),
+        ("venv install uses linkfix without relink", venv_install),
+        ("the linkfixed venv left LabVIEW alone", venv_tree_unchanged),
+        ("uninstall linkfixed venv packages", venv_uninstall),
+        ("fresh venv install --relink skips linkfix", venv_install_relinked),
         ("every venv package relinked", venv_relinked),
         ("the venv left the LabVIEW tree alone", venv_tree_unchanged),
     ])
@@ -64,7 +71,20 @@ fn global_install() -> Check {
     )?;
     close_labview();
     *GLOBAL_TREE.lock().unwrap() = Some(tree()?);
-    ok(&global(), &["install", "--hooks"]).map(drop)
+    linkfix_only(&stdout(&ok(&global(), &["install", "--hooks"])?))
+}
+
+fn linkfix_only(output: &str) -> Check {
+    ensure(
+        output.contains("linkfix: preparing installed files")
+            && output.contains("LabVIEW relink: skipped")
+            && !output.contains("linkfix could not complete"),
+        || format!("expected linkfix without LabVIEW relink:\n{output}"),
+    )
+}
+
+fn global_install_for_relink() -> Check {
+    ok(&global(), &["install", "--no-linkfix", "--hooks"]).map(drop)
 }
 
 /// The dependency names of the global project, as fixtures::public wrote them.
@@ -171,7 +191,23 @@ fn venv_create() -> Check {
 }
 
 fn venv_install() -> Check {
-    ok(&venv(), &["install", "--relink"]).map(drop)
+    linkfix_only(&stdout(&ok(&venv(), &["install"])?))
+}
+
+fn venv_uninstall() -> Check {
+    close_labview();
+    let result = ok(&venv(), &["uninstall", "--all"]).map(drop);
+    close_labview();
+    result
+}
+
+fn venv_install_relinked() -> Check {
+    let output = stdout(&ok(&venv(), &["install", "--relink"])?);
+    ensure(
+        output.contains("linkfix: skipped (--relink selects LabVIEW instead)")
+            && !output.contains("linkfix: preparing"),
+        || format!("expected LabVIEW relink instead of linkfix:\n{output}"),
+    )
 }
 
 fn venv_relinked() -> Check {

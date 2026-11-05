@@ -50,7 +50,8 @@ wins over the overlay; `LVAddons.AdditionalLocations` needs LabVIEW 2024 Q1.
   real installation to catch a hook that writes outside the overlay, and
   per-dependency `hooks = "run" | "skip"` in the manifest.
 - ~~**LabVIEW relink by default.**~~ Inverted: the LabVIEW load/save pass is opt-in behind
-  `--relink`. Measured across 10 packages saved between LabVIEW 8.6 and 2020,
+  `--relink`, as an alternative to linkfix rather than a subsequent pass.
+  Measured across 10 packages saved between LabVIEW 8.6 and 2020,
   unrelinked VIs load and run from a venv untouched, and of 2412 installed
   files only the 3 that were saved by hand ever changed. `tools/linkfix/audit.py`
   reports the two properties that decide it (embedded compiled code, and

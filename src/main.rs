@@ -125,8 +125,8 @@ enum Cmd {
         package: Option<String>,
         /// Install every package listed in an `lvpm.toml`'s `[dependencies]`.
         ///
-        /// All packages resolve into one plan. Linkfix runs after every
-        /// package's files are on disk, before PostInstall hooks.
+        /// All packages resolve into one plan. Linkfix (or --relink) runs after
+        /// every package's files are on disk, before PostInstall hooks.
         #[arg(long, value_name = "FILE", conflicts_with = "package")]
         manifest: Option<PathBuf>,
         /// Show what would be written, then stop.
@@ -138,7 +138,7 @@ enum Cmd {
         /// Leave package files as copied: skip link repair and source-only preparation.
         #[arg(long)]
         no_linkfix: bool,
-        /// Also load and save installed VIs in LabVIEW. Linkfix runs without LabVIEW by default.
+        /// Load and save installed VIs in LabVIEW instead of running linkfix.
         #[arg(long = "relink")]
         relink_pass: bool,
         /// Accepted and ignored: LabVIEW relink is opt-in. Does not skip linkfix.
@@ -1246,6 +1246,8 @@ fn cmd_install(
     if !linkfix_files.is_empty() {
         if no_linkfix {
             println!("\nlinkfix: skipped (--no-linkfix); files left as copied");
+        } else if relink_pass {
+            println!("\nlinkfix: skipped (--relink selects LabVIEW instead)");
         } else if dry_run {
             println!("\nlinkfix: would prepare newly written LabVIEW-tree files (repair links and separate compiled code; no LabVIEW needed)");
         } else {
@@ -1272,7 +1274,7 @@ fn cmd_install(
     let want_relink = relink_pass && folders > 0;
 
     if folders > 0 && !relink_pass {
-        println!("\nLabVIEW relink: skipped (pass --relink to also load and save VIs in LabVIEW)");
+        println!("\nLabVIEW relink: skipped (pass --relink to use LabVIEW instead of linkfix)");
     }
 
     if dry_run {

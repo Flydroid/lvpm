@@ -13,8 +13,9 @@ them.
 ## The Install Default
 
 After all packages in an install plan have been copied, linkfix runs before
-PostInstall hooks and before any requested LabVIEW relink. It applies to
-venv, global and scratch-prefix installs.
+PostInstall hooks. It applies to venv, global and scratch-prefix installs.
+`--relink` selects LabVIEW's load/save pass instead and skips linkfix; these
+are alternative preparation methods, not sequential stages.
 
 Only files actually written by this install inside its LabVIEW tree are
 eligible for rewriting. Existing dependencies, files retained by a package's
@@ -25,9 +26,9 @@ indexed to resolve dependencies, without being modified.
 The order is:
 
 1. Run eligible PreInstall hooks, then copy each package's files.
-2. Run linkfix against the newly written LabVIEW-tree files.
-3. If requested, load and save installed VIs in LabVIEW with `--relink`.
-4. Run eligible PostInstall hooks, then refresh palettes where applicable.
+2. Run linkfix against the newly written LabVIEW-tree files, or use LabVIEW's
+  load/save pass instead when `--relink` is selected.
+3. Run eligible PostInstall hooks, then refresh palettes where applicable.
 
 Linkfix itself does not start LabVIEW. Hooks, a requested `--relink`, and
 palette refresh can still require LabVIEW.
@@ -102,6 +103,11 @@ the standalone command considers all eligible files in the selected tree,
 not only files from the most recent install. Close affected LabVIEW sessions
 before modifying their installed packages.
 
+Do not follow linkfix with `lvpm relink` on the same installed copies. Use
+fresh package copies when switching to the LabVIEW preparation method;
+an install that skips an already-installed version does not restore its
+original bytes.
+
 The independent methods are `owner`, `paths`, `qualifiers`, and `source-only`.
 Omitting `--fix` selects all four. `--keep-compiled-code` removes
 `source-only` from the selection.
@@ -152,7 +158,8 @@ The automated checks have different scopes:
 - The local CLI integration test builds a fixture `.vip` containing a
   library XML file and the real [Relink Packages.vi](../tools/Relink%20Packages.vi).
   It checks the default, opt-out, legacy flag, dry-run, unchanged archive,
-  and preservation of an existing unrelated file. It does not launch LabVIEW.
+  and preservation of an existing unrelated file. It also checks that
+  `--relink` skips linkfix, including in dry runs. It does not launch LabVIEW.
 - That checked-in VI is already source-only. The source-preservation unit
   test adds an explicitly synthetic compiled block, removes it through
   linkfix, and checks the ordered source sections and saved version. This is
@@ -162,8 +169,10 @@ The automated checks have different scopes:
   logical paths, diagram-removed VIs, and directory-link boundaries.
 - CI's real-package E2E suite installs LUnit (`astemes_lib_lunit`) and G-Image
   (`dataflow_g_lib_g_image`) with their dependencies in NI's LabVIEW 2026 Q3
-  containers. It checks installation, hooks, LabVIEW relinking, install
-  records and uninstall cleanup, including global/venv isolation. It is
+  containers. It checks default linkfix installation separately from LabVIEW
+  relinking, using fresh package copies between the two methods. It also
+  checks hooks, install records and uninstall cleanup, including global/venv
+  isolation. It is
   separate from `cargo test --workspace` and does not check every VI's
   runnability. Enabling default linkfix changes what that suite exercises;
   previous CI results do not validate the new default.
@@ -172,5 +181,5 @@ Earlier NovaXC and selected-package measurements informed supported layouts
 and skip rules. They are evidence for those cases, not a compatibility
 promise for every package or LabVIEW version. Before merging a default
 change, rerun real-package E2E and check IDE load/close behavior for affected
-projects, particularly whether a later LabVIEW relink masks a preparation
-problem.
+projects. Do not use a subsequent relink as validation of linkfixed files;
+avoiding that second pass does not by itself establish runtime compatibility.

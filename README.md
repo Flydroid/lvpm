@@ -183,7 +183,7 @@ Flags that apply to every command:
 changes nothing; `--no-deps` skips dependencies; `--allow-downgrade` permits
 replacing an installed package with an older version; `--no-linkfix` leaves
 package files as copied, skipping link repair and source-only preparation.
-`--relink` additionally loads and saves VIs in LabVIEW (off by default);
+`--relink` loads and saves VIs in LabVIEW **instead of linkfix** (off by default);
 the legacy `--no-relink` is accepted but does not disable linkfix. `--hooks`
 runs install hooks where they are off by default (both: a headless LabVIEW,
 see [CI in a container](#ci-in-a-container-docker)). `--relink-timeout <SECS>`
@@ -320,8 +320,8 @@ Freshly unpacked VIs still declare the paths their build machine wrote —
 `<vilib>`-style tokens for the most part, plus a residue of absolutes from the
 build machine.
 
-**The LabVIEW load/save pass is opt-in, behind `--relink`, and runs after
-linkfix.** In measurements across 10 packages saved
+**The LabVIEW load/save pass is opt-in, behind `--relink`, and replaces
+linkfix rather than following it.** In measurements across 10 packages saved
 between LabVIEW 8.6 and 2020, unrelinked VIs load and run from a venv
 untouched: LabVIEW resolves what the linker tables miss by searching vi.lib,
 and an LVAddons overlay *is* vi.lib. LabVIEW can also record dependencies that
@@ -360,7 +360,7 @@ dialogs over the install.
 | Hook               | Moment                                                                                                            |
 | ------------------ | ----------------------------------------------------------------------------------------------------------------- |
 | `PreInstall.vi`    | before the package's files are copied (not in a venv — its LabVIEW only starts once the files are down)           |
-| `PostInstall.vi`   | after linkfix and any requested LabVIEW relink, in the venv's own LabVIEW when a venv is in effect |
+| `PostInstall.vi`   | after linkfix or the selected LabVIEW relink, in the venv's own LabVIEW when a venv is in effect |
 | `PreUninstall.vi`  | before the package's files are removed                                                                            |
 | `PostUninstall.vi` | after removal (uninstall hooks are extracted at install time; the archive is long gone when uninstall needs them) |
 

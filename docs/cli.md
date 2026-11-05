@@ -127,7 +127,8 @@ The [linkfix reference](linkfix.md) describes the
 changes, boundaries and inspection commands.
 
 The separate LabVIEW load/save pass is off by default and enabled by
-`--relink`, regardless of `LV_RTE_HEADLESS`. The hidden legacy `--no-relink`
+`--relink`, regardless of `LV_RTE_HEADLESS`. It replaces linkfix rather than
+running after it. The hidden legacy `--no-relink`
 is accepted and ignored; it does not disable linkfix. Hooks normally run on
 developer machines and are skipped headless unless `--hooks` is passed;
 `--no-hooks` disables them explicitly.
