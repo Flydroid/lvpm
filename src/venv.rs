@@ -349,7 +349,7 @@ pub fn create(
     // for this LabVIEW; from now on it is the venv's, and what is set in the
     // venv IDE stays in it. Written before the binding: the binding is what
     // makes a venv exist, so a failure here leaves nothing a retry trips on.
-    crate::launch::write_ini(&v)?;
+    crate::launch::write_ini(&v, &[])?;
     std::fs::write(binding_path(&v.dir), serde_json::to_string_pretty(&b)?)?;
     Ok(v)
 }
@@ -486,7 +486,7 @@ mod tests {
         assert_eq!(v.roots_for_pkg("pkg").unwrap().application, dir.join("packages").join("pkg").join("1"));
 
         std::fs::write(v.ini_path(), "[LabVIEW]\ncustom=True\n").unwrap();
-        crate::launch::write_ini(&v).unwrap();
+        crate::launch::write_ini(&v, &[]).unwrap();
         let ini = std::fs::read_to_string(v.ini_path()).unwrap();
         let location = v.packages_dir().to_string_lossy().into_owned();
         let location = if location.contains(' ') { format!("\"{location}\"") } else { location };

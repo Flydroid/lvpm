@@ -243,7 +243,7 @@ That last clause is exactly lvpm's relink pass.
 | `Requires` with `>=` | `Requirement.min`; other operators and `Conflicts` unparsed | partial |
 | Conflict handling | roadmap | planned |
 | Upgrade = uninstall then install | — | planned |
-| Package Query (owner of a VI, dependees, tree) | `tools/deptree.py`; roadmap `lvpm tree` | planned |
+| Package Query (owner of a VI, dependees, tree) | `tools/linkfix/deptree.py`; roadmap `lvpm tree` | planned |
 | Global VI namespace check | roadmap `lvpm check` | planned |
 | Package Verification, `Verify` VI | roadmap `lvpm verify` | planned |
 | DSCM: export/import a configuration, per-project switching | `lvpm.toml` + venv; lockfile on the roadmap | partial |

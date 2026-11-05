@@ -188,21 +188,20 @@ fn run_hooks() -> Check {
     .map(drop)
 }
 
+fn relink_vi_from_log(log: &str) -> Option<PathBuf> {
+    let pattern =
+        regex(r"^relinking \d+ folder\(s\) with (.+?)(?:  \(\d+ covered by a parent\))?$");
+    log.lines().find_map(|line| {
+        pattern
+            .captures(line)
+            .map(|capture| PathBuf::from(&capture[1]))
+    })
+}
+
 fn relink_vi_walks() -> Check {
-    // Where the relinks so far have written it: %TEMP% on Windows, lvpm's
-    // cache elsewhere (work_dir in lvpm's main.rs).
-    #[cfg(windows)]
-    let cache = std::env::temp_dir();
-    #[cfg(not(windows))]
-    let cache = PathBuf::from(stdout(&ok(&global(), &["config", "get", "cache"])?).trim());
-    let vi = std::fs::read_dir(&cache)
-        .map_err(|e| format!("{}: {e}", cache.display()))?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .find(|p| {
-            let name = p.file_name().unwrap_or_default().to_string_lossy();
-            name.starts_with("lvpm-relink-package-") && name.ends_with(".vi")
-        })
-        .ok_or_else(|| format!("no relink VI in {}", cache.display()))?;
+    let log = INSTALL_LOG.lock().unwrap().clone();
+    let vi = relink_vi_from_log(&log)
+        .ok_or_else(|| format!("no relink VI in install output:\n{log}"))?;
     let folder = format!(
         "Folder to relink=str:{}",
         lv("vi.lib/lvpm_linux_relink_test").display()
@@ -221,6 +220,29 @@ fn relink_vi_walks() -> Check {
         ],
     );
     contains(&a, r"sub[\\/]Relink Packages\.vi")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::relink_vi_from_log;
+    use std::path::PathBuf;
+
+    #[test]
+    fn finds_relink_vi_in_install_output() {
+        for (log, expected) in [
+            (
+                "relinking 1 folder(s) with /root/.cache/lvpm/cache/lvpm/tools/abc/Relink Package.vi\n",
+                "/root/.cache/lvpm/cache/lvpm/tools/abc/Relink Package.vi",
+            ),
+            (
+                r"relinking 2 folder(s) with C:\Users\Test User\lvpm\tools\abc\Relink Package.vi  (1 covered by a parent)",
+                r"C:\Users\Test User\lvpm\tools\abc\Relink Package.vi",
+            ),
+        ] {
+            assert_eq!(relink_vi_from_log(log), Some(PathBuf::from(expected)));
+        }
+        assert_eq!(relink_vi_from_log("install completed"), None);
+    }
 }
 
 fn refresh() -> Check {

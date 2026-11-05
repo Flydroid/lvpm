@@ -39,6 +39,46 @@ wins over the overlay; `LVAddons.AdditionalLocations` needs LabVIEW 2024 Q1.
 
 ### Iteration 2 - WIP
 
+- ~~**Install hooks in a venv.**~~ Done. `PostInstall` now runs in the venv's
+  own instance, sharing the one LabVIEW the install already starts, and
+  `lvpm run-hooks` is venv-aware too. Confirmed on
+  `ni_lib_advanced_http_client_api`: it ships both `lvwebclient_32.dll` and
+  `lvwebclient_64.dll` but records the 32-bit one in all 19 VIs, so without
+  the hook `Open Session.vi` fails with error 1003; after it, all 19 point at
+  `_64` and the VI runs. `--no-hooks` opts out. Still open: `PreInstall` in a
+  venv (the instance only starts once the files are down), snapshotting the
+  real installation to catch a hook that writes outside the overlay, and
+  per-dependency `hooks = "run" | "skip"` in the manifest.
+- ~~**LabVIEW relink by default.**~~ Inverted: the LabVIEW load/save pass is opt-in behind
+  `--relink`, as an alternative to linkfix rather than a subsequent pass.
+  Measured across 10 packages saved between LabVIEW 8.6 and 2020,
+  unrelinked VIs load and run from a venv untouched, and of 2412 installed
+  files only the 3 that were saved by hand ever changed. `tools/linkfix/audit.py`
+  reports the two properties that decide it (embedded compiled code, and
+  linker paths that are not `<vilib>`-relative).
+- ~~**Rewrite linker paths in Rust.**~~ Done: `lvpm linkfix` (`src/linkfix.rs`).
+  The real residue turned out to be bigger than the 579 absolutes: 5127 of
+  7649 VIs carried a relative or empty owner path, relative subVI paths, or
+  links into other libraries without the qualifier — everything a project
+  load rewrites and then asks to save. The fixer writes all of it in the
+  file's own version; selected cases checked with `Save.To Buffer`.
+  **Default install preparation:** linkfix now runs after copying the whole
+  plan and before PostInstall, for venv, global and scratch installs. It
+  changes only newly written LabVIEW-tree files; `--no-linkfix` opts out.
+  Source-only conversion removes embedded compiled code where supported so
+  LabVIEW can cache a fresh compilation without changing the saved source.
+  Pre-2010 VIs stay as packaged; diagram-removed VIs keep their compiled code.
+  Unknown layouts and unverifiable conversions are reported, not guessed.
+  Review regressions cover parallel staging, qualified-path matching,
+  malformed block headers, duplicate logical paths and selected-file scope.
+  Open: unknown class-API tail layouts (17 in the earlier NovaXC measurement,
+  skipped and reported); broader IDE load/close validation of the default;
+  the `.llb` folders lvpm unpacks instead of building real LLBs.
+- **Do not inherit `SaveChanges_ApplyToAll`.** `launch::write_ini` copies the
+  target's `LabVIEW.ini` wholesale, so a sticky "apply to all" from the user's
+  own IDE lets a venv dependency be upgraded and saved with no dialog —
+  observed on `Delacor_lib_QMH_Create Message Queue.vi`, 16.0 to 26.3. Force
+  it False in the venv ini.
 - **Instance isolation — done.** A venv's LabVIEW gets its own
   compiled-object cache (`CompiledObjCacheRoot`), `LabVIEW Data`
   (`DefaultDataFileLocation`: autosave, `ExtraVILib`, crash reports) and
@@ -63,13 +103,6 @@ wins over the overlay; `LVAddons.AdditionalLocations` needs LabVIEW 2024 Q1.
   — copied from the target's ini by `venv create` — is now the base of every
   launch; only lvpm's keys are reapplied. Deleting it inherits the target's
   settings afresh at the next launch.
-- **Install hooks in a venv.** Today none run. `ni_lib_advanced_http_client_api`
-  genuinely needs its PostInstall (it repairs Call Library paths); DQMH did
-  not (its palette came from the overlay). Candidate: run PostInstall inside
-  the venv instance, snapshot the real installation before and after, move
-  palette files it dropped into `<menus>` into the addon, warn about anything
-  else. Per-dependency `hooks = "run" | "skip"` in the manifest makes it an
-  explicit opt-in.
 - **Relink what a partial run left behind.** A rerun after a failed install
   only relinks the packages _it_ copied; packages the first run copied stay
   `NOT relinked` until `lvpm relink --all`. The venv install should relink
@@ -136,7 +169,7 @@ stored in the content cache.
 
 ## Dependency analysis: `lvpm check` / `lvpm tree`
 
-Port `tools/deptree.py` to Rust (`linker.rs`: RSRC block walker, `PTH0`
+Port `tools/linkfix/deptree.py` to Rust (`linker.rs`: RSRC block walker, `PTH0`
 records) and make it first-class:
 
 - `lvpm check [DIR]` — every declared dependency must resolve against the

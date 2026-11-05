@@ -1,0 +1,166 @@
+<VI _name="Open In Project.vi" description="Opens a LabVIEW project and then opens VIs FROM it\2C the way a user double-clicks them in the Project Explorer. Project.Open loads the project (an already-open one is reused) and Open Window shows it. For each path in vi paths (separated by \3B\2C in order) the VI is looked up among the project's VI items (Dependencies included) by file path (case-insensitive)\2C opened with Open VI Reference on the application instance of the project's My Computer target\2C and - if show front panels is true - its front panel is opened with FP.Open so LabVIEW fully loads and compiles it. A VI that fails does not stop the others. The project and the opened panels stay open when this VI finishes\3B only the references are closed. With show front panels false LabVIEW may unload the VIs again once this VI goes idle. report has one line per VI\3A '&lt;path&gt; -&gt; ok' or '&lt;path&gt; -&gt; error &lt;code&gt;\3A &lt;source&gt;'. A VI that is not an item of the project gives error 5000. error out carries the first error of the whole run\2C project or VI. Done goes true last\2C after every other indicator is written.">
+  <FreeLabel comment="VIs open in the project's own app context" uid="note" uid_parent="root"/>
+  <Control _name="project path" conIdx="0" connection="required" description="Full path of the .lvproj to open\2C e.g. C\3A\5Cdir\5CMy.lvproj. If the project is already open in this LabVIEW it is reused." outputs="value:pp_in.value" type="string" uid="pp_in" uid_parent="root" value=""/>
+  <Control _name="vi paths" conIdx="5" connection="required" description="One or more full VI paths separated by \3B. Opened in this order. Empty entries (e.g. a trailing \3B) are skipped. Matched case-insensitively against the file paths of the project's VI items." outputs="value:vps.value" type="string" uid="vps" uid_parent="root" value=""/>
+  <Control _name="show front panels" conIdx="7" connection="recommended" description="TRUE (default)\3A open each VI's front panel after loading it\2C like a double-click in the Project Explorer\2C and leave it open. FALSE\3A only open a VI reference." outputs="value:sfp.value" type="bool" uid="sfp" uid_parent="root" value="true"/>
+  <Control _name="error in" conIdx="11" connection="recommended" description="An error here skips opening the project and is reported for every VI." outputs="value:ein.value" type="cluster{bool.status,int32.code,string.source}" uid="ein" uid_parent="root" value="[false,0,]"/>
+  <Constant _name="semicolon" outputs="value:semi.value" type="string" uid="semi" uid_parent="root" value=";"/>
+  <Constant _name="VI items" outputs="value:vty.value" type="string" uid="vty" uid_parent="root" value="VI"/>
+  <Constant _name="include dependencies" outputs="value:exd.value" type="bool" uid="exd" uid_parent="root" value="false"/>
+  <Constant _name="zero" outputs="value:zero.value" type="int32" uid="zero" uid_parent="root" value="0"/>
+  <Node _name="String To Path" inputs="string:pp_in.value" outputs="path:ppath.path" uid="ppath" uid_parent="root"/>
+  <Node _name="Invoke Node" target="Project.Open" type="{LV.Application}" inputs="reference:,error in (no error):ein.value,Project Path:ppath.path" outputs="reference out:,error out:po.err,Project\3AOpen:po.proj" uid="po" uid_parent="root"/>
+  <Node _name="Invoke Node" target="Open Window" type="{LV.Project}" inputs="reference:po.proj,error in (no error):po.err" outputs="reference out:ow.ref,error out:ow.err" uid="ow" uid_parent="root"/>
+  <Node _name="Property Node" fields="read+My Computer" type="{LV.Project}" inputs="reference:ow.ref,error in (no error):ow.err" outputs="My Computer:mc.mc,reference out:mc.ref,error out:mc.err" uid="mc" uid_parent="root"/>
+  <Node _name="Property Node" fields="read+Application" type="{LV.TargetItem}" inputs="reference:mc.mc,error in (no error):mc.err" outputs="Application:ap.app,reference out:ap.ref,error out:ap.err" uid="ap" uid_parent="root"/>
+  <Node _name="Invoke Node" target="Get All Descendents" type="{LV.TargetItem}" inputs="reference:ap.ref,error in (no error):ap.err,Type:vty.value,Exclude Dependencies:exd.value" outputs="reference out:gd.ref,error out:gd.err,All Descendents:gd.all" uid="gd" uid_parent="root"/>
+  <Structure _name="For Loop" count="" maxin="" maxout="" uid="l1" uid_parent="root">
+    <Tunnel _id="In1" inputs="value:gd.all" mode="index" outputs="value:l1it.v" uid="l1it" uid_parent="l1"/>
+    <Node _name="Property Node" fields="read+Path" type="{LV.ProjectItem}" inputs="reference:l1it.v,error in (no error):" outputs="Path:ipath.path,reference out:,error out:ipath.err" uid="ipath" uid_parent="l1"/>
+    <Node _name="Path To String" inputs="path:ipath.path" outputs="string:ips.s" uid="ips" uid_parent="l1"/>
+    <Node _name="To Lower Case" inputs="string:ips.s" outputs="all lower case string:ilc.s" uid="ilc" uid_parent="l1"/>
+    <Node _name="Merge Errors" inputs="error in:l1sl.v,error in:ipath.err" outputs="error out:l1m.err" uid="l1m" uid_parent="l1"/>
+    <Tunnel _id="Out1" inputs="value:ilc.s" mode="index" outputs="value:keys.v" uid="l1keys" uid_parent="l1"/>
+    <ShiftReg uid="l1sr" uid_parent="l1">
+      <Left inputs="value:gd.err" outputs="value:l1sl.v" uid="l1srl" uid_parent="l1sr"/>
+      <Right inputs="value:l1m.err" outputs="value:l1e.v" uid="l1srr" uid_parent="l1sr"/>
+    </ShiftReg>
+  </Structure>
+  <Call adapt="true" instance="Delimited String to 1D String Array (string).vi" target="Delimited String to 1D String Array.vi" inputs="delimited string:vps.value,delimiter:semi.value" outputs="string array:split.arr" uid="split" uid_parent="root"/>
+  <Structure _name="For Loop" count="" maxin="" maxout="" uid="l2" uid_parent="root">
+    <Tunnel _id="In1" inputs="value:split.arr" mode="index" outputs="value:l2vp.v" uid="l2vp" uid_parent="l2"/>
+    <Tunnel _id="In2" inputs="value:keys.v" outputs="value:l2keys.v" uid="l2keys" uid_parent="l2"/>
+    <Tunnel _id="In3" inputs="value:ap.app" outputs="value:l2app.v" uid="l2app" uid_parent="l2"/>
+    <Tunnel _id="In4" inputs="value:sfp.value" outputs="value:l2sfp.v" uid="l2sfp" uid_parent="l2"/>
+    <Tunnel _id="In5" inputs="value:l1e.v" outputs="value:l2base.v" uid="l2base" uid_parent="l2"/>
+    <Node _name="Empty String/Path?" inputs="string/path:l2vp.v" outputs="empty?:emp.e" uid="emp" uid_parent="l2"/>
+    <Structure _name="Case Structure" selectin="emp.e" uid="ce" uid_parent="l2">
+      <Tunnel _id="In1" inputs="value:l2vp.v" uid="ce_i1" uid_parent="ce"/>
+      <Tunnel _id="In2" inputs="value:l2keys.v" uid="ce_i2" uid_parent="ce"/>
+      <Tunnel _id="In3" inputs="value:l2app.v" uid="ce_i3" uid_parent="ce"/>
+      <Tunnel _id="In4" inputs="value:l2sfp.v" uid="ce_i4" uid_parent="ce"/>
+      <Tunnel _id="In5" inputs="value:l2base.v" uid="ce_i5" uid_parent="ce"/>
+      <Tunnel _id="In6" inputs="value:cntl.v" uid="ce_i6" uid_parent="ce"/>
+      <Tunnel _id="In7" inputs="value:accl.v" uid="ce_i7" uid_parent="ce"/>
+      <CaseFrame selector="True" selectout="" uid="cet" uid_parent="ce">
+        <Tunnel _id="In1" outputs="value:" uid="cet_i1" uid_parent="cet"/>
+        <Tunnel _id="In2" outputs="value:" uid="cet_i2" uid_parent="cet"/>
+        <Tunnel _id="In3" outputs="value:" uid="cet_i3" uid_parent="cet"/>
+        <Tunnel _id="In4" outputs="value:" uid="cet_i4" uid_parent="cet"/>
+        <Tunnel _id="In5" outputs="value:" uid="cet_i5" uid_parent="cet"/>
+        <Tunnel _id="In6" outputs="value:t6.v" uid="cet_i6" uid_parent="cet"/>
+        <Tunnel _id="In7" outputs="value:t7.v" uid="cet_i7" uid_parent="cet"/>
+        <Constant _name="no line" outputs="value:noline.value" type="string" uid="noline" uid_parent="cet" value=""/>
+        <Tunnel _id="Out1" inputs="value:noline.value" uid="cet_o1" uid_parent="cet"/>
+        <Tunnel _id="Out2" inputs="value:t6.v" uid="cet_o2" uid_parent="cet"/>
+        <Tunnel _id="Out3" inputs="value:t7.v" uid="cet_o3" uid_parent="cet"/>
+      </CaseFrame>
+      <CaseFrame selector="False" selectout="" uid="cef" uid_parent="ce">
+        <Tunnel _id="In1" outputs="value:f1.v" uid="cef_i1" uid_parent="cef"/>
+        <Tunnel _id="In2" outputs="value:f2.v" uid="cef_i2" uid_parent="cef"/>
+        <Tunnel _id="In3" outputs="value:f3.v" uid="cef_i3" uid_parent="cef"/>
+        <Tunnel _id="In4" outputs="value:f4.v" uid="cef_i4" uid_parent="cef"/>
+        <Tunnel _id="In5" outputs="value:f5.v" uid="cef_i5" uid_parent="cef"/>
+        <Tunnel _id="In6" outputs="value:f6.v" uid="cef_i6" uid_parent="cef"/>
+        <Tunnel _id="In7" outputs="value:f7.v" uid="cef_i7" uid_parent="cef"/>
+        <Node _name="String To Path" inputs="string:f1.v" outputs="path:vpath.path" uid="vpath" uid_parent="cef"/>
+        <Node _name="Path To String" inputs="path:vpath.path" outputs="string:vps2.s" uid="vps2" uid_parent="cef"/>
+        <Node _name="To Lower Case" inputs="string:vps2.s" outputs="all lower case string:vlc.s" uid="vlc" uid_parent="cef"/>
+        <Node _name="Search 1D Array" inputs="1D array:f2.v,element:vlc.s,start index (0):" outputs="index of element:find.idx" uid="find" uid_parent="cef"/>
+        <Structure _name="Case Structure" selectin="find.idx" uid="cf" uid_parent="cef">
+          <Tunnel _id="In1" inputs="value:vpath.path" uid="cf_i1" uid_parent="cf"/>
+          <Tunnel _id="In2" inputs="value:f3.v" uid="cf_i2" uid_parent="cf"/>
+          <Tunnel _id="In3" inputs="value:f4.v" uid="cf_i3" uid_parent="cf"/>
+          <Tunnel _id="In4" inputs="value:f5.v" uid="cf_i4" uid_parent="cf"/>
+          <CaseFrame selector="-1" selectout="" uid="cfn" uid_parent="cf">
+            <Tunnel _id="In1" outputs="value:" uid="cfn_i1" uid_parent="cfn"/>
+            <Tunnel _id="In2" outputs="value:" uid="cfn_i2" uid_parent="cfn"/>
+            <Tunnel _id="In3" outputs="value:" uid="cfn_i3" uid_parent="cfn"/>
+            <Tunnel _id="In4" outputs="value:n4.v" uid="cfn_i4" uid_parent="cfn"/>
+            <Constant _name="not in project code" outputs="value:nfc.value" type="int32" uid="nfc" uid_parent="cfn" value="5000"/>
+            <Constant _name="not in project message" outputs="value:nfm.value" type="string" uid="nfm" uid_parent="cfn" value="VI is not an item of this project (no VI item of the project has this file path)"/>
+            <Call inputs="error code (0):nfc.value,error message (&quot;&quot;):nfm.value" outputs="error out:nfe.err" target="Error Cluster From Error Code.vi" uid="nfe" uid_parent="cfn"/>
+            <Node _name="Merge Errors" inputs="error in:n4.v,error in:nfe.err" outputs="error out:nfm2.err" uid="nfm2" uid_parent="cfn"/>
+            <Tunnel _id="Out1" inputs="value:nfm2.err" uid="cfn_o1" uid_parent="cfn"/>
+          </CaseFrame>
+          <CaseFrame selector="Default" selectout="" uid="cfd" uid_parent="cf">
+            <Tunnel _id="In1" outputs="value:d1.v" uid="cfd_i1" uid_parent="cfd"/>
+            <Tunnel _id="In2" outputs="value:d2.v" uid="cfd_i2" uid_parent="cfd"/>
+            <Tunnel _id="In3" outputs="value:d3.v" uid="cfd_i3" uid_parent="cfd"/>
+            <Tunnel _id="In4" outputs="value:d4.v" uid="cfd_i4" uid_parent="cfd"/>
+            <Node _name="Open VI Reference" inputs="application reference (local):d2.v,vi path:d1.v,options:,error in (no error):d4.v,type specifier VI Refnum (for type only):,password (&quot;&quot;):" outputs="vi reference:ovr.ref,error out:ovr.err" uid="ovr" uid_parent="cfd"/>
+            <Structure _name="Case Structure" selectin="d3.v" uid="cs" uid_parent="cfd">
+              <Tunnel _id="In1" inputs="value:ovr.ref" uid="cs_i1" uid_parent="cs"/>
+              <Tunnel _id="In2" inputs="value:ovr.err" uid="cs_i2" uid_parent="cs"/>
+              <CaseFrame selector="True" selectout="" uid="cst" uid_parent="cs">
+                <Tunnel _id="In1" outputs="value:s1.v" uid="cst_i1" uid_parent="cst"/>
+                <Tunnel _id="In2" outputs="value:s2.v" uid="cst_i2" uid_parent="cst"/>
+                <Constant _name="activate" outputs="value:act.value" type="bool" uid="act" uid_parent="cst" value="true"/>
+                <Node _name="Invoke Node" target="FP.Open" type="{LV.VI}" inputs="reference:s1.v,error in (no error):s2.v,Activate:act.value" outputs="reference out:fpo.ref,error out:fpo.err" uid="fpo" uid_parent="cst"/>
+                <Tunnel _id="Out1" inputs="value:fpo.ref" uid="cst_o1" uid_parent="cst"/>
+                <Tunnel _id="Out2" inputs="value:fpo.err" uid="cst_o2" uid_parent="cst"/>
+              </CaseFrame>
+              <CaseFrame selector="False" selectout="" uid="csf" uid_parent="cs">
+                <Tunnel _id="In1" outputs="value:sf1.v" uid="csf_i1" uid_parent="csf"/>
+                <Tunnel _id="In2" outputs="value:sf2.v" uid="csf_i2" uid_parent="csf"/>
+                <Tunnel _id="Out1" inputs="value:sf1.v" uid="csf_o1" uid_parent="csf"/>
+                <Tunnel _id="Out2" inputs="value:sf2.v" uid="csf_o2" uid_parent="csf"/>
+              </CaseFrame>
+              <Tunnel _id="Out1" outputs="value:cso1.v" uid="cso1" uid_parent="cs"/>
+              <Tunnel _id="Out2" outputs="value:cso2.v" uid="cso2" uid_parent="cs"/>
+            </Structure>
+            <Node _name="Close Reference" inputs="reference:cso1.v,error in (no error):cso2.v" outputs="error out:crv.err" uid="crv" uid_parent="cfd"/>
+            <Tunnel _id="Out1" inputs="value:crv.err" uid="cfd_o1" uid_parent="cfd"/>
+          </CaseFrame>
+          <Tunnel _id="Out1" outputs="value:cfo.v" uid="cfo" uid_parent="cf"/>
+        </Structure>
+        <Node _name="Unbundle By Name" fields="status,code,source" inputs="input cluster:cfo.v" outputs="status:ub.status,code:ub.code,source:ub.source" uid="ub" uid_parent="cef"/>
+        <Node _name="Number To Decimal String" inputs="number:ub.code" outputs="decimal integer string:nds.s" uid="nds" uid_parent="cef"/>
+        <Constant _name="LF" outputs="value:lf.value" type="string" uid="lf" uid_parent="cef" value="\0A"/>
+        <Constant _name="CR" outputs="value:cr.value" type="string" uid="cr" uid_parent="cef" value="\0D"/>
+        <Constant _name="space" outputs="value:spc.value" type="string" uid="spc" uid_parent="cef" value=" "/>
+        <Constant _name="replace all" outputs="value:rall.value" type="bool" uid="rall" uid_parent="cef" value="true"/>
+        <Node _name="Search and Replace String" inputs="input string:ub.source,search string:lf.value,replace string:spc.value,offset:,error in:,replace all?:rall.value,case sensitive?:" outputs="result string:sr1.s,number of replacements:,offset past replacement:,error out:" uid="sr1" uid_parent="cef"/>
+        <Node _name="Search and Replace String" inputs="input string:sr1.s,search string:cr.value,replace string:spc.value,offset:,error in:,replace all?:rall.value,case sensitive?:" outputs="result string:sr2.s,number of replacements:,offset past replacement:,error out:" uid="sr2" uid_parent="cef"/>
+        <Constant _name="arrow error" outputs="value:aer.value" type="string" uid="aer" uid_parent="cef" value=" -&gt; error "/>
+        <Constant _name="colon" outputs="value:col.value" type="string" uid="col" uid_parent="cef" value="\3A "/>
+        <Constant _name="arrow ok" outputs="value:aok.value" type="string" uid="aok" uid_parent="cef" value=" -&gt; ok"/>
+        <Node _name="Concatenate Strings" inputs="string:f1.v,string:aer.value,string:nds.s,string:col.value,string:sr2.s,string:lf.value" outputs="concatenated string:errl.s" uid="errl" uid_parent="cef"/>
+        <Node _name="Concatenate Strings" inputs="string:f1.v,string:aok.value,string:lf.value" outputs="concatenated string:okl.s" uid="okl" uid_parent="cef"/>
+        <Node _name="Select" inputs="t:errl.s,s:ub.status,f:okl.s" outputs="s? t\3Af:line.s" uid="line" uid_parent="cef"/>
+        <Node _name="Increment" inputs="x:f6.v" outputs="x+1:inc.x" uid="inc" uid_parent="cef"/>
+        <Node _name="Select" inputs="t:f6.v,s:ub.status,f:inc.x" outputs="s? t\3Af:ncnt.v" uid="ncnt" uid_parent="cef"/>
+        <Node _name="Merge Errors" inputs="error in:f7.v,error in:cfo.v" outputs="error out:nacc.err" uid="nacc" uid_parent="cef"/>
+        <Tunnel _id="Out1" inputs="value:line.s" uid="cef_o1" uid_parent="cef"/>
+        <Tunnel _id="Out2" inputs="value:ncnt.v" uid="cef_o2" uid_parent="cef"/>
+        <Tunnel _id="Out3" inputs="value:nacc.err" uid="cef_o3" uid_parent="cef"/>
+      </CaseFrame>
+      <Tunnel _id="Out1" outputs="value:ceo1.v" uid="ceo1" uid_parent="ce"/>
+      <Tunnel _id="Out2" outputs="value:ceo2.v" uid="ceo2" uid_parent="ce"/>
+      <Tunnel _id="Out3" outputs="value:ceo3.v" uid="ceo3" uid_parent="ce"/>
+    </Structure>
+    <Tunnel _id="Out1" inputs="value:ceo1.v" mode="concat" outputs="value:rep.v" uid="l2rep" uid_parent="l2"/>
+    <ShiftReg uid="l2cnt" uid_parent="l2">
+      <Left inputs="value:zero.value" outputs="value:cntl.v" uid="l2cntl" uid_parent="l2cnt"/>
+      <Right inputs="value:ceo2.v" outputs="value:cntr.v" uid="l2cntr" uid_parent="l2cnt"/>
+    </ShiftReg>
+    <ShiftReg uid="l2acc" uid_parent="l2">
+      <Left inputs="value:l1e.v" outputs="value:accl.v" uid="l2accl" uid_parent="l2acc"/>
+      <Right inputs="value:ceo3.v" outputs="value:accr.v" uid="l2accr" uid_parent="l2acc"/>
+    </ShiftReg>
+  </Structure>
+  <Node _name="Close Reference" inputs="reference:ap.app,error in (no error):accr.v" outputs="error out:c1.err" uid="c1" uid_parent="root"/>
+  <Node _name="Close Reference" inputs="reference:gd.ref,error in (no error):c1.err" outputs="error out:c2.err" uid="c2" uid_parent="root"/>
+  <Node _name="Close Reference" inputs="reference:mc.ref,error in (no error):c2.err" outputs="error out:c3.err" uid="c3" uid_parent="root"/>
+  <Structure _name="Flat Sequence Frame" uid="fin" uid_parent="root">
+    <Tunnel _id="In1" inputs="value:cntr.v" outputs="value:fi1.v" uid="fin_i1" uid_parent="fin"/>
+    <Tunnel _id="In2" inputs="value:rep.v" outputs="value:fi2.v" uid="fin_i2" uid_parent="fin"/>
+    <Tunnel _id="In3" inputs="value:c3.err" outputs="value:fi3.v" uid="fin_i3" uid_parent="fin"/>
+    <Indicator _name="opened" conIdx="4" connection="recommended" description="How many VIs were opened successfully." inputs="value:fi1.v" type="int32" uid="opened" uid_parent="fin" value="0"/>
+    <Indicator _name="report" conIdx="6" connection="recommended" description="One line per VI\3A '&lt;path&gt; -&gt; ok' or '&lt;path&gt; -&gt; error &lt;code&gt;\3A &lt;source&gt;'. Line breaks inside an error source are replaced by spaces so every VI stays on one line." inputs="value:fi2.v" type="string" uid="report" uid_parent="fin" value=""/>
+    <Indicator _name="error out" conIdx="15" connection="recommended" description="The first error of the run - opening the project\2C enumerating it\2C any VI\2C or closing references." inputs="value:fi3.v" type="cluster{bool.status,int32.code,string.source}" uid="eout" uid_parent="fin" value="[false,0,]"/>
+    <Constant _name="finished" outputs="value:fint.value" type="bool" uid="fint" uid_parent="fin" value="true"/>
+    <Tunnel _id="Out1" inputs="value:fint.value" outputs="value:fino.v" uid="fin_o1" uid_parent="fin"/>
+  </Structure>
+  <Indicator _name="Done" description="Goes TRUE as the very last thing this VI does\2C after opened\2C report and error out are written. lvpm vi-run --watch waits on it. It is not cleared at start\2C so if this VI stays in memory between runs clear it first (--set Done=bool\3Afalse)." inputs="value:fino.v" type="bool" uid="done" uid_parent="root" value="false"/>
+</VI>

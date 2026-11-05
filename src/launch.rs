@@ -121,7 +121,11 @@ fn ini_path(p: &Path) -> String {
 /// 2026), so rebuilding from the target's ini every time would throw away
 /// everything set in the venv IDE. Only lvpm's own keys are reapplied — and,
 /// on the copy from the target, the user's recent-files lists are left out.
-pub fn write_ini(v: &Venv) -> Result<PathBuf> {
+///
+/// `extra` are further `key=value` overrides, applied after lvpm's own so a
+/// caller can add debug switches (`NIER=True`, `DPrintfLogging=True`, ...)
+/// without touching the installation's LabVIEW.ini.
+pub fn write_ini(v: &Venv, extra: &[(String, String)]) -> Result<PathBuf> {
     let dest = v.ini_path();
     let own = dest.is_file();
     let src = match own {
@@ -152,23 +156,22 @@ pub fn write_ini(v: &Venv) -> Result<PathBuf> {
     let objcache = ini_path(&objcache);
     let data = ini_path(&data);
     let port = v.port.to_string();
-    let out = override_keys(
-        &text,
-        &[
-            ("LVAddons.AdditionalLocations", &location),
-            ("server.tcp.enabled", "True"),
-            ("server.tcp.port", &port),
-            // `-pref` with its own ini already yields a separate process; this
-            // keeps a second launch from being forwarded to the primary IDE,
-            // which would open the project with no venv at all.
-            ("AllowMultipleInstances", "True"),
-            // Both measured on LabVIEW 2025: LabVIEW creates its versioned
-            // subfolders (`25.0.0r0\objFileDB.vidb`, `2025(64-bit)\…`) under
-            // these and writes nothing to the user's `LabVIEW Data`.
-            ("CompiledObjCacheRoot", &objcache),
-            ("DefaultDataFileLocation", &data),
-        ],
-    );
+    let mut keys: Vec<(&str, &str)> = vec![
+        ("LVAddons.AdditionalLocations", &location),
+        ("server.tcp.enabled", "True"),
+        ("server.tcp.port", &port),
+        // `-pref` with its own ini already yields a separate process; this
+        // keeps a second launch from being forwarded to the primary IDE,
+        // which would open the project with no venv at all.
+        ("AllowMultipleInstances", "True"),
+        // Both measured on LabVIEW 2025: LabVIEW creates its versioned
+        // subfolders (`25.0.0r0\objFileDB.vidb`, `2025(64-bit)\…`) under
+        // these and writes nothing to the user's `LabVIEW Data`.
+        ("CompiledObjCacheRoot", &objcache),
+        ("DefaultDataFileLocation", &data),
+    ];
+    keys.extend(extra.iter().map(|(k, val)| (k.as_str(), val.as_str())));
+    let out = override_keys(&text, &keys);
 
     std::fs::create_dir_all(dest.parent().expect("ini path has a parent"))?;
     std::fs::write(&dest, out).with_context(|| format!("writing {}", dest.display()))?;
@@ -420,7 +423,7 @@ pub fn ensure_instance(v: &Venv, fresh: bool, wait: Duration) -> Result<Instance
         wait_ready(v.port, wait)?;
         return Ok(Instance { port: v.port, child: None });
     }
-    let ini = write_ini(v)?;
+    let ini = write_ini(v, &[])?;
     eprintln!(
         "starting {} on the venv and waiting for VI Server on port {}...",
         v.target.label(),
