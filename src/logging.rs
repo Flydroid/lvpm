@@ -49,7 +49,10 @@ struct Logger;
 
 impl Log for Logger {
     fn enabled(&self, m: &Metadata) -> bool {
-        m.level() <= log::max_level()
+        // Other crates (reqwest, hyper) log their internals at debug; only
+        // their warnings and errors belong in lvpm's log.
+        let ours = m.target() == "lvpm" || m.target().starts_with("lvpm::");
+        m.level() <= log::max_level() && (ours || m.level() <= Level::Warn)
     }
 
     fn log(&self, r: &Record) {
@@ -151,17 +154,16 @@ fn report_failure(s: &mut State, path: &Path, e: &std::io::Error) {
 fn write(level: Level, target: &str, msg: &str) {
     let target = target.strip_prefix("lvpm::").unwrap_or(target);
     let head = format!("{} {:>6} {:<5} {target}:", timestamp(), std::process::id(), level);
+    // Blank lines space the console out; in the log they are noise.
     let mut text = String::new();
-    for line in msg.lines() {
+    for line in msg.lines().filter(|l| !l.trim().is_empty()) {
         text.push_str(&head);
-        if !line.is_empty() {
-            text.push(' ');
-            text.push_str(line);
-        }
+        text.push(' ');
+        text.push_str(line);
         text.push('\n');
     }
     if text.is_empty() {
-        text = format!("{head}\n");
+        return;
     }
     let mut s = lock();
     let written = s.file.as_mut().map(|f| f.write_all(text.as_bytes()));
