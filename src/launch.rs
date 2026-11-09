@@ -272,7 +272,7 @@ pub fn wait_port_released(port: u16) {
     if !held() {
         return;
     }
-    eprintln!("waiting for port {port} to leave TIME_WAIT, or LabVIEW would start without VI Server...");
+    elog!("waiting for port {port} to leave TIME_WAIT, or LabVIEW would start without VI Server...");
     let started = Instant::now();
     while held() && started.elapsed() < Duration::from_secs(65) {
         std::thread::sleep(Duration::from_secs(1));
@@ -418,13 +418,13 @@ pub fn ensure_instance(v: &Venv, fresh: bool, wait: Duration) -> Result<Instance
             );
         }
         if !is_listening(v.port) {
-            eprintln!("waiting for the LabVIEW still starting on this venv (VI Server port {})...", v.port);
+            elog!("waiting for the LabVIEW still starting on this venv (VI Server port {})...", v.port);
         }
         wait_ready(v.port, wait)?;
         return Ok(Instance { port: v.port, child: None });
     }
     let ini = write_ini(v, &[])?;
-    eprintln!(
+    elog!(
         "starting {} on the venv and waiting for VI Server on port {}...",
         v.target.label(),
         v.port

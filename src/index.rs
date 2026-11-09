@@ -164,7 +164,7 @@ fn scan_local_repo(cache: &Cache, dir: &Path, refresh: bool, out: &mut Vec<Entry
             }
             Err(error) => {
                 cache.forget_local(&path)?;
-                eprintln!("  ! ignoring {}: {error:#}", path.display());
+                ewlog!("  ! ignoring {}: {error:#}", path.display());
             }
         }
     }
@@ -326,8 +326,8 @@ fn feed_body(
     // reach the terminal before the wait, not after it.
     let started = std::time::Instant::now();
     match cached.is_some() {
-        true => eprint!("  checking feed {url} ... "),
-        false => eprint!("  downloading feed {url} (first run) ... "),
+        true => elogp!("  checking feed {url} ... "),
+        false => elogp!("  downloading feed {url} (first run) ... "),
     }
     std::io::Write::flush(&mut std::io::stderr()).ok();
     let mut resp = req.send().with_context(|| format!("fetching {url}"))?;
@@ -335,7 +335,7 @@ fn feed_body(
     if resp.status() == StatusCode::NOT_MODIFIED {
         match cached {
             Some(bytes) => {
-                eprintln!("unchanged ({:.1}s)", started.elapsed().as_secs_f32());
+                elog!("unchanged ({:.1}s)", started.elapsed().as_secs_f32());
                 return Ok(String::from_utf8_lossy(&bytes).into_owned());
             }
             // A 304 carries no body, so one we have nothing cached for (a
@@ -360,7 +360,7 @@ fn feed_body(
         sha256: None,
     };
     let bytes = resp.bytes()?;
-    eprintln!(
+    elog!(
         "{:.1} MB in {:.1}s",
         bytes.len() as f32 / 1_048_576.0,
         started.elapsed().as_secs_f32()

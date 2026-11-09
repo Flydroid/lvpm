@@ -250,8 +250,28 @@ The default layout is:
   installed/           package installation records
   venv.json            LabVIEW binding
   labview.ini          venv-specific LabVIEW settings
+  logs/lvpm.log        lvpm's log of every command run on this venv
   objcache/ data/ temp/  isolated LabVIEW runtime files
 ```
+
+lvpm keeps one continuous log per venv in `.lv-venv/logs/lvpm.log`. Each command
+appends a header line (the command and its directory), everything it printed,
+detail it does not print, and how it ended (`---- done` or `---- failed: …`).
+Each line carries a UTC timestamp, the process id and a level:
+
+| Level   | What goes there                                                                        |
+| ------- | -------------------------------------------------------------------------------------- |
+| `error` | why a command failed                                                                   |
+| `warn`  | failed hooks, failed uninstalls, files linkfix skipped, download retries               |
+| `info`  | everything the command printed                                                         |
+| `debug` | file only: every file linkfix changed, every download (URL, size, time) or cache hit   |
+| `trace` | not used yet                                                                           |
+
+`--log-level <LEVEL>` (or `LVPM_LOG`) sets the lowest level written; the default is
+`debug`, and `off` writes nothing. The console output is the same at every level.
+At 10 MB the log moves to `lvpm.log.1`, replacing the previous one. Outside a
+venv, and for `lvpm venv remove`, the log is the user's own:
+`%LOCALAPPDATA%\lvpm\logs\lvpm.log` on Windows.
 
 How it works: the `packages/` directory is an [LVAddons](https://labviewwiki.org/wiki/LVAddons)
 location, one addon per package, each mirroring the LabVIEW install dir
@@ -590,6 +610,7 @@ runs.
 | Module                         | Responsibility                                                                                                          |
 | ------------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
 | `main.rs`                      | The CLI: commands, target and venv selection, and install/uninstall orchestration                                       |
+| `logging.rs`                   | The per-venv log file, and the `log!` family of macros that print a line and log it                                    |
 | `index.rs`                     | Fetch and parse package directories (`.ogpd` / `index.vipr`), resolve names to versions                                |
 | `resolve.rs`                   | Resolve requested packages and dependencies into an installation order                                                  |
 | `dependency.rs`                | Package dependency metadata and dependency-aware uninstall planning                                                     |

@@ -14,6 +14,7 @@ members = ["e2e"]
 anyhow = "1.0.104"
 clap = { version = "4.6.6", features = ["derive"] }
 flate2 = "1.1.9"
+log = { version = "0.4.35", features = ["std"] }
 quick-xml = "0.38.3"
 md-5 = "0.11.0"
 reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "default-tls"] }

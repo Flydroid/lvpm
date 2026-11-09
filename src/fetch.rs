@@ -36,9 +36,19 @@ pub fn package(cache: &Cache, client: &Client, entry: &Entry) -> Result<Vec<u8>>
         && let Some(bytes) = cache.load(&sha256)?
         && verify_md5(entry, &bytes).is_ok()
     {
+        log::debug!("{} {}: from cache sha256:{sha256}", entry.name, entry.version);
         return Ok(bytes);
     }
+    let started = std::time::Instant::now();
     let bytes = download(client, &entry.url, RETRY_DELAYS)?;
+    log::debug!(
+        "{} {}: downloaded {} ({} bytes, {:.1}s)",
+        entry.name,
+        entry.version,
+        entry.url,
+        bytes.len(),
+        started.elapsed().as_secs_f64()
+    );
     let md5 = verify_md5(entry, &bytes)?;
     let sha256 = cache.store(&bytes)?;
     cache.record_download(&LocalEntry::from(entry), &entry.url, &sha256, &md5)?;
@@ -61,11 +71,13 @@ fn download(client: &Client, url: &str, delays: &[Duration]) -> Result<Vec<u8>> 
         match result {
             Ok(bytes) => return Ok(bytes.to_vec()),
             Err(e) if attempt < delays.len() && transient(&e) => {
-                eprintln!("\n  download failed ({e}); retrying in {}s", delays[attempt].as_secs());
+                elog!();
+                ewlog!("  download failed ({e}); retrying in {}s", delays[attempt].as_secs());
                 std::thread::sleep(delays[attempt]);
                 attempt += 1;
             }
             Err(e) => {
+                log::debug!("downloading {url}: {e:?}");
                 let tries = match attempt { 0 => String::new(), n => format!(" after {} attempts", n + 1) };
                 return Err(anyhow::Error::new(e).context(format!("downloading {url}{tries}")));
             }

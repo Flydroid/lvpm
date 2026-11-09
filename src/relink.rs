@@ -373,7 +373,7 @@ impl Relinker {
         if self.can_reset_done
             && let Err(e) = self.conn.ctrl_val_set(self.vi_ref, DONE_INDICATOR, LvValue::Bool(false))
         {
-            eprintln!(
+            elog!(
                 "      note: cannot clear {DONE_INDICATOR} ({e}) — relying on the VI to clear it"
             );
             self.can_reset_done = false;
@@ -440,12 +440,12 @@ impl Relinker {
                     Ok(v) => {
                         let shown = v.to_string();
                         if shown != last {
-                            println!("        {:>6.0}s  {shown}", started.elapsed().as_secs_f64());
+                            log!("        {:>6.0}s  {shown}", started.elapsed().as_secs_f64());
                             last = shown;
                         }
                     }
                     Err(e) => {
-                        eprintln!("      note: cannot read {name} ({e}) — not reporting progress");
+                        elog!("      note: cannot read {name} ({e}) — not reporting progress");
                         self.progress = None;
                     }
                 }

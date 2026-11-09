@@ -127,6 +127,11 @@ impl Venv {
         self.dir.join("temp")
     }
 
+    /// lvpm's own log of every command run on this venv.
+    pub fn log_dir(&self) -> PathBuf {
+        self.dir.join("logs")
+    }
+
     /// The process id of the LabVIEW lvpm last started on this venv.
     pub fn pid_path(&self) -> PathBuf {
         self.dir.join("labview.pid")
@@ -199,13 +204,21 @@ pub fn find_for_removal(project: Option<&Path>, cwd: &Path) -> Result<Option<Ven
 }
 
 fn find_inner(project: Option<&Path>, cwd: &Path, allow_legacy: bool) -> Result<Option<Venv>> {
-    match project {
-        Some(repo) => load_inner(repo, allow_legacy).map(Some),
+    let v = match project {
+        Some(repo) => Some(load_inner(repo, allow_legacy)?),
         None => match locate(cwd)? {
-            Some(repo) => load_inner(&repo, allow_legacy).map(Some),
-            None => Ok(None),
+            Some(repo) => Some(load_inner(&repo, allow_legacy)?),
+            None => None,
         },
+    };
+    // A command on a venv logs into it — except removal, which deletes the
+    // folder and must not hold a file open inside it; it logs globally.
+    if let Some(v) = &v
+        && !allow_legacy
+    {
+        crate::logging::attach(&v.log_dir());
     }
+    Ok(v)
 }
 
 fn load_inner(repo: &Path, allow_legacy: bool) -> Result<Venv> {
@@ -322,7 +335,7 @@ pub fn create(
             format!("[project]\nname = \"{name}\"\nlabview = \"{}\"\n\n[dependencies]\n", target.year()),
         )
         .with_context(|| format!("writing {}", manifest_path.display()))?;
-        eprintln!("wrote {}", manifest_path.display());
+        elog!("wrote {}", manifest_path.display());
     }
 
     std::fs::create_dir_all(dir.join("packages")).with_context(|| format!("creating {}", dir.display()))?;
@@ -351,13 +364,14 @@ pub fn create(
     // makes a venv exist, so a failure here leaves nothing a retry trips on.
     crate::launch::write_ini(&v, &[])?;
     std::fs::write(binding_path(&v.dir), serde_json::to_string_pretty(&b)?)?;
+    crate::logging::attach(&v.log_dir());
     Ok(v)
 }
 
 /// Delete the venv — payload, store, binding, all of it.
 pub fn remove(v: &Venv, yes: bool) -> Result<()> {
     if !yes {
-        eprint!("delete {} and everything installed in it? [y/N] ", v.dir.display());
+        elogp!("delete {} and everything installed in it? [y/N] ", v.dir.display());
         let mut line = String::new();
         std::io::stdin().read_line(&mut line)?;
         if !line.trim().eq_ignore_ascii_case("y") {
@@ -371,7 +385,7 @@ pub fn remove(v: &Venv, yes: bool) -> Result<()> {
         }
         why
     })?;
-    println!("removed {}", v.dir.display());
+    log!("removed {}", v.dir.display());
     Ok(())
 }
 
