@@ -1095,7 +1095,7 @@ fn cmd_install(
     let client = reqwest::blocking::Client::builder()
         .user_agent(concat!("lvpm/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(std::time::Duration::from_secs(30))
-        .timeout(std::time::Duration::from_secs(600))
+        .timeout(std::time::Duration::from_secs(120))
         .build()?;
     let config = config::load()?;
     let package_cache = cache::Cache::open(&config.cache)?;
