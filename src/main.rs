@@ -1374,7 +1374,7 @@ fn cmd_install(
             match roots.and_then(|roots| {
                 linkfix::fix_files(&roots, &linkfix_files, false, linkfix::Methods::of(&linkfix::Method::ALL))
             }) {
-                Ok((_, outcomes)) => report_linkfix(&outcomes, false, true, &linkfix::Method::ALL, None)?,
+                Ok((_, outcomes)) => report_linkfix(&outcomes, false, false, &linkfix::Method::ALL, None)?,
                 Err(error) => log!("  linkfix could not complete: {error:#}; package files remain installed. Retry with `lvpm linkfix --tree <DIR> --verbose`."),
             }
         }
@@ -2032,13 +2032,17 @@ fn report_linkfix(
     let (mut changed, mut clean, mut skipped, mut not_separated) = (0usize, 0usize, 0usize, 0usize);
     let mut files = Vec::new();
     for o in outcomes {
-        // Always shown, not only with --verbose: the file keeps its embedded
-        // compiled code, and LabVIEW may still ask to save it.
+        // A warning: the file keeps its embedded compiled code, and LabVIEW
+        // may still ask to save it. Counted on the console, named in the log.
         if let Ok(c) = &o.result
             && let Some(why) = &c.not_separated
         {
             not_separated += 1;
-            log!("  NOT SEPARATED {}: {why}", o.path.display());
+            let line = format!("  NOT SEPARATED {}: {why}", o.path.display());
+            match verbose {
+                true => wlog!("{line}"),
+                false => log::warn!("{line}"),
+            }
             if c.total() == 0 {
                 files.push(serde_json::json!({ "path": o.path, "methods": c.methods(), "changes": c }));
             }
@@ -2107,12 +2111,12 @@ fn report_linkfix(
         total.owner, total.relative, total.absolute, total.qualifier, total.vils, total.separated
     );
     if not_separated > 0 {
-        log!("  compiled code left embedded in {not_separated} file(s), listed above with the reason; link repairs were still attempted");
+        log!("  compiled code left embedded in {not_separated} file(s); link repairs were still attempted");
     }
-    if skipped > 0 && !verbose {
+    if (skipped > 0 || not_separated > 0) && !verbose {
         match logging::path() {
-            Some(log) => log!("  ({} names the skipped files and why; so does --verbose)", log.display()),
-            None => log!("  (--verbose names the skipped files and why)"),
+            Some(log) => log!("  each file and why: {}", log.display()),
+            None => log!("  each file and why: --verbose"),
         }
     }
     Ok(())
