@@ -704,19 +704,31 @@ fn cmd_list(cli: &Cli) -> Result<()> {
         println!("lvpm has installed nothing into this target");
         return Ok(());
     }
+    let mut owed = 0;
     for m in &installed {
+        let post = match (&m.post_install_vi, &m.post_install) {
+            (None, _) => "",
+            (Some(_), Some(install::HookState::Ran { .. })) => "post-install ran",
+            (Some(_), Some(install::HookState::Pending)) => "post-install PENDING",
+            (Some(_), Some(install::HookState::Failed { .. })) => "post-install FAILED",
+            (Some(_), None) => "post-install unknown",
+        };
+        owed += usize::from(post.ends_with("PENDING") || post.ends_with("FAILED") || post.ends_with("unknown"));
+        // Records from before hook state was tracked list PostInstall here;
+        // the column above says what is known about it now.
+        let skipped: Vec<&String> = m.skipped_hooks.iter().filter(|h| !h.starts_with("PostInstall=")).collect();
         println!(
-            "{:<52} {:<14} {:>5} files  {:<12}{}",
+            "{:<52} {:<14} {:>5} files  {:<12} {:<20}{}",
             m.name,
             m.version,
             m.files.len(),
             if m.relinked { "relinked" } else { "NOT relinked" },
-            if m.skipped_hooks.is_empty() {
-                String::new()
-            } else {
-                format!("  (hooks skipped: {})", hook_names(&m.skipped_hooks))
-            }
+            post,
+            if skipped.is_empty() { String::new() } else { format!("  (hooks not run: {})", hook_names(skipped)) }
         );
+    }
+    if owed > 0 {
+        println!("\n{owed} post-install hook(s) pending, failed or of unknown state — `lvpm run-hooks --all` runs them");
     }
     Ok(())
 }
@@ -1210,6 +1222,9 @@ fn cmd_install(
                 println!("      ... and {} more", p.writes.len() - 6);
             }
             relink_work.push((e.name.clone(), relink::folders_for_spec(&roots, &spec)?));
+            if hooks_on && spec.script_vis.iter().any(|(h, v)| h == "PostInstall" && !v.is_empty()) {
+                hook_runs.push((e.name.clone(), PathBuf::from("PostInstall.vi"), Vec::new()));
+            }
         } else {
             let pre = match spec.script_vis.iter().any(|(h, v)| h == "PreInstall" && !v.is_empty())
             {
@@ -1242,16 +1257,12 @@ fn cmd_install(
             let m = install::apply(&roots, &spec, &mut zip, &p, pre.as_deref(), dependency::package_dependency_names(e, spec.requires.as_deref()))?;
             println!("{} files", m.files.len());
             relink_work.push((e.name.clone(), m.relink_folders.iter().map(PathBuf::from).collect()));
-            // A venv's hooks run too: the paths handed to them in `Files
-            // Installed` are the venv's own, so a hook that repairs what it
-            // shipped repairs it where it landed.
-            if hooks_on && let Some(hook) = &m.post_install_vi {
-                hook_runs.push((e.name.clone(), PathBuf::from(hook), m.files.clone()));
-            }
-            // The manifest assumes a global install runs its hooks; headless
-            // did not, and `lvpm list` should say so.
+            // The record now holds PostInstall as pending; the hook step
+            // after the copy runs every pending one in the target. Headless,
+            // the other hooks did not run either, and `lvpm list` should say
+            // so — PostInstall stays pending for a later install.
             if hooks_off_headless && venv.is_none() {
-                for (h, v) in &spec.script_vis {
+                for (h, v) in spec.script_vis.iter().filter(|(h, _)| h != "PostInstall") {
                     install::mark_hook_skipped(&roots, &e.name, &format!("{h}={v}"))?;
                 }
             }
@@ -1276,9 +1287,7 @@ fn cmd_install(
             .script_vis
             .iter()
             .filter(|(h, _)| {
-                !hooks_on
-                    || (h == "PreInstall" && venv.is_some())
-                    || (h == "PostInstall" && !hook_runs.iter().any(|(n, _, _)| n == &e.name))
+                !hooks_on || (h == "PreInstall" && venv.is_some())
             })
             .map(|(h, v)| format!("{h}={v}"))
             .collect();
@@ -1300,6 +1309,33 @@ fn cmd_install(
 
     if let Some(c) = hook_conn.take() {
         c.close();
+    }
+
+    // The hook step works from the records, not from what this run copied:
+    // every package in the target whose PostInstall is still owed — including
+    // one an earlier, interrupted install left behind — runs, in plan order.
+    let mut unknown_hooks = Vec::new();
+    if !dry_run {
+        let mut owed = Vec::new();
+        for m in install::list_installed(&store)? {
+            match (&m.post_install_vi, &m.post_install) {
+                (Some(vi), Some(install::HookState::Pending)) => owed.push((m.name, PathBuf::from(vi), m.files)),
+                (Some(_), None) => unknown_hooks.push(m.name),
+                _ => {}
+            }
+        }
+        let rank = |n: &str| plan.iter().position(|e| e.name.eq_ignore_ascii_case(n)).unwrap_or(usize::MAX);
+        owed.sort_by(|a, b| rank(&a.0).cmp(&rank(&b.0)).then_with(|| a.0.cmp(&b.0)));
+        match hooks_on {
+            true => hook_runs = owed,
+            false if !owed.is_empty() => println!(
+                "\n{} post-install hook(s) pending, not run now: {}\n      \
+                 they run with the next `lvpm install` that runs hooks, or `lvpm run-hooks --all`",
+                owed.len(),
+                owed.iter().map(|(n, _, _)| n.as_str()).collect::<Vec<_>>().join(", ")
+            ),
+            false => {}
+        }
     }
 
     if !linkfix_files.is_empty() {
@@ -1364,7 +1400,7 @@ fn cmd_install(
                     false => Ok(()),
                 };
                 if !hook_runs.is_empty() {
-                    run_post_install_hooks(None, t, inst.port, relink_args, &hook_runs);
+                    run_post_install_hooks(&store, t, inst.port, relink_args, &hook_runs);
                 }
                 if relink_args.keep_open {
                     println!("\nleaving the venv LabVIEW open (--keep-open), VI Server on port {}", inst.port);
@@ -1380,13 +1416,21 @@ fn cmd_install(
                     false => Ok(()),
                 };
                 if !hook_runs.is_empty() {
-                    run_post_install_hooks(Some(&store), t, port, relink_args, &hook_runs);
+                    run_post_install_hooks(&store, t, port, relink_args, &hook_runs);
                 }
                 outcome?;
             }
         }
     } else {
         println!("\nrelink and post-install hooks: skipped — a scratch tree has no LabVIEW");
+    }
+    if !unknown_hooks.is_empty() {
+        println!(
+            "\nnote: {} package(s) were installed by an older lvpm, which did not record whether their\n      \
+             post-install hook ran: {}\n      `lvpm run-hooks --all` runs them and records the result",
+            unknown_hooks.len(),
+            unknown_hooks.join(", ")
+        );
     }
 
     // Palettes and menus last, after the hooks: a hook is free to write more
@@ -1473,13 +1517,18 @@ fn cmd_run_hooks(cli: &Cli, package: Option<&str>, all: bool, timeout: u64) -> R
         print!("{} ... ", m.name);
         std::io::stdout().flush().ok();
         let info = hook_action_info(&m.name, m.display_name.as_deref(), &t, &m.files);
-        match run_hook_vi(&mut conn, port, args.timeout, &vi, &info) {
-            Ok(took) => println!("ok ({:.1}s)", took.as_secs_f64()),
+        let state = match run_hook_vi(&mut conn, port, args.timeout, &vi, &info) {
+            Ok(took) => {
+                println!("ok ({:.1}s)", took.as_secs_f64());
+                install::HookState::Ran { at: install::now_secs() }
+            }
             Err(e) => {
                 println!("FAILED: {e:#}");
                 failed += 1;
+                install::HookState::Failed { at: install::now_secs(), error: format!("{e:#}") }
             }
-        }
+        };
+        install::set_post_install(&roots, &m.name, state)?;
     }
     if let Some(c) = conn {
         c.close();
@@ -1505,10 +1554,11 @@ fn cmd_run_hooks(cli: &Cli, package: Option<&str>, all: bool, timeout: u64) -> R
 /// Run each package's extracted `PostInstall.vi`, one at a time, and report.
 ///
 /// The run is open, run to completion, release. A failure is printed but does
-/// not fail the install — the package's files are already in place. With
-/// `roots` (a global install) it is also recorded for `lvpm list`.
+/// not fail the install — the package's files are already in place. Either
+/// way the outcome goes into the package's record, for `lvpm list` and so the
+/// next install knows what is still owed.
 fn run_post_install_hooks(
-    roots: Option<&Roots>,
+    roots: &Roots,
     target: &target::LvTarget,
     port: u16,
     args: &RelinkArgs,
@@ -1521,16 +1571,18 @@ running {} post-install hook(s)", hooks.len());
         print!("  {pkg} ... ");
         std::io::stdout().flush().ok();
         let info = hook_action_info(pkg, None, target, files);
-        match run_hook_vi(&mut conn, port, args.timeout, vi, &info) {
-            Ok(took) => println!("ok ({:.1}s)", took.as_secs_f64()),
+        let state = match run_hook_vi(&mut conn, port, args.timeout, vi, &info) {
+            Ok(took) => {
+                println!("ok ({:.1}s)", took.as_secs_f64());
+                install::HookState::Ran { at: install::now_secs() }
+            }
             Err(e) => {
                 println!("FAILED: {e:#}");
-                // So `lvpm list` shows it; a failed hook is otherwise only in
-                // this scrollback.
-                if let Some(roots) = roots {
-                    let _ = install::mark_hook_skipped(roots, pkg, &format!("PostInstall={}", vi.display()));
-                }
+                install::HookState::Failed { at: install::now_secs(), error: format!("{e:#}") }
             }
+        };
+        if let Err(e) = install::set_post_install(roots, pkg, state) {
+            println!("      could not record the result: {e:#}");
         }
     }
     if let Some(c) = conn {
