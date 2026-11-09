@@ -561,8 +561,9 @@ runs.
 
 - `Replace Mode = If Newer` only writes when the file is absent; doing it
   properly means comparing archive timestamps against disk.
-- No dependency conflict resolution: the first resolution of a name wins,
-  and a floor resolves to the newest version satisfying it.
+- No dependency conflict resolution: each package gets the newest version
+  meeting the highest floor anything asks for, and a manifest pin always
+  wins (with a warning when a dependent asks for more).
 - No mass compile; LabVIEW recompiles installed VIs on first load.
 - A hook VI's own `error out` is not read back. A hook that fails internally
   but runs to completion reports as ok.

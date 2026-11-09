@@ -133,9 +133,14 @@ pass:
 
 - Each root asks for what its constraint says. A dependency declared by a
   package's own spec is always treated as a floor.
-- Resolution is depth-first from all roots at once, with no backtracking: the
-  first resolution of a name wins. Pin a version exactly in the manifest when
-  a transitive floor would otherwise pick something you do not want.
+- Resolution is depth-first from all roots at once, with no backtracking.
+  Each package is held to the highest floor anything asks for: the walk
+  repeats until no pass finds a higher one. A root's own constraint is never
+  replaced by a dependency's floor; a pin below one is kept, with a warning
+  naming the dependent. Pin a version exactly in the manifest when a
+  transitive floor would otherwise pick something you do not want.
+- The plan installs every package after the packages it requires; roots keep
+  their manifest order where nothing forces otherwise.
 - A transitive dependency that is already installed at a version satisfying
   its floor is left alone. A root always resolves to what the index says, and
   the installer then decides whether that is a no-op, an upgrade, or a refused
