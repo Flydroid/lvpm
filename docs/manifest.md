@@ -116,13 +116,42 @@ basename without version, e.g. `oglib_error`), and a quoted constraint.
 Rules:
 
 - The version must be quoted. `oglib_array = 6.0` is a TOML float and is
-  rejected, as is any non-string value (tables and arrays included).
+  rejected, as is an array or any other non-string value. The one other
+  form is a dependency table (below).
 - Versions compare component by component the way VIPM numbers them
   (`major.minor.patch.build`); odd but real forms such as `1.0.1-1` are
   accepted as written.
 - Other operators (`<`, `=`, `~`, `^`, ranges) are rejected with an error
   naming the dependency, rather than misread.
 - The install plan lists dependencies before the packages that need them.
+
+### Dependency tables: `hooks`
+
+A dependency can be a table instead of a version string, to set whether
+the package's install hooks run:
+
+```toml
+[dependencies]
+my_lib_with_setup = { version = "2.1.0.4", hooks = "run" }
+wiresmith_technology_lib_g_cli = { version = "3.0.1.98", hooks = "skip" }
+```
+
+| Key       | Meaning                                                                 |
+| --------- | ----------------------------------------------------------------------- |
+| `version` | Required. The constraint, exactly as in the string form.               |
+| `hooks`   | `"run"` or `"skip"`. Unset: a venv runs none of the package's hooks, a LabVIEW installation runs them all, a headless machine none. |
+
+`--no-hooks` and `--hooks` on `lvpm install` override the setting. To set
+`hooks` for a package that is only a dependency of another, declare it too.
+The setting also holds in groups. Two groups that set it differently for the
+same package are an error.
+
+A table under `[dependencies]` is read as a dependency when its keys are
+`version` and, optionally, `hooks`. Any other table is a
+[group](#named-dependency-groups). So a group cannot hold only packages named
+`version` and `hooks`.
+
+VIPM does not read dependency tables: a `vipm.toml` keeps the string form.
 
 ### How the manifest resolves
 
@@ -421,7 +450,8 @@ Tracked in [roadmap.md](roadmap.md#the-manifest-and-the-lockfile---wip):
   - `lvpm.lock` records every group's packages, each tagged with its groups,
     so changing the selection never re-resolves. `lvpm sync` uninstalls
     packages that only unselected groups need.
-- **Per-dependency tables**: `{ version = "...", hooks = "run", source = "..." }`.
+- **Per-dependency tables**: ~~`hooks`~~ done (see
+  [Dependency tables](#dependency-tables-hooks)); `source = "..."` is still open.
 - **`[venv]` overrides**: `dir`, `vi-server-port`, `bitness`.
 - **`vipm.toml` conversion, remaining fields**: `labview-bitness` is checked
   against the selected target once `[venv] bitness` exists. Writing an

@@ -15,12 +15,15 @@ use std::path::{Path, PathBuf};
 /// A hook's state on an installed package. A hook is owed from the moment
 /// its package's files are copied until it has run, whichever command runs
 /// it: an install that stops part way leaves `Pending` for the next one.
+/// `Skipped` is a hook the hook policy held back (a venv runs none unless the
+/// manifest says `hooks = "run"`); it runs once the policy allows it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "lowercase")]
 pub enum HookState {
     Pending,
     Ran { at: u64 },
     Failed { at: u64, error: String },
+    Skipped { at: u64 },
 }
 
 #[derive(Debug, Serialize, Deserialize)]

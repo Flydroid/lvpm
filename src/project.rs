@@ -26,6 +26,9 @@
 //! ni_vi_analyzer_tests = "1.2.0.3"
 //! ```
 //!
+//! A dependency may also be a table, to say whether its install hooks run:
+//! `wiresmith_technology_lib_g_cli = { version = "3.0.1.98", hooks = "skip" }`.
+//!
 //! `labview` is a minimum: a venv binds to that version or a newer one, never
 //! an older one. Full reference, including `vipm.toml` compatibility:
 //! `docs/manifest.md`.
@@ -80,6 +83,25 @@ impl fmt::Display for Constraint {
     }
 }
 
+/// A dependency's `hooks` setting: whether lvpm runs the package's install
+/// hooks (the VIs a package runs before and after its files are copied).
+/// Unset, a venv runs none and a LabVIEW installation runs them all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hooks {
+    Run,
+    Skip,
+}
+
+impl Hooks {
+    fn parse(s: &str) -> Result<Hooks> {
+        match s {
+            "run" => Ok(Hooks::Run),
+            "skip" => Ok(Hooks::Skip),
+            _ => bail!("hooks = {s:?}: expected \"run\" or \"skip\""),
+        }
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub struct Project {
     /// `project.name`, when stated.
@@ -100,6 +122,8 @@ pub struct Project {
     pub nipm: Vec<String>,
     /// `[dependencies.<name>]` group tables, in file order.
     pub groups: Vec<(String, Group)>,
+    /// Packages whose `hooks` is set, from every group.
+    pub hooks: Vec<(String, Hooks)>,
 }
 
 /// One `[dependencies.<name>]` table: packages the project needs only
@@ -132,6 +156,7 @@ impl Default for Project {
             dependencies: Vec::new(),
             nipm: Vec::new(),
             groups: Vec::new(),
+            hooks: Vec::new(),
         }
     }
 }
@@ -296,11 +321,7 @@ pub fn parse(text: &str) -> Result<Project> {
     }
     for (name, value) in f.dependencies {
         match value {
-            toml::Value::String(s) => {
-                let c = Constraint::parse(&s).with_context(|| format!("[dependencies] {name}"))?;
-                p.dependencies.push((name, c));
-            }
-            toml::Value::Table(t) => {
+            toml::Value::Table(t) if !is_dependency_table(&t) => {
                 let label = format!("[dependencies.{name}]");
                 if name == MAIN_GROUP {
                     bail!("{label}: `{MAIN_GROUP}` is the name of [dependencies]; pick another");
@@ -310,16 +331,33 @@ pub fn parse(text: &str) -> Result<Project> {
                     if key == INCLUDE_KEY {
                         g.include = string_array(&label, &key, value)?;
                     } else {
-                        let c = dependency(&label, &key, value)?;
+                        let (c, hooks) = dependency(&label, &key, value)?;
+                        if let Some(h) = hooks {
+                            p.hooks.push((key.clone(), h));
+                        }
                         g.dependencies.push((key, c));
                     }
                 }
                 p.groups.push((name, g));
             }
+            value @ (toml::Value::String(_) | toml::Value::Table(_)) => {
+                let (c, hooks) = dependency("[dependencies]", &name, value)?;
+                if let Some(h) = hooks {
+                    p.hooks.push((name.clone(), h));
+                }
+                p.dependencies.push((name, c));
+            }
             other => bail!(
-                "[dependencies] {name}: expected a quoted version or group table, got {}",
+                "[dependencies] {name}: expected a quoted version, a {{ version = ... }} table or a group table, got {}",
                 other.type_str()
             ),
+        }
+    }
+    for (i, (name, _)) in p.hooks.iter().enumerate() {
+        if let Some((_, h)) = p.hooks[..i].iter().find(|(n, _)| n.eq_ignore_ascii_case(name))
+            && *h != p.hooks[i].1
+        {
+            bail!("{name} has hooks = \"run\" in one group and \"skip\" in another — make them agree");
         }
     }
     p.nipm = f.nipm.dependencies.into_iter().map(|(k, _)| k).collect();
@@ -333,11 +371,41 @@ pub fn parse(text: &str) -> Result<Project> {
     Ok(p)
 }
 
-fn dependency(label: &str, name: &str, value: toml::Value) -> Result<Constraint> {
-    let toml::Value::String(s) = value else {
-        bail!("{label} {name}: expected a quoted version, got {}", value.type_str());
-    };
-    Constraint::parse(&s).with_context(|| format!("{label} {name}"))
+/// The keys a dependency table may hold.
+const DEPENDENCY_KEYS: [&str; 2] = ["version", "hooks"];
+
+/// A table under `[dependencies]` is one dependency when it has a `version`
+/// and nothing but [`DEPENDENCY_KEYS`]; any other table is a group. (So a
+/// group cannot consist of packages named `version` and `hooks` alone.)
+fn is_dependency_table(t: &toml::Table) -> bool {
+    t.contains_key("version") && t.keys().all(|k| DEPENDENCY_KEYS.contains(&k.as_str()))
+}
+
+/// `name = "1.2.3"` or `name = { version = "1.2.3", hooks = "run" }`.
+fn dependency(label: &str, name: &str, value: toml::Value) -> Result<(Constraint, Option<Hooks>)> {
+    let at = || format!("{label} {name}");
+    match value {
+        toml::Value::String(s) => Ok((Constraint::parse(&s).with_context(at)?, None)),
+        toml::Value::Table(t) if is_dependency_table(&t) => {
+            let Some(toml::Value::String(v)) = t.get("version") else {
+                bail!("{}: version must be a quoted version", at());
+            };
+            let c = Constraint::parse(v).with_context(at)?;
+            let hooks = match t.get("hooks") {
+                None => None,
+                Some(toml::Value::String(h)) => Some(Hooks::parse(h).with_context(at)?),
+                Some(other) => bail!("{}: hooks must be \"run\" or \"skip\", got {}", at(), other.type_str()),
+            };
+            Ok((c, hooks))
+        }
+        toml::Value::Table(t) => bail!(
+            "{}: a dependency table takes {} and needs version; got {}",
+            at(),
+            DEPENDENCY_KEYS.join(", "),
+            t.keys().cloned().collect::<Vec<_>>().join(", ")
+        ),
+        other => bail!("{}: expected a quoted version, got {}", at(), other.type_str()),
+    }
 }
 
 fn string_array(label: &str, key: &str, value: toml::Value) -> Result<Vec<String>> {
@@ -554,6 +622,41 @@ vipm_package_builder = "*"
         assert!(parse("[dependencies.t]\ninclude-groups = \"u\"\n").is_err(), "not an array");
         assert!(parse("[dependencies.t]\ninclude-groups = [\"u\"]\n").is_err(), "unknown include");
         assert!(parse("[dependencies.t]\nx = 1.0\n").is_err(), "unquoted version");
+    }
+
+    #[test]
+    fn dependency_tables_set_hooks_and_are_told_apart_from_groups() {
+        let p = parse(
+            r#"
+[dependencies]
+ni_lib_advanced_http_client_api = { version = "1.1.0.6", hooks = "run" }
+wiresmith_technology_lib_g_cli = { version = "3.0.1.98", hooks = "skip" }
+oglib_error = { version = ">=6.0" }
+delacor_lib_qmh = "7.1.2.1547"
+
+[dependencies.test]
+jki_lib_caraya = { version = "*", hooks = "run" }
+oglib_array = "6.0.1.20"
+"#,
+        )
+        .unwrap();
+        let names: Vec<&str> = p.dependencies.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["ni_lib_advanced_http_client_api", "wiresmith_technology_lib_g_cli", "oglib_error", "delacor_lib_qmh"]);
+        assert_eq!(p.dependencies[2].1, Constraint::AtLeast(Version::parse("6.0")));
+        assert_eq!(p.groups.len(), 1, "an inline table with a version is a dependency, not a group");
+        let hooks_for = |name: &str| p.hooks.iter().find(|(n, _)| n == name).map(|(_, h)| *h);
+        assert_eq!(hooks_for("ni_lib_advanced_http_client_api"), Some(Hooks::Run));
+        assert_eq!(hooks_for("wiresmith_technology_lib_g_cli"), Some(Hooks::Skip));
+        assert_eq!(hooks_for("jki_lib_caraya"), Some(Hooks::Run), "groups count too");
+        assert_eq!(hooks_for("delacor_lib_qmh"), None);
+
+        assert!(parse("[dependencies]\nx = { version = \"1\", hooks = \"maybe\" }\n").is_err());
+        assert!(parse("[dependencies]\nx = { version = 1 }\n").is_err(), "unquoted version");
+        assert!(parse("[dependencies.t]\nx = { version = \"1\", source = \"local\" }\n").is_err(), "unknown key");
+        assert!(
+            parse("[dependencies]\nx = { version = \"1\", hooks = \"run\" }\n[dependencies.t]\nx = { version = \"1\", hooks = \"skip\" }\n").is_err(),
+            "groups disagree"
+        );
     }
 
     #[test]

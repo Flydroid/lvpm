@@ -384,18 +384,40 @@ dialogs over the install.
 | `PreUninstall.vi`  | before the package's files are removed                                                                            |
 | `PostUninstall.vi` | after removal (uninstall hooks are extracted at install time; the archive is long gone when uninstall needs them) |
 
-Hook failures are reported, never fatal: the files are installed either way,
-and an uninstall is never left half-done. `--no-hooks` skips them, and
-`lvpm run-hooks <name>` reruns a PostInstall that failed. After the hooks,
-a global `install` rebuilds the palettes and menus so a package's palette
-and Tools entries appear without restarting LabVIEW; `lvpm refresh` does
-that step alone.
+**Which hooks run.** Hooks were written for VIPM installing into the LabVIEW
+installation, and many change that installation: they edit palette files under
+`menus\`, resave NI's VIs under `resource\`, or run `msiexec`. Run from a venv
+they still change the installation, which a venv must leave alone. So:
 
-A hook is the one thing a venv genuinely needs: `ni_lib_advanced_http_client_api`
-ships both `lvwebclient_32.dll` and `lvwebclient_64.dll` but records the 32-bit
-one in all 19 of its VIs, and its `PostInstall` rewrites that to the bitness of
-the LabVIEW it landed in. Without it those VIs are broken (error 1003) wherever
-they were installed.
+| Destination                 | Default                         | Per dependency in `lvpm.toml`             |
+| --------------------------- | ------------------------------- | ----------------------------------------- |
+| venv                        | no hooks                        | `hooks = "run"` enables that package's    |
+| LabVIEW installation        | all hooks, as VIPM              | `hooks = "skip"` disables that package's  |
+| headless (`LV_RTE_HEADLESS`) | no hooks                        | `hooks = "run"` enables that package's    |
+
+```toml
+[dependencies]
+my_lib_with_setup = { version = "2.1.0.4", hooks = "run" }
+wiresmith_technology_lib_g_cli = { version = "3.0.1.98", hooks = "skip" }
+```
+
+`--no-hooks` runs none and `--hooks` runs all, overriding the manifest. A
+PostInstall hook the policy holds back is recorded as `skipped` (see
+`lvpm list`). It runs at the next install once the policy allows it, or now
+with `lvpm run-hooks <name>`, which runs a named package's hook whatever the
+policy says. `lvpm run-hooks --all` follows the policy. Uninstall hooks never
+run in a venv: its LabVIEW has to be closed before the files can go.
+
+Measured on the 22 hooks of a 50-package project: six are harmful from a
+venv, and the rest open documentation pages, recompile examples or leave
+markers. The one that was needed, NI's Advanced HTTP Client fixing the
+Call Library path its package builder broke, is now done by linkfix's
+`clfn-wildcard` method (see [Linkfix](docs/linkfix.md#call-library-wildcards)).
+
+Hook failures are reported, never fatal: the files are installed either way,
+and an uninstall is never left half-done. After the hooks, a global `install`
+rebuilds the palettes and menus so a package's palette and Tools entries
+appear without restarting LabVIEW; `lvpm refresh` does that step alone.
 
 ### VI Server
 

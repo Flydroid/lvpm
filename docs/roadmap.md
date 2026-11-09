@@ -45,10 +45,13 @@ wins over the overlay; `LVAddons.AdditionalLocations` needs LabVIEW 2024 Q1.
   `ni_lib_advanced_http_client_api`: it ships both `lvwebclient_32.dll` and
   `lvwebclient_64.dll` but records the 32-bit one in all 19 VIs, so without
   the hook `Open Session.vi` fails with error 1003; after it, all 19 point at
-  `_64` and the VI runs. `--no-hooks` opts out. Still open: `PreInstall` in a
-  venv (the instance only starts once the files are down), snapshotting the
-  real installation to catch a hook that writes outside the overlay, and
-  per-dependency `hooks = "run" | "skip"` in the manifest.
+  `_64` and the VI runs. `--no-hooks` opts out. Since then: linkfix's
+  `clfn-wildcard` method makes that hook's edit itself, and a venv runs no
+  hooks unless the manifest says `hooks = "run"` for the package (22 hooks
+  measured on NovaXC: six change the LabVIEW installation from a venv, none
+  of the rest is needed). Still open: `PreInstall` in a venv (the instance
+  only starts once the files are down), and snapshotting the real
+  installation to catch a hook that writes outside the overlay.
 - ~~**LabVIEW relink by default.**~~ Inverted: the LabVIEW load/save pass is opt-in behind
   `--relink`, as an alternative to linkfix rather than a subsequent pass.
   Measured across 10 packages saved between LabVIEW 8.6 and 2020,
@@ -151,7 +154,8 @@ Reference and `vipm.toml` comparison: [manifest.md](manifest.md).
   with `--with`, `--without`, `--only`; only `main` installs by default.
   Open: whether `dev` should install by default. Reference in
   [manifest.md](manifest.md#named-dependency-groups).
-- Per-dependency tables: `{ version = "...", hooks = "run", source = "local" }`.
+- Per-dependency tables: `hooks` is done (`{ version = "...", hooks = "run" }`);
+  `source = "local"` is still open.
 - `[venv]` overrides: `dir`, `vi-server-port`, `bitness`.
 - **`vipm.toml` conversion** — done for `--manifest vipm.toml`
   (`src/vipm_interop.rs`: `labview-version`, exact `[dependencies]`,

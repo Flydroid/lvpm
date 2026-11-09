@@ -154,12 +154,14 @@ enum Cmd {
         /// Accepted and ignored: LabVIEW relink is opt-in. Does not skip linkfix.
         #[arg(long, hide = true)]
         no_relink: bool,
-        /// Copy the files but skip the packages' install hooks.
+        /// Run no install hooks at all, not even those the manifest enables.
+        /// Owed PostInstall hooks stay owed for a later install.
         #[arg(long, conflicts_with = "run_hooks")]
         no_hooks: bool,
-        /// Run the packages' install hooks even where LabVIEW runs headless
-        /// (LV_RTE_HEADLESS is set), where they are otherwise skipped: most
-        /// hooks add palettes, menus or markers for an IDE nobody opens there.
+        /// Run every package's install hooks, whatever the manifest says. By
+        /// default a venv runs only those of dependencies with
+        /// `hooks = "run"`, a LabVIEW installation all but `hooks = "skip"`,
+        /// and a headless machine (LV_RTE_HEADLESS) only `hooks = "run"`.
         #[arg(long = "hooks")]
         run_hooks: bool,
         /// Replace an installed package with an older version. Without this,
@@ -186,13 +188,15 @@ enum Cmd {
     },
     /// Re-run a package's PostInstall hook, without reinstalling it.
     ///
-    /// For retrying a hook that failed during install. Hooks are not
-    /// decoration: ni_lib_advanced_http_client_api's PostInstall is the only
-    /// thing that repairs the Call Library paths its builder broke.
+    /// For retrying a hook that failed during install, or running one the
+    /// hook policy held back. A package named here runs whatever the policy
+    /// says; check what its hook does first, since many edit the LabVIEW
+    /// installation even when run from a venv.
     RunHooks {
         /// Package whose PostInstall hook to run. Omit when using --all.
         package: Option<String>,
-        /// Run the PostInstall hook of every installed package that has one.
+        /// Run the PostInstall hook of every installed package that has one
+        /// and that the hook policy allows (in a venv: `hooks = "run"`).
         #[arg(long, conflicts_with = "package")]
         all: bool,
         /// Seconds to wait for one hook to finish.
@@ -521,6 +525,67 @@ fn headless() -> bool {
     std::env::var_os("LV_RTE_HEADLESS").is_some()
 }
 
+/// Whose install hooks run. Hooks are VIs a package runs in LabVIEW around
+/// its install; written for VIPM installing into the LabVIEW installation,
+/// several edit files there (palettes in `menus\`, NI's own `resource\` VIs)
+/// or run installers (`msiexec`) — wrong from a venv, which must leave the
+/// installation alone. Measured on 22 hooks of a 50-package project: one
+/// was needed (NI's Advanced HTTP Client, whose fix linkfix now makes
+/// itself), six harmful in a venv, the rest documentation pages, examples
+/// recompiles and markers. So a venv runs none unless the manifest opts a
+/// package in, and a LabVIEW installation runs them all, as VIPM does,
+/// unless the manifest opts one out.
+struct HookPolicy {
+    mode: HookMode,
+    venv: bool,
+    headless: bool,
+    /// The project manifest's per-dependency `hooks` settings.
+    manifest: Vec<(String, project::Hooks)>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum HookMode {
+    /// `--no-hooks`: none.
+    Never,
+    /// `--hooks`: every package's, whatever the manifest says.
+    Always,
+    /// The manifest's setting, else the destination's default.
+    Default,
+}
+
+impl HookPolicy {
+    fn new(mode: HookMode, venv: bool, manifest: Option<&project::Project>) -> HookPolicy {
+        HookPolicy { mode, venv, headless: headless(), manifest: manifest.map(|p| p.hooks.clone()).unwrap_or_default() }
+    }
+
+    fn setting(&self, pkg: &str) -> Option<project::Hooks> {
+        self.manifest.iter().find(|(n, _)| n.eq_ignore_ascii_case(pkg)).map(|(_, h)| *h)
+    }
+
+    /// Whether `pkg`'s hooks run.
+    fn allows(&self, pkg: &str) -> bool {
+        match self.mode {
+            HookMode::Never => false,
+            HookMode::Always => true,
+            HookMode::Default => match self.setting(pkg) {
+                Some(project::Hooks::Run) => true,
+                Some(project::Hooks::Skip) => false,
+                None => !self.venv && !self.headless,
+            },
+        }
+    }
+
+    /// Why `pkg`'s hooks do not run, for the report.
+    fn why_not(&self, pkg: &str) -> &'static str {
+        match (self.mode, self.setting(pkg)) {
+            (HookMode::Never, _) => "--no-hooks",
+            (_, Some(project::Hooks::Skip)) => "hooks = \"skip\" in the manifest",
+            _ if self.venv => "a venv runs a package's hooks only with hooks = \"run\" in the manifest",
+            _ => "LabVIEW runs headless here (LV_RTE_HEADLESS); hooks = \"run\" or --hooks runs them",
+        }
+    }
+}
+
 /// Hook entries for printing. The manifest keeps them as `Name=path`, where
 /// the path is wherever the VI sat on the package's build machine
 /// (`<OS Boot Volume Root>\ci-builds\...`) — meaningless here, and long. Only
@@ -724,12 +789,14 @@ fn cmd_search(cli: &Cli, query: &str) -> Result<()> {
 }
 
 fn cmd_list(cli: &Cli) -> Result<()> {
-    let roots = destination(cli)?.store();
+    let dest = destination(cli)?;
+    let roots = dest.store();
     let installed = install::list_installed(&roots)?;
     if installed.is_empty() {
         log!("lvpm has installed nothing into this target");
         return Ok(());
     }
+    let policy = hook_policy_for(&dest, HookMode::Default);
     let mut owed = 0;
     for m in &installed {
         let post = match (&m.post_install_vi, &m.post_install) {
@@ -737,9 +804,14 @@ fn cmd_list(cli: &Cli) -> Result<()> {
             (Some(_), Some(install::HookState::Ran { .. })) => "post-install ran",
             (Some(_), Some(install::HookState::Pending)) => "post-install PENDING",
             (Some(_), Some(install::HookState::Failed { .. })) => "post-install FAILED",
+            (Some(_), Some(install::HookState::Skipped { .. })) => "post-install skipped",
             (Some(_), None) => "post-install unknown",
         };
-        owed += usize::from(post.ends_with("PENDING") || post.ends_with("FAILED") || post.ends_with("unknown"));
+        // Owed: what the hook policy would run and has not run cleanly.
+        owed += usize::from(
+            policy.allows(&m.name)
+                && (post.ends_with("PENDING") || post.ends_with("FAILED") || post.ends_with("unknown") || post.ends_with("skipped")),
+        );
         // Records from before hook state was tracked list PostInstall here;
         // the column above says what is known about it now.
         let skipped: Vec<&String> = m.skipped_hooks.iter().filter(|h| !h.starts_with("PostInstall=")).collect();
@@ -748,15 +820,26 @@ fn cmd_list(cli: &Cli) -> Result<()> {
             m.name,
             m.version,
             m.files.len(),
-            if m.relinked { "relinked" } else { "NOT relinked" },
+            // Linkfix prepares every install; LabVIEW's relink is the opt-in exception.
+            if m.relinked { "relinked" } else { "" },
             post,
             if skipped.is_empty() { String::new() } else { format!("  (hooks not run: {})", hook_names(skipped)) }
         );
     }
     if owed > 0 {
-        log!("\n{owed} post-install hook(s) pending, failed or of unknown state — `lvpm run-hooks --all` runs them");
+        log!("\n{owed} post-install hook(s) owed (pending, failed, skipped or of unknown state) — `lvpm run-hooks --all` runs them");
     }
     Ok(())
+}
+
+/// The hook policy for a command that is not an install: the destination's
+/// default and, in a venv, its bound manifest's `hooks` settings.
+fn hook_policy_for(dest: &Destination, mode: HookMode) -> HookPolicy {
+    let manifest = match dest {
+        Destination::Venv(v) => v.manifest_path().filter(|p| p.is_file()).and_then(|p| read_manifest(&p).ok()),
+        _ => None,
+    };
+    HookPolicy::new(mode, matches!(dest, Destination::Venv(_)), manifest.as_ref())
 }
 
 fn cmd_refresh(cli: &Cli, timeout: u64) -> Result<()> {
@@ -1012,8 +1095,12 @@ fn cmd_install(
     // Headless (containers, CI): the hooks measured (DQMH's six) write a
     // marker file and add a palette entry — IDE furniture. Skipping them means
     // a headless install never starts LabVIEW at all. A package whose hook
-    // does real setup gets `--hooks`; the caveat is documented with the flag.
-    let hooks_off_headless = headless() && !run_hooks;
+    // does real setup gets `hooks = "run"` or `--hooks`.
+    let hook_mode = match (no_hooks, run_hooks) {
+        (true, _) => HookMode::Never,
+        (_, true) => HookMode::Always,
+        _ => HookMode::Default,
+    };
     let dest = destination(cli)?;
     // The store is one per destination; in a venv each package gets roots of
     // its own inside the loop, because every package there is its own addon.
@@ -1023,14 +1110,13 @@ fn cmd_install(
         _ => None,
     };
     let lv_gate = store.target.as_ref().map(|t| t.version);
-    // A venv's hooks run in the venv's own LabVIEW; a headless machine has no
-    // one to see what they set up.
-    let hooks_on = !no_hooks && !hooks_off_headless;
 
     // The project this install belongs to, if any: its `[sources]` count even
     // when a single package is named. Inside a project a bare `lvpm install`
     // means the manifest's dependencies — the way `npm install` does.
     let found = manifest_for(cli, manifest, venv.as_ref())?;
+    // Its `hooks` settings hold for a named package too.
+    let policy = HookPolicy::new(hook_mode, venv.is_some(), found.as_ref().map(|(_, p)| p));
     let (wanted, from_manifest) = match (package, &found) {
         (Some(p), _) => {
             let w = match p.split_once('@') {
@@ -1171,9 +1257,11 @@ fn cmd_install(
     // Any package declared a hook this install did not run — decides whether
     // the headless note below is owed. Each package already said which.
     let mut hooks_unrun = false;
-    // PostInstall hooks extracted during this run, executed only after the
-    // relink pass has made them runnable.
-    let mut hook_runs: Vec<(String, PathBuf, Vec<String>)> = Vec::new();
+    // The PostInstall hooks to run, executed only after linkfix or the relink
+    // pass has made them runnable; settled from the records after the copy.
+    let hook_runs: Vec<(String, PathBuf, Vec<String>)>;
+    // Packages a dry run would install that declare a PostInstall hook.
+    let mut planned_post: Vec<String> = Vec::new();
     // PreInstall hooks run inline instead, before their package's files are
     // copied — that is the contract their PostInstall counterparts rely on
     // (DQMH's pair passes a marker file between them).
@@ -1248,8 +1336,8 @@ fn cmd_install(
                 log!("      ... and {} more", p.writes.len() - 6);
             }
             relink_work.push((e.name.clone(), relink::folders_for_spec(&roots, &spec)?));
-            if hooks_on && spec.script_vis.iter().any(|(h, v)| h == "PostInstall" && !v.is_empty()) {
-                hook_runs.push((e.name.clone(), PathBuf::from("PostInstall.vi"), Vec::new()));
+            if spec.script_vis.iter().any(|(h, v)| h == "PostInstall" && !v.is_empty()) {
+                planned_post.push(e.name.clone());
             }
         } else {
             let pre = match spec.script_vis.iter().any(|(h, v)| h == "PreInstall" && !v.is_empty())
@@ -1261,7 +1349,7 @@ fn cmd_install(
             // that is already up: the target's own. A venv's instance is
             // started after the copy (so it sees the new addon), which is too
             // late for a PreInstall — those stay reported, not run.
-            if hooks_on
+            if policy.allows(&e.name)
                 && venv.is_none()
                 && let (Some(vi), Some(t)) = (&pre, &roots.target)
             {
@@ -1284,10 +1372,10 @@ fn cmd_install(
             log!("{} files", m.files.len());
             relink_work.push((e.name.clone(), m.relink_folders.iter().map(PathBuf::from).collect()));
             // The record now holds PostInstall as pending; the hook step
-            // after the copy runs every pending one in the target. Headless,
-            // the other hooks did not run either, and `lvpm list` should say
-            // so — PostInstall stays pending for a later install.
-            if hooks_off_headless && venv.is_none() {
+            // after the copy settles it. When the policy holds this package's
+            // hooks back, the others did not run either, and `lvpm list`
+            // should say so. (In a venv the record already lists them.)
+            if !policy.allows(&e.name) && venv.is_none() {
                 for (h, v) in spec.script_vis.iter().filter(|(h, _)| h != "PostInstall") {
                     install::mark_hook_skipped(&roots, &e.name, &format!("{h}={v}"))?;
                 }
@@ -1303,18 +1391,16 @@ fn cmd_install(
         for miss in &p.missing_from_archive {
             wlog!("      ! listed in spec but absent from archive: {miss}");
         }
-        // Warn only about hooks this install owes and will not run. Globally,
-        // PreInstall has run, PostInstall runs after the relink pass, and the
-        // uninstall hooks are extracted for `lvpm uninstall` to run — nothing
-        // to say. In a venv PreInstall cannot run (see above); with
-        // `--no-hooks`, or headless, no hook runs at all, so every declared
-        // one is reported.
+        // Warn only about hooks this install owes and will not run. Allowed
+        // globally, PreInstall has run, PostInstall runs after the relink
+        // pass, and the uninstall hooks are extracted for `lvpm uninstall` —
+        // nothing to say. In a venv PreInstall cannot run (see above); a
+        // package the policy holds back runs none, so every declared one is
+        // reported.
         let skipped: Vec<String> = spec
             .script_vis
             .iter()
-            .filter(|(h, _)| {
-                !hooks_on || (h == "PreInstall" && venv.is_some())
-            })
+            .filter(|(h, _)| !policy.allows(&e.name) || (h == "PreInstall" && venv.is_some()))
             .map(|(h, v)| format!("{h}={v}"))
             .collect();
         if !skipped.is_empty() {
@@ -1322,9 +1408,12 @@ fn cmd_install(
             hooks_unrun = true;
         }
     }
-    if hooks_off_headless && venv.is_none() && hooks_unrun {
-        log!("\nhooks: skipped — LabVIEW runs headless here (LV_RTE_HEADLESS). Install hooks mostly add");
-        log!("      palettes, menus or markers for the IDE; a package whose hook does real setup needs --hooks.");
+    if hooks_unrun && hook_mode == HookMode::Default {
+        log!(
+            "\nhooks: {}. Most install hooks add palettes, menus or markers, open a web page, or change",
+            if venv.is_some() { "a venv runs none by default" } else { "skipped where shown" }
+        );
+        log!("      the LabVIEW installation; enable one package's with hooks = \"run\" in its {} entry.", project::FILE_NAME);
     }
 
     if dry_run {
@@ -1339,28 +1428,54 @@ fn cmd_install(
 
     // The hook step works from the records, not from what this run copied:
     // every package in the target whose PostInstall is still owed — including
-    // one an earlier, interrupted install left behind — runs, in plan order.
+    // one an earlier, interrupted install left behind, and one an earlier
+    // policy skipped that is now allowed — runs, in plan order. A dry run
+    // adds the packages it would install.
     let mut unknown_hooks = Vec::new();
-    if !dry_run {
-        let mut owed = Vec::new();
-        for m in install::list_installed(&store)? {
-            match (&m.post_install_vi, &m.post_install) {
-                (Some(vi), Some(install::HookState::Pending)) => owed.push((m.name, PathBuf::from(vi), m.files)),
-                (Some(_), None) => unknown_hooks.push(m.name),
-                _ => {}
+    let mut owed = Vec::new();
+    for m in install::list_installed(&store)? {
+        match (&m.post_install_vi, &m.post_install) {
+            (Some(vi), Some(install::HookState::Pending | install::HookState::Skipped { .. })) => {
+                owed.push((m.name, PathBuf::from(vi), m.files))
+            }
+            (Some(_), None) => unknown_hooks.push(m.name),
+            _ => {}
+        }
+    }
+    for name in planned_post {
+        if !owed.iter().any(|(n, _, _)| n.eq_ignore_ascii_case(&name)) {
+            owed.push((name, PathBuf::from("PostInstall.vi"), Vec::new()));
+        }
+    }
+    let rank = |n: &str| plan.iter().position(|e| e.name.eq_ignore_ascii_case(n)).unwrap_or(usize::MAX);
+    owed.sort_by(|a, b| rank(&a.0).cmp(&rank(&b.0)).then_with(|| a.0.cmp(&b.0)));
+    let (allowed, held): (Vec<_>, Vec<_>) = owed.into_iter().partition(|(n, _, _)| policy.allows(n));
+    hook_runs = allowed;
+    if !held.is_empty() {
+        // Recorded as skipped, so `lvpm list` stops calling them owed; they
+        // run once the policy allows them. `--no-hooks` defers instead.
+        if !dry_run && hook_mode != HookMode::Never {
+            for (n, _, _) in &held {
+                if let Err(e) = install::set_post_install(&store, n, install::HookState::Skipped { at: install::now_secs() }) {
+                    log!("      could not record that {n}'s hook was skipped: {e:#}");
+                }
             }
         }
-        let rank = |n: &str| plan.iter().position(|e| e.name.eq_ignore_ascii_case(n)).unwrap_or(usize::MAX);
-        owed.sort_by(|a, b| rank(&a.0).cmp(&rank(&b.0)).then_with(|| a.0.cmp(&b.0)));
-        match hooks_on {
-            true => hook_runs = owed,
-            false if !owed.is_empty() => log!(
-                "\n{} post-install hook(s) pending, not run now: {}\n      \
-                 they run with the next `lvpm install` that runs hooks, or `lvpm run-hooks --all`",
-                owed.len(),
-                owed.iter().map(|(n, _, _)| n.as_str()).collect::<Vec<_>>().join(", ")
-            ),
-            false => {}
+        let mut by_reason: Vec<(&str, Vec<&str>)> = Vec::new();
+        for (n, _, _) in &held {
+            let why = policy.why_not(n);
+            match by_reason.iter_mut().find(|(w, _)| *w == why) {
+                Some((_, names)) => names.push(n),
+                None => by_reason.push((why, vec![n])),
+            }
+        }
+        for (why, names) in by_reason {
+            log!(
+                "\n{} post-install hook(s) {} ({why}): {}",
+                names.len(),
+                if dry_run { "would not run" } else { "not run" },
+                names.join(", ")
+            );
         }
     }
 
@@ -1512,10 +1627,25 @@ fn cmd_run_hooks(cli: &Cli, package: Option<&str>, all: bool, timeout: u64) -> R
         vec![install::read_manifest(&roots, p)?]
     };
 
-    let work: Vec<install::Manifest> =
+    let mut work: Vec<install::Manifest> =
         manifests.into_iter().filter(|m| m.post_install_vi.is_some()).collect();
+    // `--all` follows the hook policy; a package named here is run as asked.
+    if all {
+        let policy = hook_policy_for(&dest, HookMode::Default);
+        let (allowed, held): (Vec<_>, Vec<_>) = work.into_iter().partition(|m| policy.allows(&m.name));
+        if !held.is_empty() {
+            log!(
+                "not running {} hook(s) the policy holds back ({}): {}\n      \
+                 `lvpm run-hooks <package>` runs one anyway",
+                held.len(),
+                policy.why_not(&held[0].name),
+                held.iter().map(|m| m.name.as_str()).collect::<Vec<_>>().join(", ")
+            );
+        }
+        work = allowed;
+    }
     if work.is_empty() {
-        log!("nothing to do: no package with an extracted PostInstall hook");
+        log!("nothing to do: no package with an extracted PostInstall hook to run");
         return Ok(());
     }
 
@@ -2433,6 +2563,30 @@ fn read_spec(zip: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>) -> Result<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hook_policy_defaults_by_destination_and_follows_the_manifest() {
+        let p = project::parse(
+            "[dependencies]\nhttp = { version = \"1\", hooks = \"run\" }\ngcli = { version = \"1\", hooks = \"skip\" }\nqmh = \"1\"\n",
+        )
+        .unwrap();
+        let policy = |mode, venv, headless| HookPolicy { mode, venv, headless, manifest: p.hooks.clone() };
+
+        let venv = policy(HookMode::Default, true, false);
+        assert!(venv.allows("HTTP"), "opted in, case-insensitively");
+        assert!(!venv.allows("gcli") && !venv.allows("qmh"), "a venv runs nothing else");
+        assert!(venv.why_not("qmh").contains("hooks = \"run\""));
+
+        let global = policy(HookMode::Default, false, false);
+        assert!(global.allows("qmh") && global.allows("http"), "the installation runs them, as VIPM does");
+        assert!(!global.allows("gcli"), "unless opted out");
+
+        let headless = policy(HookMode::Default, false, true);
+        assert!(headless.allows("http") && !headless.allows("qmh"));
+
+        assert!(!policy(HookMode::Never, false, false).allows("http"), "--no-hooks wins");
+        assert!(policy(HookMode::Always, true, false).allows("gcli"), "--hooks wins");
+    }
 
     #[test]
     fn dependency_confirmation_accepts_yes_and_defaults_to_no() {
