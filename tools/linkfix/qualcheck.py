@@ -60,7 +60,10 @@ def chain(logical):
         out.append(o); cur = o.lower()
     return out
 def base(l): return l.rsplit("/", 1)[-1]
-API = {"VIPI", "FPPI", "DDPI", "DyOM", "PNOM", "TCPI", "LVCC", "VRPI"}
+# Class-API kinds, as src/linkfix.rs's is_api_kind: every ident ending in
+# `PI` (DRPI, RVPI included), plus DyOM, PNOM and a control's LVCC list.
+API = {"DyOM", "PNOM", "LVCC"}
+def is_api(k): return k.endswith("PI") or k in API
 stats = Counter(); ex = defaultdict(list); per_pkg = defaultdict(Counter)
 for low, (logical, phys, pkgname) in files.items():
     if filt and filt.lower() not in pkgname.lower(): continue
@@ -85,7 +88,7 @@ for low, (logical, phys, pkgname) in files.items():
                     owner[tl] = files[par.lower()][0]
                 else: stats["target not in store"] += 1; continue
             names = [base(l) for l in reversed(chain(target))]
-            if k in API: names.append(base(target))
+            if is_api(k): names.append(base(target))
             common = 0
             for a, b in zip(names, ours):
                 if a.lower() == b.lower(): common += 1
