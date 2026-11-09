@@ -1532,7 +1532,10 @@ fn resolve_wildcard(kind: Wildcard, prefix: &[u8], ext: &[u8], bits: u8) -> Vec<
 }
 
 /// Undo VI Package Builder's wildcard removal on one Call Library link
-/// (`NEXF`): when the diagram's node still asks for a wildcard library and
+/// (`NEXF`), VIPM's known issue "VI Package Builder removes cross platform
+/// wildcards from Call Library Function nodes during the build process"
+/// (<https://support.vipm.io/hc/en-us/articles/360053941572-VI-Package-Builder-removes-cross-platform-wildcards-from-Call-Library-Function-nodes-during-the-build-process>):
+/// when the diagram's node still asks for a wildcard library and
 /// the link names one bitness's file, the link gets the wildcard as its name
 /// and the target bitness's file as its path, as LabVIEW saves it after
 /// loading the VI there (measured on NI's Advanced HTTP Client after its

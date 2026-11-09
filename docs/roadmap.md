@@ -46,7 +46,9 @@ wins over the overlay; `LVAddons.AdditionalLocations` needs LabVIEW 2024 Q1.
   `lvwebclient_64.dll` but records the 32-bit one in all 19 VIs, so without
   the hook `Open Session.vi` fails with error 1003; after it, all 19 point at
   `_64` and the VI runs. `--no-hooks` opts out. Since then: linkfix's
-  `clfn-wildcard` method makes that hook's edit itself, and a venv runs no
+  `clfn-wildcard` method makes that hook's edit itself (the cause is VIPM's
+  known issue [VI Package Builder removes cross platform wildcards from Call
+  Library Function nodes](https://support.vipm.io/hc/en-us/articles/360053941572-VI-Package-Builder-removes-cross-platform-wildcards-from-Call-Library-Function-nodes-during-the-build-process)), and a venv runs no
   hooks unless the manifest says `hooks = "run"` for the package (22 hooks
   measured on NovaXC: six change the LabVIEW installation from a venv, none
   of the rest is needed). Still open: `PreInstall` in a venv (the instance

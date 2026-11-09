@@ -410,9 +410,12 @@ run in a venv: its LabVIEW has to be closed before the files can go.
 
 Measured on the 22 hooks of a 50-package project: six are harmful from a
 venv, and the rest open documentation pages, recompile examples or leave
-markers. The one that was needed, NI's Advanced HTTP Client fixing the
-Call Library path its package builder broke, is now done by linkfix's
-`clfn-wildcard` method (see [Linkfix](docs/linkfix.md#call-library-wildcards)).
+markers. The one that was needed is NI's Advanced HTTP Client's. It repairs
+the Call Library path that VI Package Builder broke when it built the package,
+a known VIPM issue: [VI Package Builder removes cross platform wildcards from
+Call Library Function nodes during the build process](https://support.vipm.io/hc/en-us/articles/360053941572-VI-Package-Builder-removes-cross-platform-wildcards-from-Call-Library-Function-nodes-during-the-build-process).
+Linkfix's `clfn-wildcard` method now makes that repair itself (see
+[Linkfix](docs/linkfix.md#call-library-wildcards)).
 
 Hook failures are reported, never fatal: the files are installed either way,
 and an uninstall is never left half-done. After the hooks, a global `install`

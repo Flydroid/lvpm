@@ -92,7 +92,7 @@ Builder replaces the wildcard in the VI's link with the build machine's file,
 so a package built on 32-bit LabVIEW names the 32-bit DLL and fails to load
 in 64-bit LabVIEW (error 1003). VIPM documents this as a known issue:
 [VI Package Builder removes cross platform wildcards from Call Library
-Function nodes during the build process](https://support.vipm.io/hc/en-us/articles/360053941572).
+Function nodes during the build process](https://support.vipm.io/hc/en-us/articles/360053941572-VI-Package-Builder-removes-cross-platform-wildcards-from-Call-Library-Function-nodes-during-the-build-process).
 Packages work around it with a PostInstall hook that resaves every VI in
 LabVIEW. NI's Advanced HTTP Client does this for `lvwebclient_*.*`.
 
