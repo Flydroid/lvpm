@@ -1536,7 +1536,20 @@ fn cmd_install(
             // A LabVIEW of the venv's own, started after the files landed so
             // that it sees them, and closed again unless asked to stay.
             Some(v) => {
-                let inst = launch::ensure_instance(v, true, std::time::Duration::from_secs(180))?;
+                // The files are in place either way: a LabVIEW that does not
+                // come up only fails the relink, if one was asked for. The
+                // hooks stay pending for the next install or `run-hooks`.
+                let inst = match launch::ensure_instance(v, true, std::time::Duration::from_secs(300)) {
+                    Ok(inst) => inst,
+                    Err(e) if !want_relink => {
+                        wlog!(
+                            "\npost-install hooks not run: {e:#}\n      they stay pending; \
+                             `lvpm run-hooks --all` runs them once LabVIEW is up"
+                        );
+                        return Ok(());
+                    }
+                    Err(e) => return Err(e),
+                };
                 let outcome = match want_relink {
                     true => run_relink(&store, inst.port, relink_args, &relink_work),
                     false => Ok(()),
