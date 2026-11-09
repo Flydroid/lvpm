@@ -331,6 +331,11 @@ enum Cmd {
         /// why the file was skipped) as JSON.
         #[arg(long, value_name = "FILE")]
         report: Option<PathBuf>,
+        /// The bitness of the LabVIEW a `--tree` is for (32 or 64), which the
+        /// `clfn-wildcard` method resolves Call Library wildcards for. A venv
+        /// knows its own.
+        #[arg(long, value_name = "32|64")]
+        bitness: Option<u8>,
     },
     /// Show what lvpm has installed into the selected target.
     List,
@@ -451,12 +456,13 @@ fn run(cli: &Cli) -> Result<()> {
             Ok(())
         }
         Cmd::Launch { lvproj, ini_keys } => cmd_launch(&cli, lvproj.as_deref(), ini_keys),
-        Cmd::Linkfix { tree, dry_run, verbose, keep_compiled_code, fix, report } => {
+        Cmd::Linkfix { tree, dry_run, verbose, keep_compiled_code, fix, report, bitness } => {
             let mut methods: Vec<linkfix::Method> = if fix.is_empty() { linkfix::Method::ALL.to_vec() } else { fix.clone() };
             if *keep_compiled_code {
                 methods.retain(|m| *m != linkfix::Method::SourceOnly);
             }
-            cmd_linkfix(&cli, tree.as_deref(), *dry_run, *verbose, &methods, report.as_deref())
+            ensure!(bitness.is_none_or(|b| b == 32 || b == 64), "--bitness is 32 or 64");
+            cmd_linkfix(&cli, tree.as_deref(), *dry_run, *verbose, &methods, report.as_deref(), *bitness)
         }
         Cmd::List => cmd_list(&cli),
         Cmd::Search { query } => cmd_search(&cli, query),
@@ -1370,9 +1376,10 @@ fn cmd_install(
                 Some(v) => linkfix::venv_roots(&v.dir),
                 None => Ok(vec![store.application.clone()]),
             };
+            let bitness = venv.as_ref().map(|v| v.target.bitness).or(store.target.as_ref().map(|t| t.bitness));
             log!("\nlinkfix: preparing installed files (repair links and separate compiled code; no LabVIEW needed)");
             match roots.and_then(|roots| {
-                linkfix::fix_files(&roots, &linkfix_files, false, linkfix::Methods::of(&linkfix::Method::ALL))
+                linkfix::fix_files(&roots, &linkfix_files, false, linkfix::Methods::of(&linkfix::Method::ALL, bitness))
             }) {
                 Ok((_, outcomes)) => report_linkfix(&outcomes, false, false, &linkfix::Method::ALL, None)?,
                 Err(error) => log!("  linkfix could not complete: {error:#}; package files remain installed. Retry with `lvpm linkfix --tree <DIR> --verbose`."),
@@ -1991,14 +1998,15 @@ fn cmd_linkfix(
     verbose: bool,
     methods: &[linkfix::Method],
     report: Option<&Path>,
+    bitness: Option<u8>,
 ) -> Result<()> {
-    let roots: Vec<PathBuf> = match tree {
+    let (roots, bitness): (Vec<PathBuf>, Option<u8>) = match tree {
         Some(t) => {
             let store_like = linkfix::venv_roots(t)?;
-            if store_like.is_empty() { vec![t.to_path_buf()] } else { store_like }
+            (if store_like.is_empty() { vec![t.to_path_buf()] } else { store_like }, bitness)
         }
         None => match destination(cli)? {
-            Destination::Venv(v) => linkfix::venv_roots(&v.dir)?,
+            Destination::Venv(v) => (linkfix::venv_roots(&v.dir)?, bitness.or(Some(v.target.bitness))),
             Destination::Global(_) | Destination::Scratch(_) => bail!(
                 "give --tree <DIR> for an explicit LabVIEW-shaped tree, or run linkfix inside a venv; \
                  install prepares newly written files automatically"
@@ -2016,8 +2024,11 @@ fn cmd_linkfix(
         roots.len(),
         names.join(", ")
     );
+    if methods.contains(&linkfix::Method::ClfnWildcard) && bitness.is_none() {
+        log!("  clfn-wildcard: skipped, the tree's LabVIEW bitness is unknown (pass --bitness 32|64)");
+    }
 
-    let (_tree, outcomes) = linkfix::fix_tree(&roots, dry_run, linkfix::Methods::of(methods))?;
+    let (_tree, outcomes) = linkfix::fix_tree(&roots, dry_run, linkfix::Methods::of(methods, bitness))?;
     report_linkfix(&outcomes, dry_run, verbose, methods, report)
 }
 
@@ -2057,16 +2068,18 @@ fn report_linkfix(
                 total.qualifier += c.qualifier;
                 total.vils += c.vils;
                 total.separated += c.separated;
+                total.clfn += c.clfn;
                 // Each file always goes to the log; to the console on request.
                 let line = format!(
-                    "  {:<60} owner {} rel {} abs {} qual {} vils {} sep {}",
+                    "  {:<60} owner {} rel {} abs {} qual {} vils {} sep {} clfn {}",
                     o.path.display(),
                     c.owner,
                     c.relative,
                     c.absolute,
                     c.qualifier,
                     c.vils,
-                    c.separated
+                    c.separated,
+                    c.clfn
                 );
                 match verbose {
                     true => log!("{line}"),
@@ -2107,8 +2120,8 @@ fn report_linkfix(
     );
     log!(
         "  edits: owner paths {}, relative paths {}, build-machine absolutes {}, qualifiers {}, owner refs {}, \
-         compiled code separated {}",
-        total.owner, total.relative, total.absolute, total.qualifier, total.vils, total.separated
+         compiled code separated {}, CLFN wildcards restored {}",
+        total.owner, total.relative, total.absolute, total.qualifier, total.vils, total.separated, total.clfn
     );
     if not_separated > 0 {
         log!("  compiled code left embedded in {not_separated} file(s); link repairs were still attempted");

@@ -1391,10 +1391,19 @@ pub enum Method {
     /// Embedded compiled code is removed and `.lvlib`/`.lvclass`
     /// files are marked source-only.
     SourceOnly,
+    /// A Call Library Function node whose library path is a cross-platform
+    /// wildcard (`lvwebclient_*.*`) gets its link back to that wildcard,
+    /// resolved for the target's bitness. VI Package Builder replaces the
+    /// wildcard with the build machine's file (`lvwebclient_32.dll`), which
+    /// breaks the package in the other bitness — VIPM's known issue
+    /// <https://support.vipm.io/hc/en-us/articles/360053941572>. Packages
+    /// repair it in a PostInstall hook that resaves every VI in LabVIEW
+    /// (NI's Advanced HTTP Client); this does the same edit without one.
+    ClfnWildcard,
 }
 
 impl Method {
-    pub const ALL: [Method; 4] = [Method::Owner, Method::Paths, Method::Qualifiers, Method::SourceOnly];
+    pub const ALL: [Method; 5] = [Method::Owner, Method::Paths, Method::Qualifiers, Method::SourceOnly, Method::ClfnWildcard];
 }
 
 /// Which [`Method`]s a run applies.
@@ -1404,26 +1413,32 @@ pub struct Methods {
     pub paths: bool,
     pub qualifiers: bool,
     pub source_only: bool,
+    /// The target's bitness when [`Method::ClfnWildcard`] is selected and
+    /// the target is known; `None` leaves Call Library links as they are.
+    pub bitness: Option<u8>,
 }
 
 impl Methods {
-    pub fn of(list: &[Method]) -> Methods {
+    /// The methods in `list`, for a target of `bitness` (32 or 64), if known.
+    pub fn of(list: &[Method], bitness: Option<u8>) -> Methods {
         Methods {
             owner: list.contains(&Method::Owner),
             paths: list.contains(&Method::Paths),
             qualifiers: list.contains(&Method::Qualifiers),
             source_only: list.contains(&Method::SourceOnly),
+            bitness: bitness.filter(|_| list.contains(&Method::ClfnWildcard)),
         }
     }
 
     fn links(&self) -> bool {
-        self.owner || self.paths || self.qualifiers
+        self.owner || self.paths || self.qualifiers || self.bitness.is_some()
     }
 }
 
 /// What one file got, by method: `owner` from [`Method::Owner`], `relative`
 /// and `absolute` from [`Method::Paths`], `qualifier` and `vils` from
-/// [`Method::Qualifiers`], `separated` from [`Method::SourceOnly`].
+/// [`Method::Qualifiers`], `separated` from [`Method::SourceOnly`], `clfn`
+/// from [`Method::ClfnWildcard`].
 #[derive(Default, Debug, Clone, serde::Serialize)]
 pub struct Changes {
     pub owner: usize,
@@ -1433,6 +1448,8 @@ pub struct Changes {
     pub vils: usize,
     /// 1 when this file was made source-only.
     pub separated: usize,
+    /// Call Library links given back their wildcard library name.
+    pub clfn: usize,
     /// Why [`Method::SourceOnly`] left this file's compiled code embedded,
     /// when it could not separate it; the other methods still ran.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1441,7 +1458,7 @@ pub struct Changes {
 
 impl Changes {
     pub fn total(&self) -> usize {
-        self.owner + self.relative + self.absolute + self.qualifier + self.vils + self.separated
+        self.owner + self.relative + self.absolute + self.qualifier + self.vils + self.separated + self.clfn
     }
 
     /// The methods that changed something in this file.
@@ -1459,8 +1476,97 @@ impl Changes {
         if self.separated > 0 {
             out.push(Method::SourceOnly);
         }
+        if self.clfn > 0 {
+            out.push(Method::ClfnWildcard);
+        }
         out
     }
+}
+
+/// The block-diagram heap, inflated: what the diagram's nodes hold.
+fn heap_bytes(rsrc: &Rsrc) -> Option<Vec<u8>> {
+    let s = rsrc.section(b"BDHc").or_else(|| rsrc.section(b"BDHb"))?;
+    let mut out = Vec::new();
+    flate2::read::ZlibDecoder::new(s.data.get(4..)?).read_to_end(&mut out).ok()?;
+    Some(out)
+}
+
+/// The two cross-platform wildcards a Call Library Function node's library
+/// name can hold (LabVIEW help, "Call Library Function Dialog Box"):
+/// `name*.*` reads as `name32` / `name64`, `name**.*` as `name` / `name_64`;
+/// the `.*` extension as the platform's library extension.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Wildcard {
+    Single,
+    Double,
+}
+
+/// The wildcard library names a resolved name `lib` may have come from,
+/// each with its prefix: `lvwebclient_32.dll` came from
+/// `lvwebclient_*.*` (single, prefix `lvwebclient_`); `foo.dll` and
+/// `foo_64.dll` from `foo**.*` (double, prefix `foo`). The extension may also
+/// have been written out (`lvwebclient_*.dll`).
+fn wildcard_sources(lib: &[u8]) -> Vec<(Vec<u8>, Wildcard, Vec<u8>)> {
+    let Some(dot) = lib.iter().rposition(|&c| c == b'.') else { return Vec::new() };
+    let (stem, ext) = (&lib[..dot], &lib[dot + 1..]);
+    let mut out = Vec::new();
+    for wext in [&b"*"[..], ext] {
+        let name = |prefix: &[u8], stars: &[u8]| [prefix, stars, b".", wext].concat();
+        if let Some(p) = stem.strip_suffix(b"32").or_else(|| stem.strip_suffix(b"64")) {
+            out.push((name(p, b"*"), Wildcard::Single, p.to_vec()));
+        }
+        let p = stem.strip_suffix(b"_64").unwrap_or(stem);
+        out.push((name(p, b"**"), Wildcard::Double, p.to_vec()));
+    }
+    out
+}
+
+/// The file a wildcard resolves to for `bits`, with the extension `ext`.
+fn resolve_wildcard(kind: Wildcard, prefix: &[u8], ext: &[u8], bits: u8) -> Vec<u8> {
+    let suffix = match (kind, bits) {
+        (Wildcard::Single, b) => format!("{b}"),
+        (Wildcard::Double, 64) => "_64".to_string(),
+        (Wildcard::Double, _) => String::new(),
+    };
+    [prefix, suffix.as_bytes(), b".", ext].concat()
+}
+
+/// Undo VI Package Builder's wildcard removal on one Call Library link
+/// (`NEXF`): when the diagram's node still asks for a wildcard library and
+/// the link names one bitness's file, the link gets the wildcard as its name
+/// and the target bitness's file as its path, as LabVIEW saves it after
+/// loading the VI there (measured on NI's Advanced HTTP Client after its
+/// PostInstall hook: `lvwebclient_*.*`, `.../lvwebclient_64.dll`). Nothing
+/// changes unless that file is in the tree beside the one named.
+fn fix_clfn_wildcard(o: &mut LinkObj, target: &str, bits: u8, heap: &[u8], tree: &Tree) -> bool {
+    if &o.ident != b"NEXF" || o.qual.len() != 1 || o.path.comps.is_empty() {
+        return false;
+    }
+    let lib = o.qual[0].clone();
+    let Some(dot) = lib.iter().rposition(|&c| c == b'.') else { return false };
+    let ext = &lib[dot + 1..];
+    // The node's own path holds the wildcard as a length-prefixed path
+    // component; a bare substring could be part of a function name.
+    let in_heap = |w: &[u8]| {
+        let mut needle = vec![w.len() as u8];
+        needle.extend_from_slice(w);
+        w.len() < 256 && heap.windows(needle.len()).any(|x| x == needle.as_slice())
+    };
+    let Some((wildcard, kind, prefix)) = wildcard_sources(&lib).into_iter().find(|(w, _, _)| in_heap(w)) else {
+        return false;
+    };
+    let want = resolve_wildcard(kind, &prefix, ext, bits);
+    let last = o.path.comps.len() - 1;
+    if o.path.comps[last] == want && o.qual[0] == wildcard {
+        return false;
+    }
+    let sibling = format!("{}/{}", parent(target), String::from_utf8_lossy(&want));
+    if !tree.resolvable(&sibling) {
+        return false;
+    }
+    o.qual = vec![wildcard];
+    o.path.comps[last] = want;
+    true
 }
 
 /// Apply the selected methods to one VI. Returns the new file bytes when
@@ -1501,6 +1607,9 @@ pub fn fix_vi(bytes: &[u8], vi_logical: &str, tree: &Tree, m: Methods) -> Result
             Err(e) => changes.not_separated = Some(format!("{e:#}")),
         }
     }
+
+    // Read once, and only when a Call Library link might need it.
+    let heap = m.bitness.and_then(|_| heap_bytes(&rsrc)).unwrap_or_default();
 
     for sec in rsrc.sections.iter_mut() {
         if !m.links() || !matches!(&sec.ident, b"LIvi" | b"LIbd" | b"LIfp" | b"LIds") {
@@ -1576,6 +1685,13 @@ pub fn fix_vi(bytes: &[u8], vi_logical: &str, tree: &Tree, m: Methods) -> Result
                     o.path = p;
                     sec_changed = true;
                 }
+            }
+
+            if let Some(bits) = m.bitness
+                && fix_clfn_wildcard(o, &target, bits, &heap, tree)
+            {
+                changes.clfn += 1;
+                sec_changed = true;
             }
 
             // Qualifier: the target's owner chain with our own chain's common
@@ -1999,7 +2115,7 @@ mod tests {
         let roots = venv_roots(&root).unwrap();
         assert_eq!(roots, vec![package, named_packages]);
         assert_eq!(venv_roots(&packages).unwrap(), roots);
-        let (_, outcomes) = fix_files(&roots, &[library.clone()], false, Methods::of(&Method::ALL)).unwrap();
+        let (_, outcomes) = fix_files(&roots, &[library.clone()], false, Methods::of(&Method::ALL, Some(64))).unwrap();
         assert_eq!(outcomes.len(), 1);
         assert!(outcomes[0].result.is_ok());
         assert!(std::fs::read_to_string(&library).unwrap().contains("NI.LV.All.SourceOnly"));
@@ -2035,7 +2151,7 @@ mod tests {
             std::fs::write(dir.join("vi.lib/X.lvlib"), xml).unwrap();
         }
         let files = vec![roots[0].join("vi.lib/X.lvlib")];
-        let error = fix_files(&roots, &files, false, Methods::of(&Method::ALL)).err().unwrap();
+        let error = fix_files(&roots, &files, false, Methods::of(&Method::ALL, Some(64))).err().unwrap();
         assert!(error.to_string().contains("ambiguous installed path"));
         for dir in &roots {
             assert_eq!(std::fs::read(dir.join("vi.lib/X.lvlib")).unwrap(), xml);
@@ -2065,8 +2181,8 @@ mod tests {
         std::fs::write(outside.join("External.lvlib"), xml).unwrap();
         link(&outside, &tree.join("external"));
         link(&tree, &tree.join("loop"));
-        assert!(fix_tree(&[tree.join("external")], false, Methods::of(&Method::ALL)).is_err());
-        let (_, outcomes) = fix_tree(&[tree], false, Methods::of(&Method::ALL)).unwrap();
+        assert!(fix_tree(&[tree.join("external")], false, Methods::of(&Method::ALL, Some(64))).is_err());
+        let (_, outcomes) = fix_tree(&[tree], false, Methods::of(&Method::ALL, Some(64))).unwrap();
         assert!(outcomes.is_empty());
         assert_eq!(std::fs::read(outside.join("External.lvlib")).unwrap(), xml);
         let store = root.join("store");
@@ -2134,7 +2250,7 @@ mod tests {
         std::fs::write(&existing, xml).unwrap();
         let roots = vec![root.clone()];
         let files = vec![installed.clone()];
-        let methods = Methods::of(&Method::ALL);
+        let methods = Methods::of(&Method::ALL, Some(64));
 
         let (_, preview) = fix_files(&roots, &files, true, methods).unwrap();
         assert_eq!(preview.len(), 1);
@@ -2229,7 +2345,7 @@ mod tests {
         let mut with_compiled_block = original.clone();
         with_compiled_block.edit_blocks(&[], Some((*b"VICD", b"synthetic compiled block".to_vec()))).unwrap();
         let tree = Tree { files: HashMap::new(), owner: HashMap::new(), by_name: HashMap::new() };
-        let (prepared, changes) = fix_vi(&with_compiled_block.write(), "vi.lib/Fixture.vi", &tree, Methods::of(&[Method::SourceOnly])).unwrap();
+        let (prepared, changes) = fix_vi(&with_compiled_block.write(), "vi.lib/Fixture.vi", &tree, Methods::of(&[Method::SourceOnly], None)).unwrap();
         assert_eq!(changes.separated, 1);
         let prepared = Rsrc::parse(&prepared.unwrap()).unwrap();
         assert_eq!(prepared.version().unwrap(), original.version().unwrap());
@@ -2369,6 +2485,26 @@ mod tests {
         let t = logical_to_token("user.lib/_OpenG.lib/a.lvlib").unwrap();
         assert_eq!(t[0], b"<userlib>");
         assert_eq!(t.len(), 3);
+    }
+
+    #[test]
+    fn clfn_wildcards_resolve_both_ways_for_both_forms() {
+        // `name*.*`: NI's Advanced HTTP Client, built on a 32-bit machine.
+        let single = wildcard_sources(b"lvwebclient_32.dll");
+        let (w, kind, prefix) = &single[0];
+        assert_eq!((w.as_slice(), *kind, prefix.as_slice()), (&b"lvwebclient_*.*"[..], Wildcard::Single, &b"lvwebclient_"[..]));
+        assert_eq!(resolve_wildcard(*kind, prefix, b"dll", 64), b"lvwebclient_64.dll");
+        assert_eq!(resolve_wildcard(*kind, prefix, b"dll", 32), b"lvwebclient_32.dll");
+        // `name**.*`: `name.dll` on 32-bit, `name_64.dll` on 64-bit.
+        for built in [&b"myshared.dll"[..], b"myshared_64.dll"] {
+            let (w, kind, prefix) = wildcard_sources(built).into_iter().find(|s| s.1 == Wildcard::Double).unwrap();
+            assert_eq!(w, b"myshared**.*");
+            assert_eq!(resolve_wildcard(kind, &prefix, b"dll", 64), b"myshared_64.dll");
+            assert_eq!(resolve_wildcard(kind, &prefix, b"dll", 32), b"myshared.dll");
+        }
+        // The extension may be written out instead of `.*`.
+        assert!(wildcard_sources(b"lvwebclient_32.dll").iter().any(|s| s.0 == b"lvwebclient_*.dll"));
+        assert!(wildcard_sources(b"noextension").is_empty());
     }
 
     fn unhex(s: &str) -> Vec<u8> {

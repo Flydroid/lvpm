@@ -82,6 +82,28 @@ not removed or bypassed. If verification fails, source-only preparation is
 not applied. A VI without its block diagram keeps its compiled code, because
 LabVIEW cannot regenerate that code from a missing diagram.
 
+### Call Library Wildcards
+
+A Call Library Function node can name its library with a cross-platform
+wildcard: `name*.*` loads `name32.dll` or `name64.dll`, and `name**.*` loads
+`name.dll` or `name_64.dll`, whichever matches LabVIEW's bitness. VI Package
+Builder replaces the wildcard in the VI's link with the build machine's file,
+so a package built on 32-bit LabVIEW names the 32-bit DLL and fails to load
+in 64-bit LabVIEW (error 1003). VIPM documents this as a known issue:
+[VI Package Builder removes cross platform wildcards from Call Library
+Function nodes during the build process](https://support.vipm.io/hc/en-us/articles/360053941572).
+Packages work around it with a PostInstall hook that resaves every VI in
+LabVIEW. NI's Advanced HTTP Client does this for `lvwebclient_*.*`.
+
+The `clfn-wildcard` method makes the same edit without LabVIEW. Where the
+node in the diagram still holds the wildcard, the link gets the wildcard back
+as its name and the target bitness's file as its path. That is how LabVIEW
+saves it after the hook ran: measured on the Advanced HTTP Client in LabVIEW
+2025 after its hook, and in LabVIEW 2026's own save of the fixed file. A link
+is only changed when the target bitness's file is in the tree beside the one
+named. The bitness is the venv's or the install target's. For `--tree`, pass
+`--bitness 32|64`, or this method is skipped.
+
 `lvpm linkfix --keep-compiled-code` disables source-only preparation for both
 VIs and library/class XML; link repair still runs. This is a standalone
 command option, not an `install` option. To skip both parts during an
@@ -108,9 +130,9 @@ fresh package copies when switching to the LabVIEW preparation method;
 an install that skips an already-installed version does not restore its
 original bytes.
 
-The independent methods are `owner`, `paths`, `qualifiers`, and `source-only`.
-Omitting `--fix` selects all four. `--keep-compiled-code` removes
-`source-only` from the selection.
+The independent methods are `owner`, `paths`, `qualifiers`, `source-only`
+and `clfn-wildcard`. Omitting `--fix` selects all five. `--keep-compiled-code`
+removes `source-only` from the selection.
 
 `--dry-run` on an existing tree computes changes without writing them.
 `install --dry-run` reports the planned preparation, but cannot preview
