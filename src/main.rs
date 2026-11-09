@@ -40,6 +40,7 @@ mod viserver;
 
 use anyhow::{Context, Result, bail, ensure};
 use clap::{Parser, Subcommand};
+use std::collections::HashMap;
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use target::Roots;
@@ -933,6 +934,29 @@ fn uninstall_one(
 /// Uninstall has no --relink-timeout to borrow, and a hook is one VI run.
 const HOOK_TIMEOUT_SECS: u64 = 300;
 
+/// What an install does with one resolved package, given what is already
+/// in its roots. An installed package is judged by version: the same one is
+/// left alone, an older one is upgraded, and a newer one is never silently
+/// downgraded.
+enum InstallAction {
+    Install,
+    Same,
+    /// The installed, newer version.
+    KeepNewer(String),
+}
+
+fn install_action(roots: &Roots, e: &index::Entry, allow_downgrade: bool) -> Result<InstallAction> {
+    if !install::is_installed(roots, &e.name) {
+        return Ok(InstallAction::Install);
+    }
+    let old = install::read_manifest(roots, &e.name)?;
+    Ok(match Version::parse(&old.version).cmp(&e.version) {
+        std::cmp::Ordering::Equal => InstallAction::Same,
+        std::cmp::Ordering::Greater if !allow_downgrade => InstallAction::KeepNewer(old.version),
+        _ => InstallAction::Install,
+    })
+}
+
 fn cmd_install(
     cli: &Cli,
     package: Option<&str>,
@@ -1066,11 +1090,44 @@ fn cmd_install(
 ");
     }
 
+    // reqwest's blocking default is 30 s for the whole request, which a large
+    // package on a slow link exceeds; keep the connect bound, widen the rest.
     let client = reqwest::blocking::Client::builder()
         .user_agent(concat!("lvpm/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(600))
         .build()?;
     let config = config::load()?;
     let package_cache = cache::Cache::open(&config.cache)?;
+
+    // Every archive is in hand before the first file is written: a download
+    // that fails then leaves the target as it was, instead of half installed
+    // with the earlier packages' PostInstall hooks never run.
+    let mut archives: HashMap<String, Vec<u8>> = HashMap::new();
+    {
+        let wanted: Vec<&index::Entry> = plan
+            .iter()
+            .map(|e| {
+                let roots = match &venv {
+                    Some(v) => v.roots_for_pkg(&e.name)?,
+                    None => store.clone(),
+                };
+                Ok((e, install_action(&roots, e, allow_downgrade)?))
+            })
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .filter(|(_, a)| matches!(a, InstallAction::Install))
+            .map(|(e, _)| e)
+            .collect();
+        if !wanted.is_empty() {
+            println!("fetching {} package(s)", wanted.len());
+        }
+        for e in wanted {
+            let bytes = fetch::package(&package_cache, &client, e)
+                .with_context(|| format!("{} {}: nothing was installed", e.name, e.version))?;
+            archives.insert(e.name.clone(), bytes);
+        }
+    }
 
     let mut total_writes = 0usize;
     // Any package declared a hook this install did not run — decides whether
@@ -1103,24 +1160,22 @@ fn cmd_install(
             true => Some(install::read_manifest(&roots, &e.name)?),
             false => None,
         };
-        if let Some(old) = &installed {
-            use std::cmp::Ordering::*;
-            let order = Version::parse(&old.version).cmp(&e.version);
-            match order {
-                Equal => {
-                    println!("= {} {} already installed", e.name, old.version);
-                    continue;
-                }
-                Greater if !allow_downgrade => {
-                    println!(
-                        "= {} {} installed, newer than {} — not downgrading (pass --allow-downgrade)",
-                        e.name, old.version, e.version
-                    );
-                    continue;
-                }
-                Greater | Less => {}
+        match install_action(&roots, e, allow_downgrade)? {
+            InstallAction::Same => {
+                println!("= {} {} already installed", e.name, e.version);
+                continue;
             }
-            let mark = if order == Less { "^" } else { "v" };
+            InstallAction::KeepNewer(old) => {
+                println!(
+                    "= {} {old} installed, newer than {} — not downgrading (pass --allow-downgrade)",
+                    e.name, e.version
+                );
+                continue;
+            }
+            InstallAction::Install => {}
+        }
+        if let Some(old) = &installed {
+            let mark = if Version::parse(&old.version) < e.version { "^" } else { "v" };
             if dry_run {
                 println!(
                     "{mark} {} {} -> {}: {} old files would be removed first",
@@ -1137,7 +1192,7 @@ fn cmd_install(
         print!("{} {} {} ... ", if dry_run { "?" } else { "+" }, e.name, e.version);
         std::io::stdout().flush().ok();
 
-        let bytes = fetch::package(&package_cache, &client, e)?;
+        let bytes = archives.remove(&e.name).context("archive was not fetched")?;
 
         let mut zip = install::open_archive(bytes)?;
         let spec = spec::parse(&read_spec(&mut zip)?)?;
