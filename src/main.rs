@@ -411,20 +411,30 @@ fn run(cli: &Cli) -> Result<()> {
             allow_downgrade,
             groups,
             relink,
-        } => cmd_install(
-            &cli,
-            package.as_deref(),
-            manifest.as_deref(),
-            *dry_run,
-            *no_deps,
-            *no_linkfix,
-            *relink_pass,
-            *no_hooks,
-            *run_hooks,
-            *allow_downgrade,
-            groups,
-            relink,
-        ),
+        } => {
+            let started = std::time::Instant::now();
+            let result = cmd_install(
+                &cli,
+                package.as_deref(),
+                manifest.as_deref(),
+                *dry_run,
+                *no_deps,
+                *no_linkfix,
+                *relink_pass,
+                *no_hooks,
+                *run_hooks,
+                *allow_downgrade,
+                groups,
+                relink,
+            );
+            let took = took(started.elapsed());
+            match &result {
+                Ok(()) if *dry_run => log!("\ndry run took {took}"),
+                Ok(()) => log!("\ninstall took {took}"),
+                Err(_) => log!("\ninstall stopped after {took}"),
+            }
+            result
+        }
         Cmd::Relink { package, all, relink } => cmd_relink(&cli, package.as_deref(), *all, relink),
         Cmd::RunHooks { package, all, timeout } => {
             cmd_run_hooks(&cli, package.as_deref(), *all, *timeout)
@@ -470,6 +480,15 @@ fn run(cli: &Cli) -> Result<()> {
         }
         Cmd::List => cmd_list(&cli),
         Cmd::Search { query } => cmd_search(&cli, query),
+    }
+}
+
+/// A duration for the user: `48.2s`, or `3m 12s` past a minute.
+fn took(d: std::time::Duration) -> String {
+    let s = d.as_secs_f64();
+    match s < 60.0 {
+        true => format!("{s:.1}s"),
+        false => format!("{}m {:02}s", d.as_secs() / 60, d.as_secs() % 60),
     }
 }
 
@@ -1244,14 +1263,19 @@ fn cmd_install(
             .map(|(e, _)| e)
             .collect();
         if !wanted.is_empty() {
-            log!("fetching {} package(s)", wanted.len());
+            logp!("fetching {} package(s) ... ", wanted.len());
         }
-        for e in wanted {
+        let started = std::time::Instant::now();
+        for e in &wanted {
             let bytes = fetch::package(&package_cache, &client, e)
                 .with_context(|| format!("{} {}: nothing was installed", e.name, e.version))?;
             archives.insert(e.name.clone(), bytes);
         }
+        if !wanted.is_empty() {
+            log!("{}", took(started.elapsed()));
+        }
     }
+    let copy_started = std::time::Instant::now();
 
     let mut total_writes = 0usize;
     // Any package declared a hook this install did not run — decides whether
@@ -1419,7 +1443,7 @@ fn cmd_install(
     if dry_run {
         log!("\ndry run: {total_writes} files would be written, nothing changed");
     } else {
-        log!("\ndone. {total_writes} files written.");
+        log!("\ndone. {total_writes} files written in {}.", took(copy_started.elapsed()));
     }
 
     if let Some(c) = hook_conn.take() {
@@ -1493,10 +1517,13 @@ fn cmd_install(
             };
             let bitness = venv.as_ref().map(|v| v.target.bitness).or(store.target.as_ref().map(|t| t.bitness));
             log!("\nlinkfix: preparing installed files (repair links and separate compiled code; no LabVIEW needed)");
+            let started = std::time::Instant::now();
             match roots.and_then(|roots| {
                 linkfix::fix_files(&roots, &linkfix_files, false, linkfix::Methods::of(&linkfix::Method::ALL, bitness))
             }) {
-                Ok((_, outcomes)) => report_linkfix(&outcomes, false, false, &linkfix::Method::ALL, None)?,
+                Ok((_, outcomes)) => {
+                    report_linkfix(&outcomes, false, false, &linkfix::Method::ALL, None, started.elapsed())?
+                }
                 Err(error) => log!("  linkfix could not complete: {error:#}; package files remain installed. Retry with `lvpm linkfix --tree <DIR> --verbose`."),
             }
         }
@@ -1509,10 +1536,6 @@ fn cmd_install(
     let folders: usize = relink_work.iter().map(|(_, f)| f.len()).sum();
     let target = store.target.clone();
     let want_relink = relink_pass && folders > 0;
-
-    if folders > 0 && !relink_pass {
-        log!("\nLabVIEW relink: skipped (pass --relink to use LabVIEW instead of linkfix)");
-    }
 
     if dry_run {
         if want_relink {
@@ -2171,8 +2194,9 @@ fn cmd_linkfix(
         log!("  clfn-wildcard: skipped, the tree's LabVIEW bitness is unknown (pass --bitness 32|64)");
     }
 
+    let started = std::time::Instant::now();
     let (_tree, outcomes) = linkfix::fix_tree(&roots, dry_run, linkfix::Methods::of(methods, bitness))?;
-    report_linkfix(&outcomes, dry_run, verbose, methods, report)
+    report_linkfix(&outcomes, dry_run, verbose, methods, report, started.elapsed())
 }
 
 fn report_linkfix(
@@ -2181,6 +2205,7 @@ fn report_linkfix(
     verbose: bool,
     methods: &[linkfix::Method],
     report: Option<&Path>,
+    elapsed: std::time::Duration,
 ) -> Result<()> {
     let mut total = linkfix::Changes::default();
     let (mut changed, mut clean, mut skipped, mut not_separated) = (0usize, 0usize, 0usize, 0usize);
@@ -2257,8 +2282,9 @@ fn report_linkfix(
         log!("report: {}", report.display());
     }
     log!(
-        "\n{} LabVIEW files looked at: {changed} {}, {clean} already clean, {skipped} skipped",
+        "\n{} LabVIEW files looked at in {}: {changed} {}, {clean} already clean, {skipped} skipped",
         outcomes.len(),
+        took(elapsed),
         if dry_run { "would change" } else { "changed" }
     );
     log!(
