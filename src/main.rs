@@ -1031,6 +1031,10 @@ fn cmd_install(
                 eprintln!("  = {name} {version} already installed, satisfies dependency"),
             resolve::Notice::UnresolvedDependency(name) =>
                 eprintln!("  ! dependency {name} unresolved, skipping"),
+            resolve::Notice::PinBelowRequirement { name, pinned, required, by } => eprintln!(
+                "  ! {name} is pinned to {pinned}, but {by} requires >= {required}; keeping the pin — \
+                 {by} may not work with it"
+            ),
         }
     }
     if !resolution.unresolved_roots.is_empty() {

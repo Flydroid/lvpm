@@ -7,14 +7,16 @@
 //!
 //! Resolution is deliberately not a conflict solver: the first encounter of
 //! a package name wins, even if a later path asks for a different version.
-//! A satisfying installed dependency stays as it is and is not traversed
-//! further. Explicit roots still resolve against the index.
+//! The one exception is a root: what the project asked for is never replaced
+//! by a dependency's requirement, and a pin below such a requirement is
+//! reported. A satisfying installed dependency stays as it is and is not
+//! traversed further. Explicit roots still resolve against the index.
 
 use crate::index::{Entry, Index};
 use crate::project::Constraint;
 use crate::version::Version;
 use anyhow::Result;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// What one step asks the index for: an exact root or the newest version
 /// meeting an optional floor.
@@ -56,6 +58,9 @@ pub enum Notice {
     Satisfied { name: String, version: String },
     /// A transitive requirement was absent from the index and was skipped.
     UnresolvedDependency(String),
+    /// A root is pinned below the minimum a dependent asks for. The pin is
+    /// kept; the dependent may not work with it.
+    PinBelowRequirement { name: String, pinned: String, required: String, by: String },
 }
 
 /// The proposed entries and diagnostics, before fetching or writing files.
@@ -87,16 +92,46 @@ pub fn install(
 ) -> Result<Resolution> {
     // The stack pops from the end, so seed the roots in reverse to visit them
     // in the order the project wrote them.
-    let mut queue: Vec<(String, Requirement, bool)> = wanted
+    // The third field is the dependent that asked, `None` for a root.
+    let mut queue: Vec<(String, Requirement, Option<String>)> = wanted
         .iter()
         .rev()
-        .map(|(name, constraint)| (name.clone(), Requirement::from(constraint), true))
+        .map(|(name, constraint)| (name.clone(), Requirement::from(constraint), None))
+        .collect();
+    // Roots by name, with their pin if exact. The stack would otherwise let a
+    // dependency's floor, pushed later and so popped first, claim a root's
+    // name before the root itself is reached — silently overriding a pin.
+    let roots: HashMap<String, Option<Version>> = wanted
+        .iter()
+        .map(|(name, constraint)| {
+            let pin = match constraint {
+                Constraint::Exact(v) => Some(v.clone()),
+                _ => None,
+            };
+            (name.to_lowercase(), pin)
+        })
         .collect();
     let mut done = HashSet::new();
     let mut plan = Vec::new();
     let mut notices = Vec::new();
     let mut unresolved_roots = Vec::new();
-    while let Some((name, requirement, is_root)) = queue.pop() {
+    while let Some((name, requirement, parent)) = queue.pop() {
+        let is_root = parent.is_none();
+        if let Some(by) = &parent
+            && let Some(pin) = roots.get(&name.to_lowercase())
+        {
+            if let (Some(pinned), Requirement::Floor(Some(min))) = (pin, &requirement)
+                && pinned < min
+            {
+                notices.push(Notice::PinBelowRequirement {
+                    name: name.clone(),
+                    pinned: pinned.raw.clone(),
+                    required: min.raw.clone(),
+                    by: by.clone(),
+                });
+            }
+            continue;
+        }
         if !done.insert(name.to_lowercase()) {
             continue;
         }
@@ -138,7 +173,7 @@ pub fn install(
                 queue.push((
                     requirement.name.clone(),
                     Requirement::Floor(requirement.min.clone()),
-                    false,
+                    Some(entry.name.clone()),
                 ));
             }
         }
@@ -304,6 +339,37 @@ mod tests {
                 .to_string()
                 .contains("corrupt install record")
         );
+    }
+
+    #[test]
+    fn a_root_pin_is_never_replaced_by_a_dependency_floor() {
+        // `app` is listed first and pulls in `lib >= 2` before the `lib` root
+        // is reached — the order that installed oglib_lvdata 6.0.1.50 over a
+        // vipm.toml pin of 6.0.0.45.
+        let index = Index {
+            entries: vec![
+                entry("app", "1", &[("lib", Some("2"))], None),
+                entry("lib", "1", &[], None),
+                entry("lib", "3", &[], None),
+            ],
+        };
+        let got = install(&index, &[wanted("app", "*"), wanted("lib", "1")], None, false, |_| Ok(None)).unwrap();
+        let lib = got.plan.iter().find(|e| e.name == "lib").unwrap();
+        assert_eq!(lib.version.raw, "1");
+        assert_eq!(got.plan.len(), 2);
+        assert_eq!(
+            got.notices,
+            [Notice::PinBelowRequirement {
+                name: "lib".into(),
+                pinned: "1".into(),
+                required: "2".into(),
+                by: "app".into()
+            }]
+        );
+        // A floor root wins too, and raises no notice when it satisfies.
+        let got = install(&index, &[wanted("app", "*"), wanted("lib", ">=1")], None, false, |_| Ok(None)).unwrap();
+        assert_eq!(got.plan.iter().find(|e| e.name == "lib").unwrap().version.raw, "3");
+        assert!(got.notices.is_empty());
     }
 
     #[test]
