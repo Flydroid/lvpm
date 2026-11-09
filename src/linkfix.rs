@@ -682,28 +682,75 @@ impl LinkSection {
     }
 }
 
-/// A class-API link tail, decoded far enough to re-pad it. Measured layouts
-/// (section-position padding marked `pad`):
+/// A class-API link tail, decoded far enough to re-pad it and to rewrite the
+/// class paths inside it. Layout (section-position padding marked `pad`):
 ///
 /// ```text
-/// LV13   pad4 cache                                  [pad4 offsets]   (heap kinds)
-/// LV16/17 pad4 cache five                            [pad4 offsets]
-/// LV20   pad4 cache u32 n { qual pad2 PTH0 u8 }×n five [pad4 offsets]
+/// pad4 cache
+///   LV16+  u32 n { u32 m, qual×m, PTH0, u8 }×n  u8                  ancestors
+///   LV20+  u32 k { u32 m, qual×m, PTH0, u32 p { u32 m, qual×m, PTH0 }×p }×k   classes
+///   heap   pad4 offsets
+///   DRPI   u8
 /// ```
 ///
-/// `cache` is u64 library version, three bools, and a long string; `five`
-/// is five fixed bytes (`00 00 00 00 ff` on heap kinds). The `n` parent-class
-/// links are what a class with a parent carries from LabVIEW 2020 on. Which
-/// pieces are present is decided by which combination consumes the tail
-/// exactly, so an unfamiliar variant is refused rather than guessed.
+/// `cache` is u64 library version, three bools, and a long string. The
+/// ancestor list names the class's parents, nearest first. The class list
+/// (OpenGDS, GOOP: a class whose parent is in another class library) pairs a
+/// class with its direct parents. Both are usually empty, which read as five
+/// fixed bytes (`00 00 00 00 xx`) before the lists were understood; measured
+/// on 19,000 tails of LabVIEW 9 to 2025 files. Class paths here have no
+/// 2-pad, even at odd positions. A dynamic-dispatch call (`DRPI`) ends with
+/// one more byte after its offset list.
+#[derive(Debug)]
 struct ApiTail {
     cache: Vec<u8>,
-    parents: Option<Vec<ParentLink>>,
-    five: Option<[u8; 5]>,
+    ancestors: Option<(Vec<ParentLink>, u8)>,
+    classes: Option<Vec<ClassParents>>,
     offsets: Option<Vec<u8>>,
+    trailer: Option<u8>,
 }
 
-fn parse_api_tail(t: &[u8], tail_pos: usize, ver: (u32, u32), heap: bool) -> Result<ApiTail> {
+/// A class and its direct parents, as the LabVIEW 2020 class list holds them.
+type ClassParents = (Vec<Vec<u8>>, Pth, Vec<(Vec<Vec<u8>>, Pth)>);
+
+/// `u32 m, qual×m, PTH0` at `q`: a class's qualified name and absolute path.
+fn parse_class_ref(t: &[u8], q: &mut usize) -> Result<(Vec<Vec<u8>>, Pth)> {
+    let m = be32(t, *q)? as usize;
+    ensure!(m <= 64, "qualified name too long");
+    *q += 4;
+    let mut qual = Vec::with_capacity(m);
+    for _ in 0..m {
+        let l = *t.get(*q).context("truncated")? as usize;
+        qual.push(t.get(*q + 1..*q + 1 + l).context("truncated")?.to_vec());
+        *q += 1 + l;
+    }
+    let (pth, e) = Pth::parse(t, *q)?;
+    *q = e;
+    Ok((qual, pth))
+}
+
+fn write_class_ref(qual: &[Vec<u8>], pth: &Pth, out: &mut Vec<u8>) {
+    out.extend_from_slice(&(qual.len() as u32).to_be_bytes());
+    for q in qual {
+        out.push(q.len() as u8);
+        out.extend_from_slice(q);
+    }
+    pth.write(out);
+}
+
+fn parse_api_tail(ident: &[u8; 4], t: &[u8], tail_pos: usize, ver: (u32, u32), heap: bool) -> Result<ApiTail> {
+    let a = read_api_tail(ident, t, tail_pos, ver, heap)
+        .context("class-API link tail has an unknown shape")?;
+    // Every field is kept, so writing it back where it was must give the
+    // same bytes. Anything else means the layout above is wrong for this
+    // object, and the object is refused rather than rewritten.
+    let mut again = Vec::new();
+    emit_api_tail(&a, tail_pos, &mut again);
+    ensure!(again == t, "class-API link tail does not round-trip");
+    Ok(a)
+}
+
+fn read_api_tail(ident: &[u8; 4], t: &[u8], tail_pos: usize, ver: (u32, u32), heap: bool) -> Result<ApiTail> {
     let mut p = pad_to(tail_pos, 4);
     ensure!(t.len() >= p && t[..p].iter().all(|&x| x == 0), "API cache pad is not zero");
     let start = p;
@@ -713,79 +760,72 @@ fn parse_api_tail(t: &[u8], tail_pos: usize, ver: (u32, u32), heap: bool) -> Res
     ensure!(p <= t.len(), "API cache overruns the object");
     let cache = t[start..p].to_vec();
 
-    // Everything after the cache, tried as each plausible shape.
-    let rest_at = p;
-    let try_shape = |with_parents: bool, with_five: bool, with_offsets: bool| -> Result<ApiTail> {
-        let mut q = rest_at;
-        let parents = if with_parents {
-            let n = be32(t, q)? as usize;
-            ensure!(n <= 16, "too many parent links");
+    let mut q = p;
+    let ancestors = if ver >= (16, 0) {
+        let n = be32(t, q)? as usize;
+        ensure!(n <= 64, "{n} ancestor links");
+        q += 4;
+        let mut v = Vec::with_capacity(n);
+        for _ in 0..n {
+            let (qual, pth) = parse_class_ref(t, &mut q)?;
+            let b = *t.get(q).context("truncated ancestor link")?;
+            q += 1;
+            v.push((qual, pth, b));
+        }
+        let b = *t.get(q).context("truncated ancestor list")?;
+        q += 1;
+        Some((v, b))
+    } else {
+        None
+    };
+    let classes = if ver >= (20, 0) {
+        let k = be32(t, q)? as usize;
+        ensure!(k <= 64, "{k} class entries");
+        q += 4;
+        let mut v = Vec::with_capacity(k);
+        for _ in 0..k {
+            let (qual, pth) = parse_class_ref(t, &mut q)?;
+            let np = be32(t, q)? as usize;
+            ensure!(np <= 64, "{np} parent links");
             q += 4;
-            let mut v = Vec::with_capacity(n);
-            for _ in 0..n {
-                let m = be32(t, q)? as usize;
-                ensure!(m <= 64, "qualified name too long");
-                q += 4;
-                let mut qual = Vec::with_capacity(m);
-                for _ in 0..m {
-                    let l = *t.get(q).context("truncated")? as usize;
-                    qual.push(t.get(q + 1..q + 1 + l).context("truncated")?.to_vec());
-                    q += 1 + l;
-                }
-                // Measured on LabVIEW 2020 OpenGDS: the parent path follows the
-                // qualified name directly, at odd positions too — no 2-pad here.
-                let (pth, e) = Pth::parse(t, q)?;
-                q = e;
-                let b = *t.get(q).context("truncated")?;
-                q += 1;
-                v.push((qual, pth, b));
+            let mut parents = Vec::with_capacity(np);
+            for _ in 0..np {
+                parents.push(parse_class_ref(t, &mut q)?);
             }
-            Some(v)
-        } else {
-            None
-        };
-        let five = if with_five {
-            let f: [u8; 5] = t.get(q..q + 5).context("truncated")?.try_into()?;
-            q += 5;
-            Some(f)
-        } else {
-            None
-        };
-        let offsets = if with_offsets {
-            let k = pad_to(tail_pos + q, 4);
-            ensure!(t.get(q..q + k).is_some_and(|z| z.iter().all(|&x| x == 0)), "offset list pad");
-            q += k;
-            let n = be32(t, q)? as usize;
-            ensure!(q + 4 + 4 * n == t.len(), "offset list does not end the tail");
-            Some(t[q..].to_vec())
-        } else {
-            None
-        };
-        ensure!(q == t.len() || offsets.is_some(), "bytes left over");
-        Ok(ApiTail { cache: cache.clone(), parents, five, offsets })
+            v.push((qual, pth, parents));
+        }
+        Some(v)
+    } else {
+        None
     };
     // A VI-side list (LIvi) never has offsets; a heap-side one always does.
-    // Without that split a 9-byte tail reads both as `n=0 parents + five`
-    // and as `five + empty offset list`.
-    let shapes: &[(bool, bool, bool)] = if heap {
-        &[(false, false, false), (false, false, true), (false, true, true), (true, true, true)]
+    let offsets = if heap {
+        let k = pad_to(tail_pos + q, 4);
+        ensure!(t.get(q..q + k).is_some_and(|z| z.iter().all(|&x| x == 0)), "offset list pad");
+        q += k;
+        let n = be32(t, q)? as usize;
+        let end = q + 4 + 4 * n;
+        ensure!(end <= t.len(), "offset list overruns the object");
+        let list = t[q..end].to_vec();
+        q = end;
+        Some(list)
     } else {
-        &[(false, false, false), (false, true, false), (true, true, false)]
+        None
     };
-    let mut hits = Vec::new();
-    for &(a, b, c) in shapes {
-        if let Ok(x) = try_shape(a, b, c) {
-            hits.push(x);
-        }
-    }
-    ensure!(!hits.is_empty(), "class-API link tail has an unknown shape ({} bytes after the cache)", t.len() - rest_at);
-    ensure!(hits.len() == 1, "class-API link tail is ambiguous");
-    Ok(hits.pop().unwrap())
+    let trailer = if ident == b"DRPI" && heap {
+        let b = *t.get(q).context("dynamic-dispatch link ends early")?;
+        q += 1;
+        Some(b)
+    } else {
+        None
+    };
+    ensure!(q == t.len(), "{} bytes after the known fields", t.len() - q);
+    Ok(ApiTail { cache, ancestors, classes, offsets, trailer })
 }
 
 /// Re-emit a class-API link tail at a new position with its pads recomputed.
 fn reflow_api_tail(o: &LinkObj, ver: (u32, u32), new_pos: usize, heap: bool, out: &mut Vec<u8>) -> Result<()> {
-    let a = parse_api_tail(&o.tail, o.tail_pos, ver, heap)?;
+    let a = parse_api_tail(&o.ident, &o.tail, o.tail_pos, ver, heap)?;
     emit_api_tail(&a, new_pos, out);
     Ok(())
 }
@@ -797,37 +837,52 @@ fn emit_api_tail(a: &ApiTail, new_pos: usize, out: &mut Vec<u8>) {
     let pos = |out: &Vec<u8>| new_pos + (out.len() - start);
     out.resize(out.len() + pad_to(new_pos, 4), 0);
     out.extend_from_slice(&a.cache);
-    if let Some(parents) = &a.parents {
-        out.extend_from_slice(&(parents.len() as u32).to_be_bytes());
-        for (qual, pth, b) in parents {
-            out.extend_from_slice(&(qual.len() as u32).to_be_bytes());
-            for q in qual {
-                out.push(q.len() as u8);
-                out.extend_from_slice(q);
-            }
-            pth.write(out);
+    if let Some((ancestors, b)) = &a.ancestors {
+        out.extend_from_slice(&(ancestors.len() as u32).to_be_bytes());
+        for (qual, pth, b) in ancestors {
+            write_class_ref(qual, pth, out);
             out.push(*b);
         }
+        out.push(*b);
     }
-    if let Some(f) = &a.five {
-        out.extend_from_slice(f);
+    if let Some(classes) = &a.classes {
+        out.extend_from_slice(&(classes.len() as u32).to_be_bytes());
+        for (qual, pth, parents) in classes {
+            write_class_ref(qual, pth, out);
+            out.extend_from_slice(&(parents.len() as u32).to_be_bytes());
+            for (qual, pth) in parents {
+                write_class_ref(qual, pth, out);
+            }
+        }
     }
     if let Some(list) = &a.offsets {
         let k = pad_to(pos(out), 4);
         out.resize(out.len() + k, 0);
         out.extend_from_slice(list);
     }
+    if let Some(b) = a.trailer {
+        out.push(b);
+    }
 }
 
-/// The nested parent-class links of a class-API entry carry the parent
-/// class's path in ABSOLUTE form — the build machine's, as packaged — and
-/// LabVIEW rewrites them to where the class is now, still absolute. Do the
-/// same, so nothing is left for it to rewrite.
+/// The class links nested in a class-API entry carry each class's path in
+/// ABSOLUTE form — the build machine's, as packaged — and LabVIEW rewrites
+/// them to where the class is now, still absolute. Do the same, so nothing
+/// is left for it to rewrite.
 fn fix_parent_paths(o: &mut LinkObj, ver: (u32, u32), heap: bool, tree: &Tree) -> Result<bool> {
-    let mut a = parse_api_tail(&o.tail, o.tail_pos, ver, heap)?;
-    let Some(parents) = a.parents.as_mut() else { return Ok(false) };
+    let mut a = parse_api_tail(&o.ident, &o.tail, o.tail_pos, ver, heap)?;
+    let mut refs: Vec<(&Vec<Vec<u8>>, &mut Pth)> = Vec::new();
+    if let Some((ancestors, _)) = a.ancestors.as_mut() {
+        refs.extend(ancestors.iter_mut().map(|(q, p, _)| (&*q, p)));
+    }
+    if let Some(classes) = a.classes.as_mut() {
+        for (q, p, parents) in classes.iter_mut() {
+            refs.push((&*q, p));
+            refs.extend(parents.iter_mut().map(|(q, p)| (&*q, p)));
+        }
+    }
     let mut changed = false;
-    for (qual, pth, _) in parents.iter_mut() {
+    for (qual, pth) in refs {
         if !pth.is_drive() {
             continue;
         }
@@ -2314,5 +2369,81 @@ mod tests {
         let t = logical_to_token("user.lib/_OpenG.lib/a.lvlib").unwrap();
         assert_eq!(t[0], b"<userlib>");
         assert_eq!(t.len(), 3);
+    }
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+    }
+
+    /// Re-emit a tail at a shifted position, then read it back there.
+    fn moved(ident: &[u8; 4], t: &[u8], pos: usize, to: usize, ver: (u32, u32), heap: bool) -> ApiTail {
+        let a = parse_api_tail(ident, t, pos, ver, heap).unwrap();
+        let mut out = Vec::new();
+        emit_api_tail(&a, to, &mut out);
+        parse_api_tail(ident, &out, to, ver, heap).unwrap()
+    }
+
+    // IG OOPanel `Sort Panels.vi` (LabVIEW 2020): a dynamic-dispatch call
+    // ends with one byte after its offset list.
+    #[test]
+    fn dynamic_dispatch_tail_keeps_its_last_byte() {
+        let t = unhex("00000001000000000000000100000000020000000000005600000000000000000002000003d0000005f201");
+        let a = parse_api_tail(b"DRPI", &t, 90, (20, 0), true).unwrap();
+        assert_eq!(a.trailer, Some(1));
+        assert_eq!(a.ancestors.as_ref().unwrap().1, 0x56);
+        assert!(a.classes.as_ref().unwrap().is_empty());
+        for to in 91..95 {
+            let b = moved(b"DRPI", &t, 90, to, (20, 0), true);
+            assert_eq!(b.offsets, a.offsets);
+            assert_eq!(b.trailer, Some(1));
+        }
+        // Other kinds have no such byte, so the same tail is refused there.
+        assert!(parse_api_tail(b"DDPI", &t, 90, (20, 0), true).is_err());
+    }
+
+    // JSONtext's example (LabVIEW 2017): a class whose parent is in another
+    // library carries the ancestor list before LabVIEW 2020 too.
+    #[test]
+    fn ancestor_links_are_read_from_labview_2016_on() {
+        let t = unhex(concat!(
+            "00000000010000000000010001000000000200000000000100000001234a534f4e74657874204c56436c6173732053657269616c",
+            "697a65722e6c76636c617373505448300000004a00000005014303476974084a534f4e74657874124c56436c617373205365726961",
+            "6c697a6572234a534f4e74657874204c56436c6173732053657269616c697a65722e6c76636c6173730100",
+        ));
+        let a = parse_api_tail(b"VIPI", &t, 105, (17, 0), false).unwrap();
+        let (ancestors, last) = a.ancestors.as_ref().unwrap();
+        assert_eq!(ancestors.len(), 1);
+        assert_eq!(ancestors[0].0, [b"JSONtext LVClass Serializer.lvclass".to_vec()]);
+        assert!(ancestors[0].1.is_drive());
+        assert_eq!(*last, 0);
+        assert!(a.classes.is_none());
+        moved(b"VIPI", &t, 105, 106, (17, 0), false);
+    }
+
+    // OpenGDS `GOOPUtil Demo.vi` (LabVIEW 2020): DemoSubClass1's link lists
+    // its ancestor DemoClass1, then itself paired with that parent.
+    #[test]
+    fn the_class_list_pairs_each_class_with_its_parents() {
+        let t = unhex(concat!(
+            "000000000100000000000400010000000002000000000001000000011244656d6f436c617373312e6c76636c617373505448300000",
+            "006b0000000b01430356495406476974487562074f70656e4744530676692e6c6962066164646f6e730b474f4f505574696c697479",
+            "055f44656d6f0d474f4f505574696c5f44656d6f1044656d6f436c617373315f636c6173731244656d6f436c617373312e6c76636c",
+            "617373010100000001000000011544656d6f537562436c617373312e6c76636c61737350544830000000710000000b014303564954",
+            "06476974487562074f70656e4744530676692e6c6962066164646f6e730b474f4f505574696c697479055f44656d6f0d474f4f5055",
+            "74696c5f44656d6f1344656d6f537562436c617373315f636c6173731544656d6f537562436c617373312e6c76636c617373000000",
+            "01000000011244656d6f436c617373312e6c76636c617373505448300000006b0000000b01430356495406476974487562074f7065",
+            "6e4744530676692e6c6962066164646f6e730b474f4f505574696c697479055f44656d6f0d474f4f505574696c5f44656d6f104465",
+            "6d6f436c617373315f636c6173731244656d6f436c617373312e6c76636c617373000000000001000007c2",
+        ));
+        let a = parse_api_tail(b"TCPI", &t, 3221, (20, 0), true).unwrap();
+        assert_eq!(a.ancestors.as_ref().unwrap().0.len(), 1);
+        let classes = a.classes.as_ref().unwrap();
+        assert_eq!(classes.len(), 1);
+        assert_eq!(classes[0].0, [b"DemoSubClass1.lvclass".to_vec()]);
+        assert_eq!(classes[0].2.len(), 1);
+        assert_eq!(classes[0].2[0].0, [b"DemoClass1.lvclass".to_vec()]);
+        for to in 3222..3226 {
+            assert_eq!(moved(b"TCPI", &t, 3221, to, (20, 0), true).offsets, a.offsets);
+        }
     }
 }
