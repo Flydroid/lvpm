@@ -175,7 +175,7 @@ fn list_relinked() -> Check {
     let out = stdout(&ok(&global(), &["list"])?);
     let n = out
         .lines()
-        .filter(|l| l.contains("relinked") && !l.contains("NOT relinked"))
+        .filter(|l| l.contains(" relinked"))
         .count();
     ensure(n == 2, || format!("{n} package(s) relinked, not 2:\n{out}"))
 }

@@ -117,8 +117,18 @@ pub fn public(work: &Path, packages: &[String]) -> Result<()> {
 }
 
 fn projects(work: &Path, suite: &str, sources: &str, packages: &[&str]) -> Result<()> {
-    let dependencies: String = packages.iter().map(|p| format!("{p} = \"*\"\n")).collect();
     for dir in ["global", "venv"] {
+        // A venv runs a package's install hooks only when the manifest says
+        // so; the venv project opts every package in, so its hooks still run
+        // there — and the checks that the LabVIEW tree is unchanged still
+        // cover them. A LabVIEW installation runs them by default.
+        let dependencies: String = packages
+            .iter()
+            .map(|p| match dir {
+                "venv" => format!("{p} = {{ version = \"*\", hooks = \"run\" }}\n"),
+                _ => format!("{p} = \"*\"\n"),
+            })
+            .collect();
         std::fs::create_dir_all(work.join(dir))?;
         std::fs::write(
             work.join(dir).join("lvpm.toml"),
@@ -192,7 +202,10 @@ mod tests {
         }
         assert!(work.join("caller").join("caller.vi").is_file());
         let toml = std::fs::read_to_string(work.join("venv").join("lvpm.toml")).unwrap();
-        assert!(toml.contains("defaults = false") && toml.contains("lvpm_linux_test = \"*\""));
+        assert!(
+            toml.contains("defaults = false")
+                && toml.contains("lvpm_linux_test = { version = \"*\", hooks = \"run\" }")
+        );
         std::fs::remove_dir_all(&work).unwrap();
     }
 
@@ -203,6 +216,8 @@ mod tests {
         let toml = std::fs::read_to_string(work.join("global").join("lvpm.toml")).unwrap();
         assert!(!toml.contains("[sources]"));
         assert!(toml.ends_with("[dependencies]\na_pkg = \"*\"\nb_pkg = \"*\"\n"));
+        let venv = std::fs::read_to_string(work.join("venv").join("lvpm.toml")).unwrap();
+        assert!(venv.ends_with("a_pkg = { version = \"*\", hooks = \"run\" }\nb_pkg = { version = \"*\", hooks = \"run\" }\n"));
         assert!(!work.join("pkgs").exists());
         std::fs::remove_dir_all(&work).unwrap();
     }

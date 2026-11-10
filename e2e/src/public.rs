@@ -74,10 +74,12 @@ fn global_install() -> Check {
     linkfix_only(&stdout(&ok(&global(), &["install", "--hooks"])?))
 }
 
+/// Linkfix ran and LabVIEW's relink pass did not: the install no longer says
+/// the relink was skipped, so check that its "relinking N folder(s)" never ran.
 fn linkfix_only(output: &str) -> Check {
     ensure(
         output.contains("linkfix: preparing installed files")
-            && output.contains("LabVIEW relink: skipped")
+            && !output.contains("relinking ")
             && !output.contains("linkfix could not complete"),
         || format!("expected linkfix without LabVIEW relink:\n{output}"),
     )
@@ -165,9 +167,16 @@ fn relink_all() -> Check {
     ok(&global(), &["relink", "--all"]).map(drop)
 }
 
+/// Every package row of `lvpm list` (the lines with a file count) says
+/// `relinked`; an unrelinked package shows nothing in that column.
+fn all_relinked(list: &str) -> bool {
+    let mut rows = list.lines().filter(|l| l.contains(" files ")).peekable();
+    rows.peek().is_some() && rows.all(|l| l.contains(" relinked"))
+}
+
 fn list_relinked() -> Check {
     let list = stdout(&ok(&global(), &["list"])?);
-    ensure(!list.contains("NOT relinked"), || {
+    ensure(all_relinked(&list), || {
         format!("not every package relinked:\n{list}")
     })
 }
@@ -212,10 +221,9 @@ fn venv_install_relinked() -> Check {
 
 fn venv_relinked() -> Check {
     let list = stdout(&ok(&venv(), &["list"])?);
-    ensure(
-        list.contains(" relinked") && !list.contains("NOT relinked"),
-        || format!("not every venv package relinked:\n{list}"),
-    )
+    ensure(all_relinked(&list), || {
+        format!("not every venv package relinked:\n{list}")
+    })
 }
 
 fn venv_tree_unchanged() -> Check {
