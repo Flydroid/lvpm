@@ -415,7 +415,9 @@ the Call Library path that VI Package Builder broke when it built the package,
 a known VIPM issue: [VI Package Builder removes cross platform wildcards from
 Call Library Function nodes during the build process](https://support.vipm.io/hc/en-us/articles/360053941572-VI-Package-Builder-removes-cross-platform-wildcards-from-Call-Library-Function-nodes-during-the-build-process).
 Linkfix's `clfn-wildcard` method now makes that repair itself (see
-[Linkfix](docs/linkfix.md#call-library-wildcards)).
+[Linkfix](docs/linkfix.md#call-library-wildcards)). Dataflow G's G-Image
+works around the same issue differently: its hook unzips clean copies of its
+VIs over the installed ones. linkfix covers that one too.
 
 Hook failures are reported, never fatal: the files are installed either way,
 and an uninstall is never left half-done. After the hooks, a global `install`

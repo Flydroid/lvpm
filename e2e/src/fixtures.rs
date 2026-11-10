@@ -119,9 +119,10 @@ pub fn public(work: &Path, packages: &[String]) -> Result<()> {
 fn projects(work: &Path, suite: &str, sources: &str, packages: &[&str]) -> Result<()> {
     for dir in ["global", "venv"] {
         // A venv runs a package's install hooks only when the manifest says
-        // so; the venv project opts every package in, so its hooks still run
-        // there — and the checks that the LabVIEW tree is unchanged still
-        // cover them. A LabVIEW installation runs them by default.
+        // so; the venv project opts every package in, so the opt-in and
+        // running hooks in a venv's LabVIEW stay covered — and the checks
+        // that the LabVIEW tree is unchanged still cover them. A LabVIEW
+        // installation runs them by default.
         let dependencies: String = packages
             .iter()
             .map(|p| match dir {

@@ -93,8 +93,18 @@ so a package built on 32-bit LabVIEW names the 32-bit DLL and fails to load
 in 64-bit LabVIEW (error 1003). VIPM documents this as a known issue:
 [VI Package Builder removes cross platform wildcards from Call Library
 Function nodes during the build process](https://support.vipm.io/hc/en-us/articles/360053941572-VI-Package-Builder-removes-cross-platform-wildcards-from-Call-Library-Function-nodes-during-the-build-process).
-Packages work around it with a PostInstall hook that resaves every VI in
-LabVIEW. NI's Advanced HTTP Client does this for `lvwebclient_*.*`.
+Packages work around it in a PostInstall hook, in one of two ways:
+
+- **Resave in LabVIEW.** NI's Advanced HTTP Client opens every installed VI,
+  sets each `lvwebclient` Call Library node's path to `lvwebclient_*.*` and
+  saves it.
+- **Ship clean copies.** Dataflow G's G-Image packs the same 90 VIs a second
+  time into `Post Install/G-Image-VIs.zip`, where VI Package Builder leaves
+  them alone, and its hook unzips them over the installed copies.
+
+Run after linkfix, the second kind replaces linkfixed files with copies that
+still have embedded compiled code and unrepaired links. With
+`clfn-wildcard` neither hook is needed.
 
 The `clfn-wildcard` method makes the same edit without LabVIEW. Where the
 node in the diagram still holds the wildcard, the link gets the wildcard back
@@ -204,7 +214,10 @@ The automated checks have different scopes:
 - `clfn-wildcard` was checked by hand, not in CI, on NI's Advanced HTTP Client
   (19 VIs, 29 links) in a LabVIEW 2026 64-bit venv. The rewritten links match
   the LabVIEW 2025 copy that NI's PostInstall hook had resaved, and LabVIEW
-  2026's own save of the fixed file (`Save Buffer Probe.vi`).
+  2026's own save of the fixed file (`Save Buffer Probe.vi`). On G-Image
+  (21 links) the result names the same wildcard as the clean copies its hook
+  unzips, with the 64-bit DLL as the path where those name the 32-bit one
+  they were saved with.
 - CI's real-package E2E suite installs LUnit (`astemes_lib_lunit`) and G-Image
   (`dataflow_g_lib_g_image`) with their dependencies in NI's LabVIEW 2026 Q3
   containers. It checks default linkfix installation separately from LabVIEW

@@ -18,7 +18,10 @@ use libtest_mimic::{Failed, Trial};
 use crate::checks::*;
 
 /// LUnit, a test framework with its own dependencies; G-Image, whose
-/// PostInstall has to run for its VIs to work.
+/// PostInstall unzips clean copies of its 90 VIs over the installed ones
+/// (VI Package Builder replaced their Call Library wildcard with
+/// `g_image_32.dll`; linkfix's `clfn-wildcard` now repairs the installed
+/// copies too).
 pub const PACKAGES: [&str; 2] = ["astemes_lib_lunit", "dataflow_g_lib_g_image"];
 
 /// Every name under the LabVIEW folder, with a file's modification time; a
