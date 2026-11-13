@@ -199,9 +199,32 @@ records) and make it first-class:
 
 ## Packaging and distribution (from idea.txt)
 
-- **One-command install of a released `lvpm.exe`.** A GitHub Release per tag
-  carrying `lvpm.exe` (built by CI, so the relink VI embedded in it is the one
-  from that commit), and an `install.ps1` at a stable URL for
+- **Authenticode signing through SignPath Foundation** (free code signing for
+  open-source projects) of `lvpm.exe` and the MSI, the lasting answer to
+  Defender and SmartScreen. Open points:
+  - Apply: SignPath Foundation signs only what CI builds from this public
+    repository, under a code signing policy the project publishes (who may
+    approve a release, what gets signed).
+  - Where it fits in `release.yml`: dist builds the zip and the MSI in one
+    job and hashes them there, so signing afterwards invalidates its
+    checksums, and `lvpm.exe` inside the MSI must be signed too. Either a
+    custom dist job that submits the built artifacts to SignPath (its
+    artifact configuration can sign the exe inside the zip and the MSI as
+    well as the MSI itself) and recomputes the checksums, or signing
+    `lvpm.exe` before dist packages it. Check what dist's custom-job hooks
+    allow before choosing.
+  - Each release then waits for an approval in SignPath.
+- **winget, after signing.** A `winget-pkgs` manifest for the MSI gives
+  `winget install lvpm` with hash checks and upgrades. Then the MSI is the
+  main route and `scripts/install.ps1` shrinks to the portable install and
+  `-BuildLocal`: until then it is what spares users SmartScreen's warning on
+  an unsigned MSI and checks the download's SHA-256.
+- **One-command install of a released `lvpm.exe`.** Done from v0.3.1: dist
+  (`dist-workspace.toml`) publishes a GitHub Release per version tag with the
+  archives, a per-user MSI and checksums, each carrying `relink-package.vi`
+  beside the executable, and lvpm refuses a VI from another build. The
+  original idea: a GitHub Release per tag
+  carrying `lvpm.exe` (built by CI), and an `install.ps1` at a stable URL for
   `irm https://…/install.ps1 | iex`: downloads the latest release (or
   `-Version x.y.z`), verifies its checksum, drops it in `%LOCALAPPDATA%\lvpm\bin`,
   adds that to the user `PATH`, prints `lvpm --version`. Motivation: a stale

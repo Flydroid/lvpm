@@ -36,22 +36,34 @@ Not affiliated with JKI or NI. Working, in active development; see
 ## Install lvpm
 
 Windows 10/11 with LabVIEW 2020 or later. On Linux, lvpm is verified against
-LabVIEW 2026 Q3 in NI's container image; take `lvpm-<version>-linux-x64.tar.gz`
-from the artifacts of a CI run, or build it from source, and see
-[docs/linux.md](docs/linux.md) for what differs there.
+LabVIEW 2026 Q3 in NI's container image; install it with
+[the Linux script](#on-linux) (from v0.3.1), or build it from source, and
+see [docs/linux.md](docs/linux.md) for what differs there.
+
+Every option installs two files: `lvpm` (`lvpm.exe`) and `relink-package.vi` next to
+it. lvpm hands the VI to LabVIEW for `--relink`, and refuses one that did not
+come with the same release, so keep them together.
+
+### With the installer
+
+Download `lvpm-x86_64-pc-windows-msvc.msi` from the
+[Releases](https://github.com/labview-package-manager/lvpm/releases) page and run it. It
+installs per-user to `%LOCALAPPDATA%\lvpm\bin` without elevation, adds that
+folder to your user `PATH`, and can be removed under **Settings → Apps**. A
+newer MSI upgrades it in place.
 
 ### With the install script
 
-[scripts/install.ps1](scripts/install.ps1) fetches the latest release,
-verifies the zip's SHA-256 against the digest GitHub records for it (and
-against a `SHA256SUMS` file when a release ships one), extracts `lvpm.exe`
-to `%LOCALAPPDATA%\lvpm\bin`, removes Windows' mark-of-the-web from the
-files and adds the folder to your user `PATH`. It runs nothing it downloaded
-except `lvpm --version` at the end. Read it first; it is short.
+[scripts/install.ps1](scripts/install.ps1) fetches the latest release's
+MSI, verifies its SHA-256 against the digest GitHub records for it (and
+against the release's checksum files), and runs it quietly: the same
+per-user install as above, without the dialogs. The only things it runs are
+msiexec on the verified MSI and `lvpm --version` at the end. Read it first;
+it is short.
 
 ```powershell
 cd $env:TEMP
-irm https://raw.githubusercontent.com/Flydroid/lvpm/main/scripts/install.ps1 -OutFile install.ps1
+irm https://raw.githubusercontent.com/labview-package-manager/lvpm/main/scripts/install.ps1 -OutFile install.ps1
 .\install.ps1
 ```
 
@@ -61,17 +73,38 @@ to. `Access to the path 'C:\WINDOWS\system32\install.ps1' is denied` means
 you are in a directory that is not yours, not that anything is wrong with
 the download. lvpm installs per-user and needs no elevation.
 
-Options: `-Version v0.2.0` pins a release, `-InstallDir <DIR>` and
-`-NoPath` control where it goes, `-Sha256 <hash>` adds a hash you obtained
+Options: `-Version v0.2.0` pins a release, `-Portable` copies the files from
+the zip instead (no uninstall entry; implied by `-InstallDir <DIR>`, and used
+for releases before v0.3.1, which have no MSI), `-NoPath` leaves your `PATH`
+alone, `-Sha256 <hash>` adds a hash you obtained
 elsewhere as a further check, `-Stable` skips pre-releases. If PowerShell
 refuses to run scripts:
 `powershell -ExecutionPolicy Bypass -File .\install.ps1`.
 
 ### By hand
 
-Download `lvpm-<version>-windows-x64.zip` from the
-[Releases](https://github.com/Flydroid/lvpm/releases) page, right-click it,
+Download `lvpm-x86_64-pc-windows-msvc.zip` from the
+[Releases](https://github.com/labview-package-manager/lvpm/releases) page, right-click it,
 tick **Unblock**, extract, and put the folder on your `PATH`.
+
+### On Linux
+
+[scripts/install.sh](scripts/install.sh) does for Linux x64 what
+`install.ps1` does with the zip: it fetches the latest release's static
+tarball (`lvpm-x86_64-unknown-linux-musl.tar.gz`), verifies its SHA-256 the
+same way, and puts `lvpm` and `relink-package.vi` in `~/.local/bin`, or in
+`/usr/local/bin` when run as root, as in a `Dockerfile`. It needs curl, tar,
+sed, awk and `sha256sum`, and no root.
+
+```sh
+curl -fsSLO https://raw.githubusercontent.com/labview-package-manager/lvpm/main/scripts/install.sh
+sh install.sh
+```
+
+Options: `--version v0.3.1`, `--stable`, `--install-dir <dir>`,
+`--sha256 <hash>`, `--archive <file>` with `--sha256` for a local tarball,
+and `--build-local` to build and install this checkout. It does not edit
+your shell profile; it says so when the folder is not on `PATH`.
 
 ### From source
 
@@ -91,8 +124,8 @@ From a Windows checkout with the build tools installed:
 ```
 
 This runs `cargo build --release --locked`, packages the executable,
-README and licenses into a temporary zip, verifies its SHA-256, and uses
-the normal release installation path. It replaces any existing per-user
+the relink VI, README and licenses into a temporary zip, verifies its SHA-256, and uses
+the portable installation path (no MSI, so no WiX needed). It replaces any existing per-user
 lvpm in `%LOCALAPPDATA%\lvpm\bin` and adds that directory to your user
 `PATH`. No GitHub release or cargo-dist setup is required. The version
 remains the one declared in Cargo.toml; temporary packaging files are removed.
@@ -370,10 +403,12 @@ saved for LabVIEW 2020, so any LabVIEW from 2020 on can load it.
   fresh reference and backoff.
 - `lvpm relink <name>` / `lvpm relink --all` reruns the pass from the
   install manifests, without reinstalling.
-- The relink VI is compiled into the `lvpm` binary and unpacked to
-  `%LOCALAPPDATA%\lvpm\tools\<hash>\` on first use, so there is nothing to
-  install beside the executable; `LVPM_RELINK_VI=<path>` runs a VI from disk
-  instead.
+- The relink VI ships beside the executable as `relink-package.vi` (a
+  source build uses `src/lv-src/` in its checkout) and is copied to
+  `%LOCALAPPDATA%\lvpm\tools\<hash>\` on first use. lvpm records the VI's
+  hash at build time and refuses a different one; `LVPM_RELINK_VI=<path>`
+  runs a VI from disk instead, unchecked. It used to be compiled into the
+  executable, which Microsoft Defender took for a dropper.
 
 ### Script-VI hooks
 
@@ -655,12 +690,14 @@ runs.
 | `install.rs`                   | Plan, unpack, extract hook VIs, record a manifest, uninstall                                                            |
 | `venv.rs`                      | A project's `.lv-venv/` venv by default: binding, lookup from the working directory, `lvpm venv`                       |
 | `launch.rs`                    | Start LabVIEW on a venv: the `-pref` ini, readiness by handshake, detached spawning                                     |
-| `relink.rs`                    | Drive the embedded relink VI over installed folders; folder collapsing and retries                                      |
+| `relink.rs`                    | Drive the shipped relink VI over installed folders; folder collapsing and retries                                       |
 | `refresh.rs`                   | Rebuild palettes and menus through LabVIEW's own shipping VIs                                                           |
 | `viserver.rs`                  | The VI Server TCP protocol: connection, methods, flattened data                                                         |
 | `version.rs`                   | Package version ordering: OGPT `version-release`, VIPM's four-part form; not semver                                     |
-| `src/lv-src/relink-package.vi` | The relink VI embedded into the executable at build time (LabVIEW 2020)                                                 |
-| `scripts/install.ps1`          | Download, verify and install the latest release                                                                         |
+| `src/lv-src/relink-package.vi` | The relink VI, shipped next to the executable; `build.rs` records its hash (LabVIEW 2020)                               |
+| `scripts/install.ps1`          | Download, verify and install the latest release (the MSI, or the zip with `-Portable`)                                 |
+| `scripts/install.sh`           | The same for Linux x64, from the static tarball                                                                         |
+| `dist-workspace.toml`, `wix/`  | Releases: dist builds the archives and the per-user MSI when a version tag is pushed (`release.yml`)                    |
 | `e2e/`                         | `lvpm-e2e`: end-to-end checks against LabVIEW for Linux and for Windows in NI's container images, with local test packages and with public ones (the LabVIEW tree must come out of install and uninstall unchanged) |
 
 ## License
