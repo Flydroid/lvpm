@@ -105,31 +105,29 @@ File 0="Relink Packages.vi"
         work,
         "local",
         "[sources]\ndefaults = false\n\n",
-        &["lvpm_linux_test"],
+        "lvpm_linux_test = \"*\"\n",
     )
 }
 
 /// The `public` suite: a project for the global install and one for the
-/// venv, asking for `packages` from the public indexes.
-pub fn public(work: &Path, packages: &[String]) -> Result<()> {
-    let packages: Vec<&str> = packages.iter().map(String::as_str).collect();
-    projects(work, "public", "", &packages)
+/// venv, asking for `packages` from the public indexes. Both say for every
+/// package whether its hooks run: `skip_hooks` not, every other one yes.
+pub fn public(work: &Path, packages: &[String], skip_hooks: &[&str]) -> Result<()> {
+    let dependencies: String = packages
+        .iter()
+        .map(|p| {
+            let hooks = match skip_hooks.iter().any(|s| s.eq_ignore_ascii_case(p)) {
+                true => "skip",
+                false => "run",
+            };
+            format!("{p} = {{ version = \"*\", hooks = \"{hooks}\" }}\n")
+        })
+        .collect();
+    projects(work, "public", "", &dependencies)
 }
 
-fn projects(work: &Path, suite: &str, sources: &str, packages: &[&str]) -> Result<()> {
+fn projects(work: &Path, suite: &str, sources: &str, dependencies: &str) -> Result<()> {
     for dir in ["global", "venv"] {
-        // A venv runs a package's install hooks only when the manifest says
-        // so; the venv project opts every package in, so the opt-in and
-        // running hooks in a venv's LabVIEW stay covered — and the checks
-        // that the LabVIEW tree is unchanged still cover them. A LabVIEW
-        // installation runs them by default.
-        let dependencies: String = packages
-            .iter()
-            .map(|p| match dir {
-                "venv" => format!("{p} = {{ version = \"*\", hooks = \"run\" }}\n"),
-                _ => format!("{p} = \"*\"\n"),
-            })
-            .collect();
         std::fs::create_dir_all(work.join(dir))?;
         std::fs::write(
             work.join(dir).join("lvpm.toml"),
@@ -203,22 +201,22 @@ mod tests {
         }
         assert!(work.join("caller").join("caller.vi").is_file());
         let toml = std::fs::read_to_string(work.join("venv").join("lvpm.toml")).unwrap();
-        assert!(
-            toml.contains("defaults = false")
-                && toml.contains("lvpm_linux_test = { version = \"*\", hooks = \"run\" }")
-        );
+        assert!(toml.contains("defaults = false") && toml.contains("lvpm_linux_test = \"*\""));
         std::fs::remove_dir_all(&work).unwrap();
     }
 
     #[test]
     fn public_asks_for_the_packages_from_the_default_sources() {
         let work = scratch("public");
-        public(&work, &["a_pkg".into(), "b_pkg".into()]).unwrap();
-        let toml = std::fs::read_to_string(work.join("global").join("lvpm.toml")).unwrap();
-        assert!(!toml.contains("[sources]"));
-        assert!(toml.ends_with("[dependencies]\na_pkg = \"*\"\nb_pkg = \"*\"\n"));
-        let venv = std::fs::read_to_string(work.join("venv").join("lvpm.toml")).unwrap();
-        assert!(venv.ends_with("a_pkg = { version = \"*\", hooks = \"run\" }\nb_pkg = { version = \"*\", hooks = \"run\" }\n"));
+        public(&work, &["a_pkg".into(), "b_pkg".into()], &["B_PKG"]).unwrap();
+        for dir in ["global", "venv"] {
+            let toml = std::fs::read_to_string(work.join(dir).join("lvpm.toml")).unwrap();
+            assert!(!toml.contains("[sources]"));
+            assert!(toml.ends_with(
+                "[dependencies]\na_pkg = { version = \"*\", hooks = \"run\" }\n\
+                 b_pkg = { version = \"*\", hooks = \"skip\" }\n"
+            ));
+        }
         assert!(!work.join("pkgs").exists());
         std::fs::remove_dir_all(&work).unwrap();
     }

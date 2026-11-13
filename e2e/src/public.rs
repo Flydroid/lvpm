@@ -17,12 +17,17 @@ use libtest_mimic::{Failed, Trial};
 
 use crate::checks::*;
 
-/// LUnit, a test framework with its own dependencies; G-Image, whose
-/// PostInstall unzips clean copies of its 90 VIs over the installed ones
-/// (VI Package Builder replaced their Call Library wildcard with
-/// `g_image_32.dll`; linkfix's `clfn-wildcard` now repairs the installed
-/// copies too).
+/// LUnit, a test framework with its own dependencies; G-Image, which ships
+/// the Call Library links VI Package Builder breaks.
 pub const PACKAGES: [&str; 2] = ["astemes_lib_lunit", "dataflow_g_lib_g_image"];
+
+/// Packages whose install hooks the projects turn off (`hooks = "skip"`);
+/// every other package's run (`hooks = "run"`). G-Image's PostInstall
+/// unzips clean copies of its 90 VIs over the installed ones, to undo VI
+/// Package Builder replacing their Call Library wildcard with
+/// `g_image_32.dll`. linkfix's `clfn-wildcard` makes that repair, and the
+/// unzipped copies would replace the linkfixed files with unprepared ones.
+pub const SKIP_HOOKS: [&str; 1] = ["dataflow_g_lib_g_image"];
 
 /// Every name under the LabVIEW folder, with a file's modification time; a
 /// folder has none.
@@ -35,11 +40,11 @@ static VENV_TREE: Mutex<Option<Tree>> = Mutex::new(None);
 pub fn trials() -> Vec<Trial> {
     crate::checks::trials(&[
         (
-            "headless install --hooks resolves and copies every package",
+            "headless install resolves and copies every package",
             global_install,
         ),
         ("lvpm list shows every package asked for", list_complete),
-        ("every install hook ran", hooks_ran),
+        ("hooks ran as the manifest says: G-Image's skipped", hooks_ran),
         (
             "every file in the install records is on disk",
             records_on_disk,
@@ -74,7 +79,9 @@ fn global_install() -> Check {
     )?;
     close_labview();
     *GLOBAL_TREE.lock().unwrap() = Some(tree()?);
-    linkfix_only(&stdout(&ok(&global(), &["install", "--hooks"])?))
+    // No --hooks: it would override the manifest's hooks = "skip". Headless,
+    // the packages with hooks = "run" still run theirs.
+    linkfix_only(&stdout(&ok(&global(), &["install"])?))
 }
 
 /// Linkfix ran and LabVIEW's relink pass did not: the install no longer says
@@ -89,7 +96,7 @@ fn linkfix_only(output: &str) -> Check {
 }
 
 fn global_install_for_relink() -> Check {
-    ok(&global(), &["install", "--no-linkfix", "--hooks"]).map(drop)
+    ok(&global(), &["install", "--no-linkfix"]).map(drop)
 }
 
 /// The dependency names of the global project, as fixtures::public wrote them.
@@ -118,10 +125,27 @@ fn list_complete() -> Check {
     })
 }
 
+/// In `lvpm list`, a package in [`SKIP_HOOKS`] has its PostInstall recorded
+/// as skipped (when it has one), and no other package has a hook that did not
+/// run: nothing pending, failed, skipped or listed under "hooks not run".
 fn hooks_ran() -> Check {
     let list = stdout(&ok(&global(), &["list"])?);
-    ensure(!list.contains("hooks skipped"), || {
-        format!("a package's hooks did not run:\n{list}")
+    let rows: Vec<&str> = list.lines().filter(|l| l.contains(" files ")).collect();
+    let wrong: Vec<&str> = rows
+        .iter()
+        .copied()
+        .filter(|row| {
+            let name = row.split_whitespace().next().unwrap_or_default();
+            match SKIP_HOOKS.iter().any(|s| s.eq_ignore_ascii_case(name)) {
+                true => row.contains("post-install") && !row.contains("post-install skipped"),
+                false => ["PENDING", "FAILED", "unknown", "skipped", "hooks not run"]
+                    .iter()
+                    .any(|s| row.contains(s)),
+            }
+        })
+        .collect();
+    ensure(!rows.is_empty() && wrong.is_empty(), || {
+        format!("hooks did not run as the manifest says:\n{}\n\nlist:\n{list}", wrong.join("\n"))
     })
 }
 

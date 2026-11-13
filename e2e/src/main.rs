@@ -217,7 +217,7 @@ fn run_suite(run: &Run, suite: Suite) -> Result<bool> {
     executable(&run.lvpm, &work.join(format!("lvpm{EXE}")))?;
     match suite {
         Suite::Local => fixtures::local(&work)?,
-        Suite::Public => fixtures::public(&work, &run.packages)?,
+        Suite::Public => fixtures::public(&work, &run.packages, &public::SKIP_HOOKS)?,
     }
 
     // The image's own process isolation by default: a GitHub-hosted
