@@ -125,31 +125,43 @@ Rules:
   naming the dependency, rather than misread.
 - The install plan lists dependencies before the packages that need them.
 
-### Dependency tables: `hooks`
+### Dependency tables: `hooks` and `relink`
 
 A dependency can be a table instead of a version string, to set whether
-the package's install hooks run:
+the package's install hooks run and whether LabVIEW relinks it:
 
 ```toml
 [dependencies]
 my_lib_with_setup = { version = "2.1.0.4", hooks = "run" }
 wiresmith_technology_lib_g_cli = { version = "3.0.1.98", hooks = "skip" }
+sklein_lib_webview2 = { version = "2.1.1.2", relink = true }
 ```
 
 | Key       | Meaning                                                                 |
 | --------- | ----------------------------------------------------------------------- |
 | `version` | Required. The constraint, exactly as in the string form.               |
 | `hooks`   | `"run"` or `"skip"`. Unset: a venv runs none of the package's hooks, a LabVIEW installation runs them all, a headless machine none. |
+| `relink`  | `true`: after linkfix, the install loads and saves the package's VIs in LabVIEW, the pass `lvpm relink` runs. Unset or `false`: linkfix only. |
 
-`--no-hooks` and `--hooks` on `lvpm install` override the setting. To set
-`hooks` for a package that is only a dependency of another, declare it too.
-The setting also holds in groups. Two groups that set it differently for the
-same package are an error.
+`--no-hooks` and `--hooks` on `lvpm install` override `hooks`; `--relink`
+relinks every package in place of linkfix, whatever `relink` says. To set
+either key for a package that is only a dependency of another, declare it too.
+Both settings also hold in groups. Two groups that set one differently for
+the same package are an error.
+
+`relink = true` is for packages whose VIs only LabVIEW can repair. A .NET
+invoke node stores the index of its method in the assembly. A package built
+against a different build of the assembly than the one it ships (as
+`sklein_lib_webview2` 2.1.1.2 is) loads with broken nodes. Linkfix only
+rewrites link paths, so it cannot fix them; loading and saving in LabVIEW
+looks the methods up by name again. VIPM does this load and save for every
+package by default (its "mass compile after install"), so such a package
+works there by accident.
 
 A table under `[dependencies]` is read as a dependency when its keys are
-`version` and, optionally, `hooks`. Any other table is a
+`version` and, optionally, `hooks` and `relink`. Any other table is a
 [group](#named-dependency-groups). So a group cannot hold only packages named
-`version` and `hooks`.
+`version`, `hooks` and `relink`.
 
 VIPM does not read dependency tables: a `vipm.toml` keeps the string form.
 
@@ -451,7 +463,8 @@ Tracked in [roadmap.md](roadmap.md#the-manifest-and-the-lockfile---wip):
     so changing the selection never re-resolves. `lvpm sync` uninstalls
     packages that only unselected groups need.
 - **Per-dependency tables**: ~~`hooks`~~ done (see
-  [Dependency tables](#dependency-tables-hooks)); `source = "..."` is still open.
+  [Dependency tables](#dependency-tables-hooks-and-relink)), as is `relink`;
+  `source = "..."` is still open.
 - **`[venv]` overrides**: `dir`, `vi-server-port`, `bitness`.
 - **`vipm.toml` conversion, remaining fields**: `labview-bitness` is checked
   against the selected target once `[venv] bitness` exists. Writing an

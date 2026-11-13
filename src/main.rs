@@ -1533,9 +1533,28 @@ fn cmd_install(
     // a LabVIEW: a scratch tree has none, so both are skipped there. They
     // share one instance, because starting a venv's LabVIEW twice costs more
     // than the whole relink pass it would be repeating.
+    //
+    // `--relink` relinks every package instead of linkfix. Without it, only
+    // the packages the manifest marks `relink = true` are relinked, after
+    // linkfix: those whose VIs need LabVIEW itself to re-resolve them, which
+    // linkfix cannot (.NET invoke nodes storing a member index from another
+    // build of the assembly, as sklein_lib_webview2 2.1.1.2 ships them).
+    if !relink_pass {
+        let marked: Vec<&str> = found
+            .as_ref()
+            .map(|(_, p)| p.relink.iter().filter(|(_, on)| *on).map(|(n, _)| n.as_str()).collect())
+            .unwrap_or_default();
+        relink_work.retain(|(pkg, _)| marked.iter().any(|m| m.eq_ignore_ascii_case(pkg)));
+        if !relink_work.is_empty() {
+            log!(
+                "\nrelink: {} (relink = true in the manifest)",
+                relink_work.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>().join(", ")
+            );
+        }
+    }
     let folders: usize = relink_work.iter().map(|(_, f)| f.len()).sum();
     let target = store.target.clone();
-    let want_relink = relink_pass && folders > 0;
+    let want_relink = folders > 0;
 
     if dry_run {
         if want_relink {
