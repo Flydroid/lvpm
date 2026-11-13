@@ -307,6 +307,11 @@ enum Cmd {
         /// crash report and verbose log. Repeatable.
         #[arg(long = "ini", value_name = "KEY=VALUE")]
         ini_keys: Vec<String>,
+        /// Start even when the venv does not match the manifest's
+        /// `[dependencies]` (missing, wrong version, files gone, a relink or
+        /// PostInstall hook still owed).
+        #[arg(long)]
+        no_check: bool,
     },
     /// Rewrite installed VI links and set libraries/classes source-only the
     /// way LabVIEW saves them. Defaults to the venv in effect; `--tree` takes
@@ -469,7 +474,7 @@ fn run(cli: &Cli) -> Result<()> {
             }
             Ok(())
         }
-        Cmd::Launch { lvproj, ini_keys } => cmd_launch(&cli, lvproj.as_deref(), ini_keys),
+        Cmd::Launch { lvproj, ini_keys, no_check } => cmd_launch(&cli, lvproj.as_deref(), ini_keys, *no_check),
         Cmd::Linkfix { tree, dry_run, verbose, keep_compiled_code, fix, report, bitness } => {
             let mut methods: Vec<linkfix::Method> = if fix.is_empty() { linkfix::Method::ALL.to_vec() } else { fix.clone() };
             if *keep_compiled_code {
@@ -2083,10 +2088,93 @@ fn cmd_venv(cli: &Cli, sub: &VenvCmd) -> Result<()> {
 
 /// Start LabVIEW on the venv. No relinking here — that happened at install —
 /// and no waiting: the IDE is the user's from the moment it appears.
-fn cmd_launch(cli: &Cli, lvproj: Option<&Path>, ini_keys: &[String]) -> Result<()> {
-    let Destination::Venv(v) = destination(cli)? else {
+/// Refuse to start LabVIEW on a venv that does not hold what the manifest's
+/// `[dependencies]` ask for. Reads only the install records: a file edited or
+/// resaved since install goes unnoticed (that needs hashes at install time).
+fn check_venv_for_launch(dest: &Destination, v: &venv::Venv) -> Result<()> {
+    let Some(path) = v.manifest_path().filter(|p| p.is_file()) else {
+        elog!("venv has no bound manifest — skipping the package check");
+        return Ok(());
+    };
+    let proj = read_manifest(&path)?;
+    // `main` only: which optional groups the venv was installed with is not
+    // recorded, so their absence cannot be told from a choice.
+    let wanted = proj.select(&[], &[], &[])?.dependencies;
+    let store = v.store();
+    let policy = hook_policy_for(dest, HookMode::Default);
+    let problems = venv_problems(
+        &wanted,
+        &proj.relink,
+        |name| policy.allows(name),
+        |name| match install::is_installed(&store, name) {
+            true => install::read_manifest(&store, name).map(Some),
+            false => Ok(None),
+        },
+        |p| p.exists(),
+    )?;
+    if problems.is_empty() {
+        elog!("checked {} package(s) against {}", wanted.len(), path.display());
+        return Ok(());
+    }
+    let mut msg = format!("the venv does not match {}:", path.display());
+    for p in &problems {
+        msg.push_str("\n  ");
+        msg.push_str(p);
+    }
+    msg.push_str("\nrun `lvpm install` to bring it in line, or `lvpm launch --no-check` to start anyway");
+    bail!(msg)
+}
+
+/// Every way the installed records fall short of `wanted`, one line each.
+/// `hooks_run` says whether the hook policy runs a package's hooks here;
+/// `record` reads a package's install record, `None` when there is none.
+fn venv_problems(
+    wanted: &[(String, project::Constraint)],
+    relink: &[(String, bool)],
+    hooks_run: impl Fn(&str) -> bool,
+    record: impl Fn(&str) -> Result<Option<install::Manifest>>,
+    exists: impl Fn(&Path) -> bool,
+) -> Result<Vec<String>> {
+    let mut problems = Vec::new();
+    for (name, constraint) in wanted {
+        let Some(m) = record(name)? else {
+            problems.push(format!("{name}: not installed"));
+            continue;
+        };
+        if !constraint.allows(&Version::parse(&m.version)) {
+            problems.push(format!("{name}: {} installed, manifest asks for {name}{constraint}", m.version));
+        }
+        let missing: Vec<&String> = m.files.iter().filter(|f| !exists(Path::new(f.as_str()))).collect();
+        if let Some(first) = missing.first() {
+            problems.push(format!("{name}: {} of {} files missing, e.g. {first}", missing.len(), m.files.len()));
+        }
+        let wants_relink = relink.iter().any(|(n, on)| *on && n.eq_ignore_ascii_case(name));
+        if wants_relink && !m.relinked {
+            problems.push(format!("{name}: relink = true but the relink pass has not completed"));
+        }
+        if m.post_install_vi.is_some() {
+            match &m.post_install {
+                Some(install::HookState::Failed { error, .. }) => {
+                    problems.push(format!("{name}: PostInstall failed: {error}"))
+                }
+                Some(install::HookState::Ran { .. }) => {}
+                _ if hooks_run(name) => problems.push(format!("{name}: PostInstall has not run")),
+                _ => {}
+            }
+        }
+    }
+    Ok(problems)
+}
+
+fn cmd_launch(cli: &Cli, lvproj: Option<&Path>, ini_keys: &[String], no_check: bool) -> Result<()> {
+    let dest = destination(cli)?;
+    let Destination::Venv(v) = &dest else {
         bail!("launch needs a venv: run it inside a project that has one, or pass --project <DIR>");
     };
+    let v = v.clone();
+    if !no_check {
+        check_venv_for_launch(&dest, &v)?;
+    }
     let extra = ini_keys
         .iter()
         .map(|kv| {
@@ -2644,6 +2732,59 @@ mod tests {
 
         assert!(!policy(HookMode::Never, false, false).allows("http"), "--no-hooks wins");
         assert!(policy(HookMode::Always, true, false).allows("gcli"), "--hooks wins");
+    }
+
+    #[test]
+    fn launch_check_reports_what_the_records_fall_short_of() {
+        let record = |name: &str, version: &str, extra: &str| -> install::Manifest {
+            serde_json::from_str(&format!(
+                r#"{{"name":"{name}","version":"{version}","installed_at":0,"target":"t",
+                    "files":["/v/{name}/a.vi","/v/{name}/b.vi"],"dependencies":[],"skipped_hooks":[]{extra}}}"#
+            ))
+            .unwrap()
+        };
+        let p = project::parse(
+            "[dependencies]\nok = \">=1.0\"\nold = \"2.0\"\ngone = \"1\"\nhalf = \"1\"\n\
+             rl = { version = \"1\", relink = true }\nhook = { version = \"1\", hooks = \"run\" }\n\
+             broke = \"1\"\nquiet = \"1\"\n",
+        )
+        .unwrap();
+        let read = |name: &str| -> Result<Option<install::Manifest>> {
+            Ok(match name {
+                "ok" => Some(record(name, "1.2", "")),
+                "old" => Some(record(name, "1.9", "")),
+                "half" => Some(record(name, "1", "")),
+                "rl" => Some(record(name, "1", r#","relinked":false"#)),
+                "hook" => Some(record(name, "1", r#","post_install_vi":"x","post_install":{"state":"skipped","at":1}"#)),
+                "broke" => Some(record(
+                    name,
+                    "1",
+                    r#","post_install_vi":"x","post_install":{"state":"failed","at":1,"error":"boom"}"#,
+                )),
+                // Skipped by policy, and the policy says so: fine.
+                "quiet" => Some(record(name, "1", r#","post_install_vi":"x","post_install":{"state":"skipped","at":1}"#)),
+                _ => None,
+            })
+        };
+        let problems = venv_problems(
+            &p.dependencies,
+            &p.relink,
+            |n| n == "hook",
+            read,
+            |path| path != Path::new("/v/half/b.vi"),
+        )
+        .unwrap();
+        assert_eq!(
+            problems,
+            vec![
+                "old: 1.9 installed, manifest asks for old@2.0",
+                "gone: not installed",
+                "half: 1 of 2 files missing, e.g. /v/half/b.vi",
+                "rl: relink = true but the relink pass has not completed",
+                "hook: PostInstall has not run",
+                "broke: PostInstall failed: boom",
+            ]
+        );
     }
 
     #[test]

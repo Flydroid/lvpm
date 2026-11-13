@@ -39,7 +39,7 @@ lvpm [--labview-version YYYY] [--prefix DIR | --project DIR] [--global] [--refre
   run-hooks <pkg> | --all       [--timeout SECS]
   refresh                       [--timeout SECS]
   start                         [--wait SECS]
-  launch [<lvproj>]
+  launch [<lvproj>]             [--ini KEY=VALUE]... [--no-check]
   venv create | status | remove [-y]
   config get <key> | set <key> [<value>...]
   cache add <path>

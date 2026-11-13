@@ -118,6 +118,15 @@ wins over the overlay; `LVAddons.AdditionalLocations` needs LabVIEW 2024 Q1.
 - **Shadowing warning.** A package installed both globally and in the venv is
   loaded from the global copy whatever its version. Warn at install and at
   launch, with both versions and the uninstall command that fixes it.
+- **Detect changed package files at launch.** `lvpm launch` checks the
+  install records against the manifest (installed, version, files present,
+  relink and PostInstall state), but a record holds no hashes, so a package
+  VI edited, resaved by LabVIEW or replaced since install passes. Record a
+  hash (and size/mtime as a cheap pre-filter) per file at install, refresh it
+  after linkfix and the relink pass, and compare at launch or in a
+  `lvpm venv check`. Also open: `[dependencies.<name>]` groups are not
+  checked, because the venv does not record which groups it was installed
+  with; transitive dependencies are not checked either.
 - **Duplicate logical paths across addons.** Two venv packages shipping the
   same `vi.lib` file: LabVIEW's (undocumented) scan order picks one. Warn,
   naming the file and both packages.

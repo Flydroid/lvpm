@@ -241,6 +241,12 @@ $ lvpm launch MyProject.lvproj    # a LabVIEW that sees the venv
   venv's log in `.lv-venv/temp`. The venv starts with an empty `LabVIEW Data`, so personal
   customisations kept there (icon templates, right-click plugins) are not
   available in it.
+  Before starting, `launch` checks the venv's install records against the
+  manifest's `[dependencies]` (`main` only): every package installed at a
+  version the manifest allows, all of its recorded files present, the relink
+  pass done where `relink = true`, and PostInstall run where the hook policy
+  runs it. It refuses on a mismatch and names each one; `--no-check` starts
+  anyway. Files edited or resaved since install are not detected.
 
 The default layout is:
 

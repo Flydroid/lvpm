@@ -143,6 +143,12 @@ sklein_lib_webview2 = { version = "2.1.1.2", relink = true }
 | `hooks`   | `"run"` or `"skip"`. Unset: a venv runs none of the package's hooks, a LabVIEW installation runs them all, a headless machine none. |
 | `relink`  | `true`: after linkfix, the install loads and saves the package's VIs in LabVIEW, the pass `lvpm relink` runs. Unset or `false`: linkfix only. |
 
+Since a venv and a headless machine already skip hooks when `hooks` is
+unset, `hooks = "skip"` only changes anything when the manifest installs
+into a LabVIEW installation on a desktop (`lvpm install --global`). There it
+opts a package out of hooks that would otherwise run, as for the G-CLI line
+above. `hooks = "run"` is the opt-in that matters in a venv or headless.
+
 `--no-hooks` and `--hooks` on `lvpm install` override `hooks`; `--relink`
 relinks every package in place of linkfix, whatever `relink` says. To set
 either key for a package that is only a dependency of another, declare it too.

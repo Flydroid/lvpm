@@ -73,6 +73,15 @@ impl Constraint {
             _ => Constraint::Exact(Version::parse(s)),
         })
     }
+
+    /// Whether an installed `version` meets this constraint.
+    pub fn allows(&self, version: &Version) -> bool {
+        match self {
+            Constraint::Exact(v) => version == v,
+            Constraint::AtLeast(v) => version >= v,
+            Constraint::Any => true,
+        }
+    }
 }
 
 impl fmt::Display for Constraint {
