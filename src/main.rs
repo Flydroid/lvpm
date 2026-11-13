@@ -78,8 +78,8 @@ struct Cli {
     #[arg(long, global = true)]
     refresh: bool,
 
-    /// Detail written to the log file (`.lv-venv/logs/lvpm.log`, or the user's
-    /// global one outside a venv): off, error, warn, info, debug or trace.
+    /// Detail written to the log file (the venv's own, or `lvpm.log` outside a
+    /// venv, in lvpm's log folder): off, error, warn, info, debug or trace.
     /// Default: `LVPM_LOG`, else debug. The console output does not change.
     #[arg(long = "log-level", global = true, value_name = "LEVEL")]
     log_level: Option<String>,
@@ -395,7 +395,7 @@ fn main() -> Result<()> {
     };
     logging::init(level);
     let result = run(&cli);
-    logging::finish(&result, state_dir().ok().map(|d| d.join("logs")));
+    logging::finish(&result);
     result
 }
 
@@ -2045,6 +2045,7 @@ fn cmd_venv(cli: &Cli, sub: &VenvCmd) -> Result<()> {
             log!("created {}", v.dir.display());
             log!("  bound to       {}  ({})", v.target.label(), v.target.path.display());
             log!("  VI Server port {}", v.port);
+            log!("  log            {}", v.log_path().display());
             log!("\nnext: {install_hint} into it, `lvpm launch` starts LabVIEW on it");
             Ok(())
         }
@@ -2070,6 +2071,7 @@ fn cmd_venv(cli: &Cli, sub: &VenvCmd) -> Result<()> {
                         "not running on this venv"
                     }
                 );
+                log!("  log            {}", v.log_path().display());
                 Ok(())
             }
             None => {

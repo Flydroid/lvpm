@@ -155,7 +155,7 @@ The console shows a summary: how many files were looked at and how long that
 took, how many changed, were already clean or were skipped, and the edit
 count per kind (owner paths, relative paths, build-machine absolutes,
 qualifiers, owner refs, compiled code separated, CLFN wildcards restored).
-Each changed file goes to the log (`.lv-venv/logs/lvpm.log`, at `debug`), and
+Each changed file goes to the log (the venv's log, which `lvpm venv status` names, at `debug`), and
 each skipped or not-separated file with its reason (at `warn`); `--verbose`
 prints them on the console too. `--report` writes JSON with the selected
 methods, changed/skipped paths, per-method edit counts and source-only

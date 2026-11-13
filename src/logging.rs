@@ -1,11 +1,13 @@
-//! lvpm's log: one continuous file per venv, `.lv-venv/logs/lvpm.log`.
+//! lvpm's logs, all in one folder: `%LOCALAPPDATA%\lvpm\logs` on Windows,
+//! or wherever the `log.dir` setting points (`config.rs`).
 //!
-//! Every run appends to it: a header naming the command, everything the run
-//! printed (as `info`), detail that only goes to the file (`debug`: each file
-//! linkfix touched, each download), and how the run ended. Records written
-//! before the venv is known (argument checks, the lookup itself) are held and
-//! written once it is; a run that never finds a venv writes to the user's
-//! global log instead (`%LOCALAPPDATA%\lvpm\logs\lvpm.log` on Windows).
+//! A command on a venv appends to that venv's own file there, named after
+//! its project folder (see [`venv_file_name`]); any other command appends to
+//! `lvpm.log`. Every run writes a header naming the command (and the venv),
+//! everything it printed (as `info`), detail that only goes to the file
+//! (`debug`: each file linkfix touched, each download), and how it ended.
+//! Records written before the venv is known (argument checks, the lookup
+//! itself) are held and written once it is.
 //!
 //! The file level is `--log-level`, else `LVPM_LOG`, else `debug`. The console
 //! is unchanged by it: what a command prints, it prints at every level.
@@ -15,6 +17,7 @@
 //! two lvpm processes on one venv interleave whole lines. Logging never fails
 //! a command: a log that cannot be written is reported once and dropped.
 
+use crate::{config, venv};
 use log::{Level, LevelFilter, Log, Metadata, Record};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -22,10 +25,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Name of the log file inside a logs folder.
+/// The log of commands not run on a venv.
 pub const FILE_NAME: &str = "lvpm.log";
-/// Size at which the log is moved aside to `lvpm.log.1` (replacing the older one).
+/// Size at which a log is moved aside to `<name>.1` (replacing the older one).
 const ROTATE_AT: u64 = 10 * 1024 * 1024;
+/// Longest readable part of a venv's log name, before its hash.
+const NAME_MAX: usize = 80;
 
 struct State {
     file: Option<File>,
@@ -89,19 +94,58 @@ fn quote(a: &str) -> String {
     if a.is_empty() || a.contains(char::is_whitespace) { format!("\"{a}\"") } else { a.to_string() }
 }
 
-/// Write the log into `dir` (created if missing) from now on, starting with
-/// whatever was logged before. A second call for the same folder does nothing.
-pub fn attach(dir: &Path) {
-    let path = dir.join(FILE_NAME);
+/// The log file of the venv at `venv_dir`, whose project is `repo`.
+pub fn venv_log_path(repo: &Path, venv_dir: &Path) -> PathBuf {
+    config::log_dir().join(venv_file_name(repo, venv::path_hash(venv_dir)))
+}
+
+/// A venv's log name: its project's path, lowercased, with `:`, `\` and `/`
+/// as `-`, cut from the left to [`NAME_MAX`] characters so the project's own
+/// folder name survives, then a hash of the venv's path, which keeps two
+/// paths apart that read the same (`C:\a-b\c`, `C:\a\b-c`) or were cut.
+///
+/// `C:\Git\lvpm` → `c--git-lvpm-3fa2c1d0.log`
+fn venv_file_name(repo: &Path, hash: u64) -> String {
+    let readable: String = repo
+        .to_string_lossy()
+        .to_lowercase()
+        .chars()
+        .map(|c| if matches!(c, ':' | '\\' | '/') { '-' } else { c })
+        .collect();
+    let chars: Vec<char> = readable.chars().collect();
+    let mut tail: String = chars[chars.len().saturating_sub(NAME_MAX)..].iter().collect();
+    // Cut: start at a whole folder name, not the end of one.
+    if chars.len() > NAME_MAX
+        && let Some(i) = tail.find('-')
+    {
+        tail.drain(..=i);
+    }
+    format!("{}-{:08x}.log", tail.trim_start_matches('-'), hash as u32)
+}
+
+/// Write this run's log to the venv's own file from now on (see
+/// [`attach`]), and name the venv in it.
+pub fn attach_venv(repo: &Path, venv_dir: &Path) {
+    attach(&venv_log_path(repo, venv_dir));
+    log::info!(target: "lvpm", "---- venv {}", venv_dir.display());
+}
+
+/// Write the log into `path` (its folder created if missing) from now on,
+/// starting with whatever was logged before. A second call for the same file
+/// does nothing.
+fn attach(path: &Path) {
     let mut s = lock();
-    if s.path.as_deref() == Some(path.as_path()) {
+    if s.path.as_deref() == Some(path) {
         return;
     }
+    let dir = path.parent().unwrap_or(Path::new("."));
     let opened = std::fs::create_dir_all(dir).and_then(|_| {
-        if std::fs::metadata(&path).is_ok_and(|m| m.len() >= ROTATE_AT) {
-            let _ = std::fs::rename(&path, dir.join(format!("{FILE_NAME}.1")));
+        if std::fs::metadata(path).is_ok_and(|m| m.len() >= ROTATE_AT) {
+            let mut aside = path.as_os_str().to_owned();
+            aside.push(".1");
+            let _ = std::fs::rename(path, aside);
         }
-        OpenOptions::new().create(true).append(true).open(&path)
+        OpenOptions::new().create(true).append(true).open(path)
     });
     match opened {
         Ok(mut f) => {
@@ -109,9 +153,9 @@ pub fn attach(dir: &Path) {
                 let _ = f.write_all(line.as_bytes());
             }
             s.file = Some(f);
-            s.path = Some(path);
+            s.path = Some(path.to_path_buf());
         }
-        Err(e) => report_failure(&mut s, &path, &e),
+        Err(e) => report_failure(&mut s, path, &e),
     }
 }
 
@@ -120,9 +164,9 @@ pub fn path() -> Option<PathBuf> {
     lock().path.clone()
 }
 
-/// Close the run: log how it ended, and write to `fallback` if no venv took
+/// Close the run: log how it ended, and write to `lvpm.log` if no venv took
 /// the log. Unfinished `logp!` text is written as a line of its own.
-pub fn finish(result: &anyhow::Result<()>, fallback: Option<PathBuf>) {
+pub fn finish(result: &anyhow::Result<()>) {
     for err in [false, true] {
         let rest = std::mem::take(&mut lock().partial[err as usize]);
         if !rest.is_empty() {
@@ -134,8 +178,8 @@ pub fn finish(result: &anyhow::Result<()>, fallback: Option<PathBuf>) {
         Err(e) => log::error!(target: "lvpm", "---- failed: {e:#}"),
     }
     let attached = lock().file.is_some();
-    if !attached && let Some(dir) = fallback {
-        attach(&dir);
+    if !attached {
+        attach(&config::log_dir().join(FILE_NAME));
     }
 }
 
@@ -296,6 +340,21 @@ mod tests {
         assert_eq!(civil(0), (1970, 1, 1));
         assert_eq!(civil(11_016), (2000, 2, 29));
         assert_eq!(civil(20_766), (2026, 11, 9));
+    }
+
+    #[test]
+    fn venv_log_names_read_as_the_project_path() {
+        let name = |p: &str| venv_file_name(Path::new(p), 0x1234_5678_3fa2_c1d0);
+        assert_eq!(name(r"C:\Git\lvpm"), "c--git-lvpm-3fa2c1d0.log");
+        assert_eq!(name(r"D:\Projects\Test Rig\Station 2"), "d--projects-test rig-station 2-3fa2c1d0.log");
+        assert_eq!(name("/home/ci/work/lvpm"), "home-ci-work-lvpm-3fa2c1d0.log");
+
+        // Cut from the left, keeping the project's own folder, and starting at
+        // a whole folder name.
+        let deep = format!(r"C:\{}my-app", "nested\\".repeat(20));
+        let cut = name(&deep);
+        assert!(cut.starts_with("nested-nested-") && cut.ends_with("nested-my-app-3fa2c1d0.log"), "{cut}");
+        assert!(cut.trim_end_matches("-3fa2c1d0.log").chars().count() <= NAME_MAX, "{cut}");
     }
 
     #[test]

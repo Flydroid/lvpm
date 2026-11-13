@@ -15,6 +15,8 @@ pub struct Config {
     pub local_sources: Vec<PathBuf>,
     /// Project-relative venv directory, unless configured as an absolute path.
     pub venv_dir: PathBuf,
+    /// Where lvpm's logs go: `lvpm.log`, and one file per venv.
+    pub log_dir: PathBuf,
 }
 
 pub fn load() -> Result<Config> {
@@ -28,6 +30,7 @@ struct FileConfig {
     cache: Option<String>,
     sources: SourcesConfig,
     venv: VenvConfig,
+    log: LogConfig,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -39,6 +42,12 @@ struct SourcesConfig {
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
 struct VenvConfig {
+    dir: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(default)]
+struct LogConfig {
     dir: Option<String>,
 }
 
@@ -57,8 +66,26 @@ fn resolve(file: &FileConfig, env: impl Fn(&str) -> Option<String>) -> Result<Co
     let venv_dir = env_value(&env, "venv.dir")
         .or_else(|| file.venv.dir.clone().filter(|v| !v.is_empty()))
         .unwrap_or_else(|| DEFAULT_VENV_DIR.to_string());
-    Ok(Config { cache, local_sources, venv_dir: PathBuf::from(venv_dir) })
+    let log_dir = match env_value(&env, "log.dir").or_else(|| file.log.dir.clone().filter(|v| !v.is_empty())) {
+        Some(v) => std::path::absolute(v)?,
+        None => default_log_dir(&cache),
+    };
+    Ok(Config { cache, local_sources, venv_dir: PathBuf::from(venv_dir), log_dir })
 }
+
+/// Where lvpm's logs go, for the logger. Never fails: with a config file that
+/// cannot be read the default stands, and the command reports the error
+/// itself when it loads the config.
+pub fn log_dir() -> PathBuf {
+    let env = |k: &str| std::env::var(k).ok();
+    read_file()
+        .and_then(|file| resolve(&file, env))
+        .or_else(|_| resolve(&FileConfig::default(), env))
+        .map(|cfg| cfg.log_dir)
+        .unwrap_or_else(|_| default_log_dir(&default_cache()))
+}
+
+const KEYS: &str = "cache, sources.local, venv.dir, log.dir";
 
 pub fn set(key: &str, values: &[String]) -> Result<()> {
     let mut file = read_file()?;
@@ -75,9 +102,13 @@ pub fn set(key: &str, values: &[String]) -> Result<()> {
                 .collect();
         }
         "venv.dir" if values.len() == 1 => file.venv.dir = Some(values[0].clone()),
+        "log.dir" if values.len() == 1 => {
+            file.log.dir = Some(std::path::absolute(&values[0])?.to_string_lossy().into_owned())
+        }
         "cache" => bail!("`config set cache` expects one value"),
         "venv.dir" => bail!("`config set venv.dir` expects one value"),
-        _ => bail!("unknown config key {key:?}; supported keys: cache, sources.local, venv.dir"),
+        "log.dir" => bail!("`config set log.dir` expects one value"),
+        _ => bail!("unknown config key {key:?}; supported keys: {KEYS}"),
     }
     let path = config_file();
     if let Some(parent) = path.parent() {
@@ -93,7 +124,8 @@ pub fn get(key: &str) -> Result<Vec<String>> {
         "cache" => Ok(vec![cfg.cache.to_string_lossy().into_owned()]),
         "sources.local" => Ok(cfg.local_sources.iter().map(|p| p.to_string_lossy().into_owned()).collect()),
         "venv.dir" => Ok(vec![cfg.venv_dir.to_string_lossy().into_owned()]),
-        _ => bail!("unknown config key {key:?}; supported keys: cache, sources.local, venv.dir"),
+        "log.dir" => Ok(vec![cfg.log_dir.to_string_lossy().into_owned()]),
+        _ => bail!("unknown config key {key:?}; supported keys: {KEYS}"),
     }
 }
 
@@ -129,6 +161,24 @@ fn env_value(env: &impl Fn(&str) -> Option<String>, key: &str) -> Option<String>
     env(&upper).or_else(|| env(&lower)).filter(|v| !v.is_empty())
 }
 
+/// Per-user: `%LOCALAPPDATA%\lvpm\logs` on Windows; on Linux `lvpm/logs` in
+/// the cache folder, where lvpm keeps its other state.
+fn default_log_dir(cache: &std::path::Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let _ = cache;
+        std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+            .join("lvpm")
+            .join("logs")
+    }
+    #[cfg(not(windows))]
+    {
+        cache.join("lvpm").join("logs")
+    }
+}
+
 /// Per-user, not per-target — the feeds are the same for every LabVIEW.
 #[cfg(windows)]
 fn default_cache() -> PathBuf {
@@ -159,6 +209,7 @@ mod tests {
         assert_eq!(cfg.cache, default_cache());
         assert!(cfg.local_sources.is_empty());
         assert_eq!(cfg.venv_dir, PathBuf::from(DEFAULT_VENV_DIR));
+        assert_eq!(cfg.log_dir, default_log_dir(&cfg.cache));
     }
 
     #[test]
@@ -185,16 +236,20 @@ mod tests {
             cache: Some("from-file".into()),
             sources: SourcesConfig { local: vec!["packages-a".into()] },
             venv: VenvConfig { dir: Some(".from-file".into()) },
+            log: LogConfig { dir: Some("logs-from-file".into()) },
         };
         let from_file = resolve(&file, |_| None).unwrap();
         assert_eq!(from_file.venv_dir, PathBuf::from(".from-file"));
+        assert_eq!(from_file.log_dir, std::path::absolute("logs-from-file").unwrap());
         let cfg = resolve(&file, |key| match key {
             "LVPM_CONFIG_CACHE" => Some("from-env".into()),
             "LVPM_CONFIG_SOURCES_LOCAL" => Some("packages-b".into()),
             "LVPM_CONFIG_VENV_DIR" => Some(".custom-venv".into()),
+            "LVPM_CONFIG_LOG_DIR" => Some("logs-from-env".into()),
             _ => None,
         })
         .unwrap();
+        assert_eq!(cfg.log_dir, std::path::absolute("logs-from-env").unwrap());
         assert_eq!(cfg.cache, std::path::absolute("from-env").unwrap());
         assert_eq!(cfg.local_sources, std::env::split_paths("packages-b").collect::<Vec<_>>());
         assert_eq!(cfg.venv_dir, PathBuf::from(".custom-venv"));
@@ -206,6 +261,7 @@ mod tests {
             cache: None,
             sources: SourcesConfig { local: vec!["one".into(), "two".into()] },
             venv: VenvConfig::default(),
+            log: LogConfig::default(),
         };
         let encoded = toml::to_string_pretty(&file).unwrap();
         let decoded: FileConfig = toml::from_str(&encoded).unwrap();
