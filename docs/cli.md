@@ -1,7 +1,7 @@
 # The command-line interface
 
 What `lvpm`'s interface is today, what has to change before it is called
-stable, and what is still missing. The [README](../README.md#commands) is
+stable, and what is still missing. [commands.md](commands.md) is
 the user reference; this file is for deciding. The code changes ride on the
 `main.rs` split in [refactor-main.md](refactor-main.md).
 

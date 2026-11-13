@@ -81,8 +81,8 @@ up.
   refused. With neither, `venv create` asks for one.
 - On a headless machine (`LV_RTE_HEADLESS` set) with no venv beside the
   manifest, `lvpm install` targets the LabVIEW `labview` names, or a newer
-  installed one, instead of refusing (see the README's
-  [CI in a container](../README.md#ci-in-a-container-docker)).
+  installed one, instead of refusing (see
+  [CI in a container](ci-container.md#headless-mode)).
 - A global install still takes its target from `--labview-version`.
 
 ## `[sources]`

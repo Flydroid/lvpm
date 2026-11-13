@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 200 200" role="img" aria-label="lvpm">
+  <!-- The logo's mark alone, square: for avatars, favicons and social previews. -->
+  <g transform="translate(-16 2)">
+  <g stroke="#2e1a17" stroke-width="4" stroke-linejoin="round">
+    <path d="M100 30 L160 62 L100 94 L40 62 Z" fill="#ffe45c"/>
+    <path d="M40 62 L100 94 L100 164 L40 132 Z" fill="#ffd200"/>
+    <path d="M100 94 L160 62 L160 132 L100 164 Z" fill="#e0ad00"/>
+    <path d="M70 46 L130 78 L130 98" fill="none"/>
+  </g>  <!-- A LabVIEW class wire: maroon edges, light core, dashed centre -->
+  <g fill="none" stroke-linejoin="miter">
+    <path d="M160 112 H190 V166" stroke="#8c1d1d" stroke-width="10"/>
+    <path d="M160 112 H190 V166" stroke="#f3dcc0" stroke-width="5.5"/>
+    <path d="M160 112 H190 V166" stroke="#8c1d1d" stroke-width="2.5" stroke-dasharray="7 5"/>
+  </g>
+  <rect x="178" y="166" width="24" height="24" fill="#8c1d1d"/>
+  </g>
+</svg>
