@@ -211,6 +211,13 @@ records) and make it first-class:
     - Own `User-Agent` stays `lvpm/<version>`: honest, and the first thing to
       check if a public index starts closing connections on us.
 
+- **G-CLI compatibility: `lvpm run` and a bundled `g-cli`.** Proposal in
+  [docs/g-cli.md](g-cli.md): vendor G-CLI's proxy with only its launch step
+  replaced so it starts (or reuses) the venv LabVIEW, ship `g-cli` beside
+  `lvpm` in `%LOCALAPPDATA%\lvpm\bin`, and treat
+  `Wiresmith_Technology_lib_G_CLI` as provided by lvpm — its LabVIEW library
+  bundled, its machine-wide MSI post-install never run.
+
 ## Building: `lvpm build`
 
 Run a project's LabVIEW build specifications (EXE, packed library, LLB,
