@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="220" viewBox="0 0 640 220" role="img" aria-label="lvpm: open-source package manager for LabVIEW">
+  <!-- A package with a LabVIEW class wire running out of it into a terminal. -->
+  <g stroke="#2e1a17" stroke-width="4" stroke-linejoin="round">
+    <path d="M100 30 L160 62 L100 94 L40 62 Z" fill="#ffe45c"/>
+    <path d="M40 62 L100 94 L100 164 L40 132 Z" fill="#ffd200"/>
+    <path d="M100 94 L160 62 L160 132 L100 164 Z" fill="#e0ad00"/>
+    <path d="M70 46 L130 78 L130 98" fill="none"/>
+  </g>  <!-- A LabVIEW class wire: maroon edges, light core, dashed centre -->
+  <g fill="none" stroke-linejoin="miter">
+    <path d="M160 112 H196 V157 H566" stroke="#8c1d1d" stroke-width="10"/>
+    <path d="M160 112 H196 V157 H566" stroke="#f3dcc0" stroke-width="5.5"/>
+    <path d="M160 112 H196 V157 H566" stroke="#8c1d1d" stroke-width="2.5" stroke-dasharray="7 5"/>
+  </g>
+  <rect x="566" y="145" width="24" height="24" fill="#8c1d1d"/>
+  <text x="222" y="122" font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif" font-size="104" font-weight="700" fill="#2e1a17" letter-spacing="2">lvpm</text>
+  <text x="222" y="207" font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif" font-size="20" fill="#7a6560">open-source package manager for LabVIEW</text>
+</svg>
