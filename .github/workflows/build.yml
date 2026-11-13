@@ -84,11 +84,19 @@ jobs:
         env:
           CC_x86_64_unknown_linux_musl: musl-gcc
 
+      # lvpm looks for its relink VI beside itself, so the two travel together,
+      # as in a release (dist-workspace.toml).
+      - name: Put the relink VI beside the executable
+        shell: bash
+        run: cp src/lv-src/relink-package.vi target/${{ matrix.target }}/release/
+
       - name: Upload executable
         uses: actions/upload-artifact@v4
         with:
           name: lvpm-${{ matrix.name }}
-          path: target/${{ matrix.target }}/release/${{ matrix.exe }}
+          path: |
+            target/${{ matrix.target }}/release/${{ matrix.exe }}
+            target/${{ matrix.target }}/release/relink-package.vi
           if-no-files-found: error
 
       - name: Upload end-to-end runner
@@ -99,8 +107,8 @@ jobs:
           if-no-files-found: error
 
   # Both executables in one download, named for the version and commit, to
-  # hand to testers. The Linux one is a tarball: an artifact zip does not keep
-  # the executable bit.
+  # hand to testers, each with the relink VI it needs beside it. The Linux one
+  # is a tarball: an artifact zip does not keep the executable bit.
   collect:
     needs: build
     runs-on: ubuntu-latest
@@ -117,9 +125,9 @@ jobs:
         run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
           mkdir dist
-          cp executables/lvpm-windows-x64/lvpm.exe "dist/lvpm-$version-windows-x64.exe"
+          (cd executables/lvpm-windows-x64 && zip "../../dist/lvpm-$version-windows-x64.zip" lvpm.exe relink-package.vi)
           chmod +x executables/lvpm-linux-x64/lvpm
-          tar -czf "dist/lvpm-$version-linux-x64.tar.gz" -C executables/lvpm-linux-x64 lvpm
+          tar -czf "dist/lvpm-$version-linux-x64.tar.gz" -C executables/lvpm-linux-x64 lvpm relink-package.vi
           echo "BUNDLE=lvpm-$version-${GITHUB_SHA::7}" >> "$GITHUB_ENV"
           ls -l dist
 

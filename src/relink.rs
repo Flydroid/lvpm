@@ -8,7 +8,7 @@
 //! the measurements behind this.
 //!
 //! The load-resolve-save cycle itself lives in LabVIEW, in
-//! `src/lv-src/relink-package.vi` (embedded in the binary), whose whole interface is one string in and one
+//! `src/lv-src/relink-package.vi` (shipped next to the binary), whose whole interface is one string in and one
 //! boolean out:
 //!
 //! ```text
@@ -95,15 +95,17 @@ fn is_lv_item(p: &Path) -> bool {
         .is_some_and(|e| LV_EXTENSIONS.iter().any(|x| e.eq_ignore_ascii_case(x)))
 }
 
-/// `Relink Package.vi` itself, compiled into the executable.
+/// `Relink Package.vi` as it ships, next to the executable.
 ///
-/// It is shipped code, not configuration, and LabVIEW can only open it by
-/// path — so lvpm carries the bytes and writes them out on first use rather
-/// than depending on a companion file surviving beside the binary.
-const RELINK_VI: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/src/lv-src/relink-package.vi"
-));
+/// It used to be compiled into the executable and written out on first use,
+/// which is what a dropper does: Microsoft Defender flagged the unsigned exe
+/// for it. The release archives and the MSI now carry it as a file beside
+/// `lvpm` (dist-workspace.toml, wix/main.wxs).
+const RELINK_VI_FILE: &str = "relink-package.vi";
+
+/// MD5 of `src/lv-src/relink-package.vi` when this lvpm was built (build.rs),
+/// so a VI from another build is refused instead of run.
+const RELINK_VI_MD5: &str = env!("LVPM_RELINK_VI_MD5");
 
 /// Kept as the on-disk name, because LabVIEW shows it in dialogs and titles.
 const RELINK_VI_NAME: &str = "Relink Package.vi";
@@ -113,10 +115,10 @@ const RELINK_VI_ENV: &str = "LVPM_RELINK_VI";
 
 /// Where `Relink Package.vi` is, so it can be handed to LabVIEW by path.
 ///
-/// The embedded copy is extracted to a per-user cache directory keyed by its
-/// own hash, so a new lvpm build writes a new path instead of overwriting a
-/// file LabVIEW may still have open, and an unchanged one costs a `stat`.
-/// `$LVPM_RELINK_VI` points at a VI on disk instead.
+/// The shipped copy is copied to a per-user cache directory keyed by its own
+/// hash, so a new lvpm build writes a new path instead of overwriting a file
+/// LabVIEW may still have open, and an unchanged one costs a `stat`.
+/// `$LVPM_RELINK_VI` points at a VI on disk instead, unchecked.
 pub fn locate_vi() -> Result<PathBuf> {
     if let Some(p) = std::env::var_os(RELINK_VI_ENV) {
         let p = PathBuf::from(p);
@@ -125,16 +127,63 @@ pub fn locate_vi() -> Result<PathBuf> {
         }
         return Ok(p);
     }
-    extract_vi(&crate::state_dir()?.join("tools"))
+    let bytes = shipped_vi(&shipped_vi_candidates())?;
+    extract_vi(&crate::state_dir()?.join("tools"), &bytes)
 }
 
-/// Write the embedded VI under `base`, and return where it landed.
-fn extract_vi(base: &Path) -> Result<PathBuf> {
-    let dir = base.join(crate::index::md5_hex(RELINK_VI));
+/// Where the shipped VI may be: beside the executable (an installed release),
+/// beside the file it resolves to when it was started through a link, then
+/// the checkout this lvpm was built from (`cargo run`, tests, a `cargo build`
+/// run from `target/`).
+fn shipped_vi_candidates() -> Vec<PathBuf> {
+    let mut found: Vec<PathBuf> = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        // Windows reports the link's own path; Linux already resolves it.
+        for exe in [exe.clone(), std::fs::canonicalize(&exe).unwrap_or(exe)] {
+            if let Some(vi) = exe.parent().map(|d| d.join(RELINK_VI_FILE))
+                && !found.contains(&vi)
+            {
+                found.push(vi);
+            }
+        }
+    }
+    found.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("lv-src").join(RELINK_VI_FILE));
+    found
+}
+
+/// The bytes of the first candidate that is the VI this lvpm was built with.
+fn shipped_vi(candidates: &[PathBuf]) -> Result<Vec<u8>> {
+    let mut wrong = Vec::new();
+    for path in candidates {
+        let Ok(bytes) = std::fs::read(path) else { continue };
+        let md5 = crate::index::md5_hex(&bytes);
+        if md5 == RELINK_VI_MD5 {
+            return Ok(bytes);
+        }
+        wrong.push(format!("{} (md5 {md5})", path.display()));
+    }
+    let expected = candidates.first().map_or_else(String::new, |p| p.display().to_string());
+    if wrong.is_empty() {
+        bail!(
+            "lvpm's relink VI is missing: it is installed with lvpm as {expected}. \
+             Reinstall lvpm, or set {RELINK_VI_ENV} to a copy of src/lv-src/{RELINK_VI_FILE}"
+        );
+    }
+    bail!(
+        "no relink VI matching this lvpm (md5 {RELINK_VI_MD5}); found {}. \
+         Reinstall lvpm so the executable and {RELINK_VI_FILE} come from the same release, \
+         or set {RELINK_VI_ENV} to use a VI anyway",
+        wrong.join(", ")
+    )
+}
+
+/// Write `bytes` (the shipped VI) under `base`, and return where it landed.
+fn extract_vi(base: &Path, bytes: &[u8]) -> Result<PathBuf> {
+    let dir = base.join(crate::index::md5_hex(bytes));
     let vi = dir.join(RELINK_VI_NAME);
     // The directory names the contents, so a file of the right length there is
     // the file we would write.
-    if std::fs::metadata(&vi).is_ok_and(|m| m.len() == RELINK_VI.len() as u64) {
+    if std::fs::metadata(&vi).is_ok_and(|m| m.len() == bytes.len() as u64) {
         return Ok(vi);
     }
 
@@ -142,7 +191,7 @@ fn extract_vi(base: &Path) -> Result<PathBuf> {
     // Write beside it and rename, so a second lvpm running the same pass never
     // sees a half-written VI.
     let tmp = dir.join(format!(".{}.{}", RELINK_VI_NAME, std::process::id()));
-    std::fs::write(&tmp, RELINK_VI).with_context(|| format!("cannot write {}", tmp.display()))?;
+    std::fs::write(&tmp, bytes).with_context(|| format!("cannot write {}", tmp.display()))?;
     if let Err(e) = std::fs::rename(&tmp, &vi) {
         let _ = std::fs::remove_file(&tmp);
         // Losing the race is the expected way to fail here: the other process
@@ -497,27 +546,55 @@ impl Relinker {
 mod tests {
     use super::*;
 
+    fn source_vi() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lv-src").join(RELINK_VI_FILE)
+    }
+
     /// First use writes the VI; a second run over the same base reuses it
     /// without rewriting, and a truncated leftover is repaired rather than
     /// handed to LabVIEW.
     #[test]
-    fn extracts_the_embedded_vi_once() {
+    fn extracts_the_shipped_vi_once() {
         let base = std::env::temp_dir().join(format!("lvpm-extract-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
+        let bytes = std::fs::read(source_vi()).unwrap();
 
-        let vi = extract_vi(&base).unwrap();
+        let vi = extract_vi(&base, &bytes).unwrap();
         assert_eq!(vi.file_name().unwrap(), RELINK_VI_NAME);
-        assert_eq!(std::fs::read(&vi).unwrap(), RELINK_VI);
+        assert_eq!(std::fs::read(&vi).unwrap(), bytes);
 
         let stamp = std::fs::metadata(&vi).unwrap().modified().unwrap();
-        assert_eq!(extract_vi(&base).unwrap(), vi);
+        assert_eq!(extract_vi(&base, &bytes).unwrap(), vi);
         assert_eq!(std::fs::metadata(&vi).unwrap().modified().unwrap(), stamp);
 
         std::fs::write(&vi, b"truncated").unwrap();
-        assert_eq!(extract_vi(&base).unwrap(), vi);
-        assert_eq!(std::fs::read(&vi).unwrap(), RELINK_VI);
+        assert_eq!(extract_vi(&base, &bytes).unwrap(), vi);
+        assert_eq!(std::fs::read(&vi).unwrap(), bytes);
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A missing candidate is skipped, a VI from another build is refused and
+    /// named, and the one this build was made with is taken.
+    #[test]
+    fn takes_only_the_vi_this_build_was_made_with() {
+        let dir = std::env::temp_dir().join(format!("lvpm-shipped-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let missing = dir.join("missing.vi");
+        let stale = dir.join("stale.vi");
+        std::fs::write(&stale, b"another build").unwrap();
+
+        let err = shipped_vi(std::slice::from_ref(&missing)).unwrap_err().to_string();
+        assert!(err.contains("missing") && err.contains("Reinstall lvpm"), "{err}");
+
+        let err = shipped_vi(&[missing.clone(), stale.clone()]).unwrap_err().to_string();
+        assert!(err.contains("stale.vi") && err.contains(RELINK_VI_MD5), "{err}");
+
+        let bytes = shipped_vi(&[missing, stale, source_vi()]).unwrap();
+        assert_eq!(crate::index::md5_hex(&bytes), RELINK_VI_MD5);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The report as LabVIEW writes it: a JSON array of absolute paths, which
