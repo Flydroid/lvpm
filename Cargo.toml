@@ -1,10 +1,17 @@
 [package]
 name = "lvpm"
-version = "0.2.1"
+version = "0.3.1-rc.1"
 edition = "2024"
-description = "Open-source package manager for LabVIEW (.vip) packages"
+description = "Open-source package manager for LabVIEW"
+authors = ["Jonathan Graesser","Felipe Silva"]
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/Flydroid/lvpm"
+repository = "https://github.com/labview-package-manager/lvpm"
+
+[package.metadata.wix]
+upgrade-guid = "2AE3D9AE-39AC-4BC3-A28C-187026CEEFCE"
+path-guid = "5B493AB7-0E84-4A8E-8B3F-A0E99B41FE04"
+license = false
+eula = false
 
 # e2e/ is the end-to-end test runner for NI's LabVIEW containers; it is not
 # part of a release, and a plain `cargo test` here does not build it.
@@ -14,6 +21,7 @@ members = ["e2e"]
 anyhow = "1.0.104"
 clap = { version = "4.6.6", features = ["derive"] }
 flate2 = "1.1.9"
+log = { version = "0.4.35", features = ["std"] }
 quick-xml = "0.38.3"
 md-5 = "0.11.0"
 reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "default-tls"] }
@@ -24,5 +32,13 @@ sha2 = "0.11.0"
 toml = { version = "1.1.5", features = ["preserve_order"] }
 zip = "8.6.0"
 
+[build-dependencies]
+md-5 = "0.11.0"
+
 [target."cfg(windows)".dependencies]
 winreg = "0.56.0"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

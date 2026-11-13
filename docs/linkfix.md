@@ -1,9 +1,10 @@
 # Linkfix
 
 Linkfix prepares installed LabVIEW files for their new location without
-opening LabVIEW. It repairs supported dependency-link records and prepares
-source-only files so LabVIEW can keep compiled code in its own cache instead
-of writing it back into the installed package.
+opening LabVIEW. It repairs supported dependency-link records, restores Call
+Library wildcards that VI Package Builder replaced with one bitness's DLL,
+and prepares source-only files so LabVIEW can keep compiled code in its own
+cache instead of writing it back into the installed package.
 
 It is a normal part of `lvpm install`, but it does change installed files.
 The original package archive and cached download remain unchanged. This
@@ -82,6 +83,38 @@ not removed or bypassed. If verification fails, source-only preparation is
 not applied. A VI without its block diagram keeps its compiled code, because
 LabVIEW cannot regenerate that code from a missing diagram.
 
+### Call Library Wildcards
+
+A Call Library Function node can name its library with a cross-platform
+wildcard: `name*.*` loads `name32.dll` or `name64.dll`, and `name**.*` loads
+`name.dll` or `name_64.dll`, whichever matches LabVIEW's bitness. VI Package
+Builder replaces the wildcard in the VI's link with the build machine's file,
+so a package built on 32-bit LabVIEW names the 32-bit DLL and fails to load
+in 64-bit LabVIEW (error 1003). VIPM documents this as a known issue:
+[VI Package Builder removes cross platform wildcards from Call Library
+Function nodes during the build process](https://support.vipm.io/hc/en-us/articles/360053941572-VI-Package-Builder-removes-cross-platform-wildcards-from-Call-Library-Function-nodes-during-the-build-process).
+Packages work around it in a PostInstall hook, in one of two ways:
+
+- **Resave in LabVIEW.** NI's Advanced HTTP Client opens every installed VI,
+  sets each `lvwebclient` Call Library node's path to `lvwebclient_*.*` and
+  saves it.
+- **Ship clean copies.** Dataflow G's G-Image packs the same 90 VIs a second
+  time into `Post Install/G-Image-VIs.zip`, where VI Package Builder leaves
+  them alone, and its hook unzips them over the installed copies.
+
+Run after linkfix, the second kind replaces linkfixed files with copies that
+still have embedded compiled code and unrepaired links. With
+`clfn-wildcard` neither hook is needed.
+
+The `clfn-wildcard` method makes the same edit without LabVIEW. Where the
+node in the diagram still holds the wildcard, the link gets the wildcard back
+as its name and the target bitness's file as its path. That is how LabVIEW
+saves it after the hook ran: measured on the Advanced HTTP Client in LabVIEW
+2025 after its hook, and in LabVIEW 2026's own save of the fixed file. A link
+is only changed when the target bitness's file is in the tree beside the one
+named. The bitness is the venv's or the install target's. For `--tree`, pass
+`--bitness 32|64`, or this method is skipped.
+
 `lvpm linkfix --keep-compiled-code` disables source-only preparation for both
 VIs and library/class XML; link repair still runs. This is a standalone
 command option, not an `install` option. To skip both parts during an
@@ -108,9 +141,9 @@ fresh package copies when switching to the LabVIEW preparation method;
 an install that skips an already-installed version does not restore its
 original bytes.
 
-The independent methods are `owner`, `paths`, `qualifiers`, and `source-only`.
-Omitting `--fix` selects all four. `--keep-compiled-code` removes
-`source-only` from the selection.
+The independent methods are `owner`, `paths`, `qualifiers`, `source-only`
+and `clfn-wildcard`. Omitting `--fix` selects all five. `--keep-compiled-code`
+removes `source-only` from the selection.
 
 `--dry-run` on an existing tree computes changes without writing them.
 `install --dry-run` reports the planned preparation, but cannot preview
@@ -118,11 +151,16 @@ byte-level edits to files that have not yet been unpacked.
 
 ## Reporting And Boundaries
 
-Install output names changed files, counts the kinds of edits, and lists
-files it could not prepare with a reason. The standalone command summarizes
-skips; `--verbose` names them. `--report` writes JSON with the selected
-methods, changed/skipped paths, edit counts and source-only exceptions.
-Unchanged files are counted rather than individually listed in that report.
+The console shows a summary: how many files were looked at and how long that
+took, how many changed, were already clean or were skipped, and the edit
+count per kind (owner paths, relative paths, build-machine absolutes,
+qualifiers, owner refs, compiled code separated, CLFN wildcards restored).
+Each changed file goes to the log (the venv's log, which `lvpm venv status` names, at `debug`), and
+each skipped or not-separated file with its reason (at `warn`); `--verbose`
+prints them on the console too. `--report` writes JSON with the selected
+methods, changed/skipped paths, per-method edit counts and source-only
+exceptions. Unchanged files are counted rather than individually listed in
+that report.
 
 The implementation fails closed on layouts it cannot rewrite confidently:
 
@@ -148,8 +186,11 @@ file was prepared, because skipped files are permitted.
 
 Linkfix reduces avoidable searches and dependency save prompts. It is not a
 guarantee that every package opens without searching, recompiling or asking
-to save. It does not replace package setup hooks or validate all runtime
-behavior. Use `--relink` when an actual LabVIEW load/save pass is needed.
+to save. It replaces one kind of package setup hook, the one that resaves VIs
+to repair Call Library paths (`clfn-wildcard`), and no other: a hook that
+does other setup still has to run (see the hook policy in the README). It
+does not validate runtime behavior. Use `--relink` when an actual LabVIEW
+load/save pass is needed.
 
 ## Validation
 
@@ -166,7 +207,17 @@ The automated checks have different scopes:
   not a genuine LabVIEW-generated compiled-code fixture or a runtime test.
 - Unit regressions cover container round trips, qualifiers, path selection,
   source-only metadata, parallel staging, malformed block headers, duplicate
-  logical paths, diagram-removed VIs, and directory-link boundaries.
+  logical paths, diagram-removed VIs, directory-link boundaries, class-API
+  link tails taken from real packages (parent links in LabVIEW 2016/2017
+  files, OpenGDS class lists, dynamic-dispatch calls), and both Call Library
+  wildcard forms in both bitnesses.
+- `clfn-wildcard` was checked by hand, not in CI, on NI's Advanced HTTP Client
+  (19 VIs, 29 links) in a LabVIEW 2026 64-bit venv. The rewritten links match
+  the LabVIEW 2025 copy that NI's PostInstall hook had resaved, and LabVIEW
+  2026's own save of the fixed file (`Save Buffer Probe.vi`). On G-Image
+  (21 links) the result names the same wildcard as the clean copies its hook
+  unzips, with the 64-bit DLL as the path where those name the 32-bit one
+  they were saved with.
 - CI's real-package E2E suite installs LUnit (`astemes_lib_lunit`) and G-Image
   (`dataflow_g_lib_g_image`) with their dependencies in NI's LabVIEW 2026 Q3
   containers. It checks default linkfix installation separately from LabVIEW

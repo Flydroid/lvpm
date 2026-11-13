@@ -1,0 +1,7 @@
+# Steps dist puts into release.yml before each build (dist-workspace.toml,
+# github-build-setup). rusqlite's bundled SQLite is C, and the musl build
+# compiles it with musl-gcc, as build.yml does.
+- name: Use musl-gcc for the musl build
+  if: runner.os == 'Linux'
+  shell: bash
+  run: echo "CC_x86_64_unknown_linux_musl=musl-gcc" >> "$GITHUB_ENV"

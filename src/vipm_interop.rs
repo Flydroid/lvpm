@@ -36,15 +36,15 @@ pub fn read_toml(path: &Path) -> Result<Project> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading manifest {}", path.display()))?;
     let c = parse_toml(&text).with_context(|| format!("parsing VIPM manifest {}", path.display()))?;
-    eprintln!("manifest: {} (VIPM format, converted)", path.display());
+    elog!("manifest: {} (VIPM format, converted)", path.display());
     if !c.unused.is_empty() {
-        eprintln!("  not used: {}", c.unused.join(", "));
+        elog!("  not used: {}", c.unused.join(", "));
     }
     if let Some(lv) = &c.project.labview {
-        eprintln!("  labview-version {lv:?} read as minimum labview = {lv:?}");
+        elog!("  labview-version {lv:?} read as minimum labview = {lv:?}");
     }
     if c.project.groups.iter().any(|(n, _)| n == DEV_GROUP) {
-        eprintln!("  [dev-dependencies] read as group {DEV_GROUP:?} (install with --with {DEV_GROUP})");
+        elog!("  [dev-dependencies] read as group {DEV_GROUP:?} (install with --with {DEV_GROUP})");
     }
     Ok(c.project)
 }

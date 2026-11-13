@@ -114,7 +114,7 @@ pub fn ensure_vi_server(target: &LvTarget, wait: Duration) -> Result<u16> {
         bail!("no {} in {}", exe.file_name().unwrap_or_default().to_string_lossy(), target.path.display());
     }
     crate::launch::wait_port_released(port);
-    eprintln!("starting {} and waiting for VI Server on port {port}...", target.label());
+    elog!("starting {} and waiting for VI Server on port {port}...", target.label());
     // Detached child: LabVIEW outlives lvpm by design — and must not keep
     // lvpm's own pipes open while it does (see `launch::spawn_detached`).
     crate::launch::spawn_detached(&mut std::process::Command::new(&exe))

@@ -5,7 +5,7 @@ stable, and what is still missing. The [README](../README.md#commands) is
 the user reference; this file is for deciding. The code changes ride on the
 `main.rs` split in [refactor-main.md](refactor-main.md).
 
-Includes the linkfix install default on `feature/linkfix` (0.2.1).
+Includes the linkfix install default (0.2.1).
 
 ## What "stable" will promise
 
@@ -39,7 +39,7 @@ lvpm [--labview-version YYYY] [--prefix DIR | --project DIR] [--global] [--refre
   run-hooks <pkg> | --all       [--timeout SECS]
   refresh                       [--timeout SECS]
   start                         [--wait SECS]
-  launch [<lvproj>]
+  launch [<lvproj>]             [--ini KEY=VALUE]... [--no-check]
   venv create | status | remove [-y]
   config get <key> | set <key> [<value>...]
   cache add <path>

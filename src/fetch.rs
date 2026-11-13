@@ -9,6 +9,7 @@ use crate::cache::{Cache, LocalEntry};
 use crate::index::{self, Entry};
 use anyhow::{Context, Result, ensure};
 use reqwest::blocking::Client;
+use std::time::Duration;
 
 /// Return archive bytes, checking SHA-256 on cache reads and MD5 when advertised.
 ///
@@ -35,15 +36,60 @@ pub fn package(cache: &Cache, client: &Client, entry: &Entry) -> Result<Vec<u8>>
         && let Some(bytes) = cache.load(&sha256)?
         && verify_md5(entry, &bytes).is_ok()
     {
+        log::debug!("{} {}: from cache sha256:{sha256}", entry.name, entry.version);
         return Ok(bytes);
     }
-    let bytes = client.get(&entry.url).send()
-        .with_context(|| format!("downloading {}", entry.url))?
-        .error_for_status()?.bytes()?.to_vec();
+    let started = std::time::Instant::now();
+    let bytes = download(client, &entry.url, RETRY_DELAYS)?;
+    log::debug!(
+        "{} {}: downloaded {} ({} bytes, {:.1}s)",
+        entry.name,
+        entry.version,
+        entry.url,
+        bytes.len(),
+        started.elapsed().as_secs_f64()
+    );
     let md5 = verify_md5(entry, &bytes)?;
     let sha256 = cache.store(&bytes)?;
     cache.record_download(&LocalEntry::from(entry), &entry.url, &sha256, &md5)?;
     Ok(bytes)
+}
+
+/// Pauses before the second and third attempt. Package servers (JKI's S3
+/// redirect in particular) now and then close a connection mid-transfer; one
+/// such hiccup should not abort a 47-package install.
+const RETRY_DELAYS: &[Duration] = &[Duration::from_secs(2), Duration::from_secs(5)];
+
+/// GET `url`, retrying transient failures once per entry in `delays`.
+///
+/// Transient: no connection, a timeout, a body cut short, or a 408/429/5xx
+/// answer. Any other HTTP status is the server's final word and fails at once.
+fn download(client: &Client, url: &str, delays: &[Duration]) -> Result<Vec<u8>> {
+    let mut attempt = 0;
+    loop {
+        let result = client.get(url).send().and_then(|r| r.error_for_status()).and_then(|r| r.bytes());
+        match result {
+            Ok(bytes) => return Ok(bytes.to_vec()),
+            Err(e) if attempt < delays.len() && transient(&e) => {
+                elog!();
+                ewlog!("  download failed ({e}); retrying in {}s", delays[attempt].as_secs());
+                std::thread::sleep(delays[attempt]);
+                attempt += 1;
+            }
+            Err(e) => {
+                log::debug!("downloading {url}: {e:?}");
+                let tries = match attempt { 0 => String::new(), n => format!(" after {} attempts", n + 1) };
+                return Err(anyhow::Error::new(e).context(format!("downloading {url}{tries}")));
+            }
+        }
+    }
+}
+
+fn transient(e: &reqwest::Error) -> bool {
+    match e.status() {
+        Some(s) => s.is_server_error() || s.as_u16() == 408 || s.as_u16() == 429,
+        None => e.is_connect() || e.is_timeout() || e.is_request() || e.is_body() || e.is_decode(),
+    }
 }
 
 /// Compute lowercase MD5, rejecting bytes that differ from the advertised hash.
@@ -93,6 +139,54 @@ mod tests {
             stream.write_all(bytes).unwrap();
         });
         (url, thread)
+    }
+
+    /// Serve one connection per response; `None` promises a body and hangs up
+    /// half-way, the way the JKI server did.
+    fn scripted_server(responses: Vec<Option<&'static str>>) -> (String, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/package.vip", listener.local_addr().unwrap());
+        let thread = std::thread::spawn(move || {
+            for response in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0];
+                    stream.read_exact(&mut byte).unwrap();
+                    request.push(byte[0]);
+                }
+                match response {
+                    Some(r) => stream.write_all(r.as_bytes()).unwrap(),
+                    None => stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\npartial").unwrap(),
+                }
+            }
+        });
+        (url, thread)
+    }
+
+    #[test]
+    fn a_dropped_connection_is_retried() {
+        let ok = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nbytes";
+        let busy = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        let (url, thread) = scripted_server(vec![None, Some(busy), Some(ok)]);
+        let delays = [Duration::ZERO, Duration::ZERO];
+        assert_eq!(download(&Client::new(), &url, &delays).unwrap(), b"bytes");
+        thread.join().unwrap();
+    }
+
+    #[test]
+    fn retries_give_up_and_a_client_error_is_final() {
+        let (url, thread) = scripted_server(vec![None, None]);
+        let err = download(&Client::new(), &url, &[Duration::ZERO]).unwrap_err();
+        assert!(format!("{err:#}").contains("after 2 attempts"), "{err:#}");
+        thread.join().unwrap();
+
+        let missing = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        let (url, thread) = scripted_server(vec![Some(missing)]);
+        let err = download(&Client::new(), &url, &[Duration::ZERO, Duration::ZERO]).unwrap_err();
+        assert!(format!("{err:#}").contains("404"), "{err:#}");
+        assert!(!format!("{err:#}").contains("attempts"), "{err:#}");
+        thread.join().unwrap();
     }
 
     #[test]

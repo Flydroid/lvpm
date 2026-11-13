@@ -36,22 +36,34 @@ Not affiliated with JKI or NI. Working, in active development; see
 ## Install lvpm
 
 Windows 10/11 with LabVIEW 2020 or later. On Linux, lvpm is verified against
-LabVIEW 2026 Q3 in NI's container image; take `lvpm-<version>-linux-x64.tar.gz`
-from the artifacts of a CI run, or build it from source, and see
-[docs/linux.md](docs/linux.md) for what differs there.
+LabVIEW 2026 Q3 in NI's container image; install it with
+[the Linux script](#on-linux) (from v0.3.1), or build it from source, and
+see [docs/linux.md](docs/linux.md) for what differs there.
+
+Every option installs two files: `lvpm` (`lvpm.exe`) and `relink-package.vi` next to
+it. lvpm hands the VI to LabVIEW for `--relink`, and refuses one that did not
+come with the same release, so keep them together.
+
+### With the installer
+
+Download `lvpm-x86_64-pc-windows-msvc.msi` from the
+[Releases](https://github.com/labview-package-manager/lvpm/releases) page and run it. It
+installs per-user to `%LOCALAPPDATA%\lvpm\bin` without elevation, adds that
+folder to your user `PATH`, and can be removed under **Settings → Apps**. A
+newer MSI upgrades it in place.
 
 ### With the install script
 
-[scripts/install.ps1](scripts/install.ps1) fetches the latest release,
-verifies the zip's SHA-256 against the digest GitHub records for it (and
-against a `SHA256SUMS` file when a release ships one), extracts `lvpm.exe`
-to `%LOCALAPPDATA%\lvpm\bin`, removes Windows' mark-of-the-web from the
-files and adds the folder to your user `PATH`. It runs nothing it downloaded
-except `lvpm --version` at the end. Read it first; it is short.
+[scripts/install.ps1](scripts/install.ps1) fetches the latest release's
+MSI, verifies its SHA-256 against the digest GitHub records for it (and
+against the release's checksum files), and runs it quietly: the same
+per-user install as above, without the dialogs. The only things it runs are
+msiexec on the verified MSI and `lvpm --version` at the end. Read it first;
+it is short.
 
 ```powershell
 cd $env:TEMP
-irm https://raw.githubusercontent.com/Flydroid/lvpm/main/scripts/install.ps1 -OutFile install.ps1
+irm https://raw.githubusercontent.com/labview-package-manager/lvpm/main/scripts/install.ps1 -OutFile install.ps1
 .\install.ps1
 ```
 
@@ -61,17 +73,38 @@ to. `Access to the path 'C:\WINDOWS\system32\install.ps1' is denied` means
 you are in a directory that is not yours, not that anything is wrong with
 the download. lvpm installs per-user and needs no elevation.
 
-Options: `-Version v0.2.0` pins a release, `-InstallDir <DIR>` and
-`-NoPath` control where it goes, `-Sha256 <hash>` adds a hash you obtained
+Options: `-Version v0.2.0` pins a release, `-Portable` copies the files from
+the zip instead (no uninstall entry; implied by `-InstallDir <DIR>`, and used
+for releases before v0.3.1, which have no MSI), `-NoPath` leaves your `PATH`
+alone, `-Sha256 <hash>` adds a hash you obtained
 elsewhere as a further check, `-Stable` skips pre-releases. If PowerShell
 refuses to run scripts:
 `powershell -ExecutionPolicy Bypass -File .\install.ps1`.
 
 ### By hand
 
-Download `lvpm-<version>-windows-x64.zip` from the
-[Releases](https://github.com/Flydroid/lvpm/releases) page, right-click it,
+Download `lvpm-x86_64-pc-windows-msvc.zip` from the
+[Releases](https://github.com/labview-package-manager/lvpm/releases) page, right-click it,
 tick **Unblock**, extract, and put the folder on your `PATH`.
+
+### On Linux
+
+[scripts/install.sh](scripts/install.sh) does for Linux x64 what
+`install.ps1` does with the zip: it fetches the latest release's static
+tarball (`lvpm-x86_64-unknown-linux-musl.tar.gz`), verifies its SHA-256 the
+same way, and puts `lvpm` and `relink-package.vi` in `~/.local/bin`, or in
+`/usr/local/bin` when run as root, as in a `Dockerfile`. It needs curl, tar,
+sed, awk and `sha256sum`, and no root.
+
+```sh
+curl -fsSLO https://raw.githubusercontent.com/labview-package-manager/lvpm/main/scripts/install.sh
+sh install.sh
+```
+
+Options: `--version v0.3.1`, `--stable`, `--install-dir <dir>`,
+`--sha256 <hash>`, `--archive <file>` with `--sha256` for a local tarball,
+and `--build-local` to build and install this checkout. It does not edit
+your shell profile; it says so when the folder is not on `PATH`.
 
 ### From source
 
@@ -91,8 +124,8 @@ From a Windows checkout with the build tools installed:
 ```
 
 This runs `cargo build --release --locked`, packages the executable,
-README and licenses into a temporary zip, verifies its SHA-256, and uses
-the normal release installation path. It replaces any existing per-user
+the relink VI, README and licenses into a temporary zip, verifies its SHA-256, and uses
+the portable installation path (no MSI, so no WiX needed). It replaces any existing per-user
 lvpm in `%LOCALAPPDATA%\lvpm\bin` and adds that directory to your user
 `PATH`. No GitHub release or cargo-dist setup is required. The version
 remains the one declared in Cargo.toml; temporary packaging files are removed.
@@ -241,6 +274,12 @@ $ lvpm launch MyProject.lvproj    # a LabVIEW that sees the venv
   venv's log in `.lv-venv/temp`. The venv starts with an empty `LabVIEW Data`, so personal
   customisations kept there (icon templates, right-click plugins) are not
   available in it.
+  Before starting, `launch` checks the venv's install records against the
+  manifest's `[dependencies]` (`main` only): every package installed at a
+  version the manifest allows, all of its recorded files present, the relink
+  pass done where `relink = true`, and PostInstall run where the hook policy
+  runs it. It refuses on a mismatch and names each one; `--no-check` starts
+  anyway. Files edited or resaved since install are not detected.
 
 The default layout is:
 
@@ -252,6 +291,38 @@ The default layout is:
   labview.ini          venv-specific LabVIEW settings
   objcache/ data/ temp/  isolated LabVIEW runtime files
 ```
+
+lvpm keeps its logs in one folder, `%LOCALAPPDATA%\lvpm\logs` on Windows (the
+`log.dir` [setting](#configuration) moves it). Each venv has its own continuous log
+there, named after its project's path, cut from the left to 80 characters, plus
+a hash of the venv's path that keeps similar paths apart:
+
+```text
+%LOCALAPPDATA%\lvpm\logs\
+  lvpm.log                       commands outside a venv, global installs
+  c--git-my-project-3fa2c1d0.log  every command run on the venv of C:\Git\my-project
+```
+
+`lvpm venv create` and `lvpm venv status` show the venv's log file. Each command
+appends a header (the command, its directory and the venv), everything it
+printed, detail it does not print, and how it ended (`---- done` or
+`---- failed: …`). Each line carries a UTC timestamp, the process id and a
+level:
+
+| Level   | What goes there                                                                        |
+| ------- | -------------------------------------------------------------------------------------- |
+| `error` | why a command failed                                                                   |
+| `warn`  | failed hooks, failed uninstalls, files linkfix skipped, download retries               |
+| `info`  | everything the command printed                                                         |
+| `debug` | file only: every file linkfix changed, every download (URL, size, time) or cache hit   |
+| `trace` | not used yet                                                                           |
+
+`--log-level <LEVEL>` (or `LVPM_LOG`) sets the lowest level written; the default is
+`debug`, and `off` writes nothing. The console output is the same at every level.
+At 10 MB a log moves to `<name>.log.1`, replacing the previous one. A venv
+moved to another path starts a new log; the old one stays. Venvs created
+before lvpm 0.3.1 kept their log in `.lv-venv/logs/`, which lvpm no longer
+writes to.
 
 How it works: the `packages/` directory is an [LVAddons](https://labviewwiki.org/wiki/LVAddons)
 location, one addon per package, each mirroring the LabVIEW install dir
@@ -344,10 +415,12 @@ saved for LabVIEW 2020, so any LabVIEW from 2020 on can load it.
   fresh reference and backoff.
 - `lvpm relink <name>` / `lvpm relink --all` reruns the pass from the
   install manifests, without reinstalling.
-- The relink VI is compiled into the `lvpm` binary and unpacked to
-  `%LOCALAPPDATA%\lvpm\tools\<hash>\` on first use, so there is nothing to
-  install beside the executable; `LVPM_RELINK_VI=<path>` runs a VI from disk
-  instead.
+- The relink VI ships beside the executable as `relink-package.vi` (a
+  source build uses `src/lv-src/` in its checkout) and is copied to
+  `%LOCALAPPDATA%\lvpm\tools\<hash>\` on first use. lvpm records the VI's
+  hash at build time and refuses a different one; `LVPM_RELINK_VI=<path>`
+  runs a VI from disk instead, unchecked. It used to be compiled into the
+  executable, which Microsoft Defender took for a dropper.
 
 ### Script-VI hooks
 
@@ -364,18 +437,45 @@ dialogs over the install.
 | `PreUninstall.vi`  | before the package's files are removed                                                                            |
 | `PostUninstall.vi` | after removal (uninstall hooks are extracted at install time; the archive is long gone when uninstall needs them) |
 
-Hook failures are reported, never fatal: the files are installed either way,
-and an uninstall is never left half-done. `--no-hooks` skips them, and
-`lvpm run-hooks <name>` reruns a PostInstall that failed. After the hooks,
-a global `install` rebuilds the palettes and menus so a package's palette
-and Tools entries appear without restarting LabVIEW; `lvpm refresh` does
-that step alone.
+**Which hooks run.** Hooks were written for VIPM installing into the LabVIEW
+installation, and many change that installation: they edit palette files under
+`menus\`, resave NI's VIs under `resource\`, or run `msiexec`. Run from a venv
+they still change the installation, which a venv must leave alone. So:
 
-A hook is the one thing a venv genuinely needs: `ni_lib_advanced_http_client_api`
-ships both `lvwebclient_32.dll` and `lvwebclient_64.dll` but records the 32-bit
-one in all 19 of its VIs, and its `PostInstall` rewrites that to the bitness of
-the LabVIEW it landed in. Without it those VIs are broken (error 1003) wherever
-they were installed.
+| Destination                 | Default                         | Per dependency in `lvpm.toml`             |
+| --------------------------- | ------------------------------- | ----------------------------------------- |
+| venv                        | no hooks                        | `hooks = "run"` enables that package's    |
+| LabVIEW installation        | all hooks, as VIPM              | `hooks = "skip"` disables that package's  |
+| headless (`LV_RTE_HEADLESS`) | no hooks                        | `hooks = "run"` enables that package's    |
+
+```toml
+[dependencies]
+my_lib_with_setup = { version = "2.1.0.4", hooks = "run" }
+wiresmith_technology_lib_g_cli = { version = "3.0.1.98", hooks = "skip" }
+```
+
+`--no-hooks` runs none and `--hooks` runs all, overriding the manifest. A
+PostInstall hook the policy holds back is recorded as `skipped` (see
+`lvpm list`). It runs at the next install once the policy allows it, or now
+with `lvpm run-hooks <name>`, which runs a named package's hook whatever the
+policy says. `lvpm run-hooks --all` follows the policy. Uninstall hooks never
+run in a venv: its LabVIEW has to be closed before the files can go.
+
+Measured on the 22 hooks of a 50-package project: six are harmful from a
+venv, and the rest open documentation pages, recompile examples or leave
+markers. The one that was needed is NI's Advanced HTTP Client's. It repairs
+the Call Library path that VI Package Builder broke when it built the package,
+a known VIPM issue: [VI Package Builder removes cross platform wildcards from
+Call Library Function nodes during the build process](https://support.vipm.io/hc/en-us/articles/360053941572-VI-Package-Builder-removes-cross-platform-wildcards-from-Call-Library-Function-nodes-during-the-build-process).
+Linkfix's `clfn-wildcard` method now makes that repair itself (see
+[Linkfix](docs/linkfix.md#call-library-wildcards)). Dataflow G's G-Image
+works around the same issue differently: its hook unzips clean copies of its
+VIs over the installed ones. linkfix covers that one too.
+
+Hook failures are reported, never fatal: the files are installed either way,
+and an uninstall is never left half-done. After the hooks, a global `install`
+rebuilds the palettes and menus so a package's palette and Tools entries
+appear without restarting LabVIEW; `lvpm refresh` does that step alone.
 
 ### VI Server
 
@@ -540,6 +640,7 @@ empty value counts as unset. Precedence, highest first:
 | `LVPM_CONFIG_CACHE` | `%LOCALAPPDATA%\lvpm\cache` (Linux: `$XDG_CACHE_HOME/lvpm/cache`, else `~/.cache/lvpm/cache`) | Where the cache DB, feed bodies, and imported package archives live |
 | `LVPM_CONFIG_SOURCES_LOCAL` | Empty | Local `.vip` directories; separate paths with `;` on Windows or `:` on Linux |
 | `LVPM_CONFIG_VENV_DIR` | `.lv-venv` | Project-relative venv directory (or an absolute path) |
+| `LVPM_CONFIG_LOG_DIR` | `%LOCALAPPDATA%\lvpm\logs` (Linux: `lvpm/logs` in the cache folder) | Where lvpm's logs go: `lvpm.log` and one file per venv |
 
 ```powershell
 lvpm config set sources.local D:\LabVIEW\Packages
@@ -547,6 +648,7 @@ lvpm config get sources.local
 lvpm config set sources.local                 # clear configured local sources
 lvpm config set venv.dir .venv
 lvpm config get venv.dir
+lvpm config set log.dir D:\lvpm-logs
 # Or set LVPM_CONFIG_SOURCES_LOCAL for this shell; it overrides config.toml.
 $env:LVPM_CONFIG_SOURCES_LOCAL = 'D:\LabVIEW\Packages;E:\MorePackages'
 # Relative venv.dir values resolve from each project root; absolute paths are used as-is.
@@ -561,8 +663,9 @@ runs.
 
 - `Replace Mode = If Newer` only writes when the file is absent; doing it
   properly means comparing archive timestamps against disk.
-- No dependency conflict resolution: the first resolution of a name wins,
-  and a floor resolves to the newest version satisfying it.
+- No dependency conflict resolution: each package gets the newest version
+  meeting the highest floor anything asks for, and a manifest pin always
+  wins (with a warning when a dependent asks for more).
 - No mass compile; LabVIEW recompiles installed VIs on first load.
 - A hook VI's own `error out` is not read back. A hook that fails internally
   but runs to completion reports as ok.
@@ -589,6 +692,7 @@ runs.
 | Module                         | Responsibility                                                                                                          |
 | ------------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
 | `main.rs`                      | The CLI: commands, target and venv selection, and install/uninstall orchestration                                       |
+| `logging.rs`                   | The per-venv log file, and the `log!` family of macros that print a line and log it                                    |
 | `index.rs`                     | Fetch and parse package directories (`.ogpd` / `index.vipr`), resolve names to versions                                |
 | `resolve.rs`                   | Resolve requested packages and dependencies into an installation order                                                  |
 | `dependency.rs`                | Package dependency metadata and dependency-aware uninstall planning                                                     |
@@ -600,12 +704,14 @@ runs.
 | `install.rs`                   | Plan, unpack, extract hook VIs, record a manifest, uninstall                                                            |
 | `venv.rs`                      | A project's `.lv-venv/` venv by default: binding, lookup from the working directory, `lvpm venv`                       |
 | `launch.rs`                    | Start LabVIEW on a venv: the `-pref` ini, readiness by handshake, detached spawning                                     |
-| `relink.rs`                    | Drive the embedded relink VI over installed folders; folder collapsing and retries                                      |
+| `relink.rs`                    | Drive the shipped relink VI over installed folders; folder collapsing and retries                                       |
 | `refresh.rs`                   | Rebuild palettes and menus through LabVIEW's own shipping VIs                                                           |
 | `viserver.rs`                  | The VI Server TCP protocol: connection, methods, flattened data                                                         |
 | `version.rs`                   | Package version ordering: OGPT `version-release`, VIPM's four-part form; not semver                                     |
-| `src/lv-src/relink-package.vi` | The relink VI embedded into the executable at build time (LabVIEW 2020)                                                 |
-| `scripts/install.ps1`          | Download, verify and install the latest release                                                                         |
+| `src/lv-src/relink-package.vi` | The relink VI, shipped next to the executable; `build.rs` records its hash (LabVIEW 2020)                               |
+| `scripts/install.ps1`          | Download, verify and install the latest release (the MSI, or the zip with `-Portable`)                                 |
+| `scripts/install.sh`           | The same for Linux x64, from the static tarball                                                                         |
+| `dist-workspace.toml`, `wix/`  | Releases: dist builds the archives and the per-user MSI when a version tag is pushed (`release.yml`)                    |
 | `e2e/`                         | `lvpm-e2e`: end-to-end checks against LabVIEW for Linux and for Windows in NI's container images, with local test packages and with public ones (the LabVIEW tree must come out of install and uninstall unchanged) |
 
 ## License

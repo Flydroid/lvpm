@@ -12,7 +12,7 @@
 //! project uses that project's venv; `--project <DIR>` names one from outside,
 //! and `--global` says the installation itself is meant.
 
-use crate::config;
+use crate::{config, launch, logging};
 use crate::project;
 use crate::target::{self, LvTarget, Roots};
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -127,6 +127,12 @@ impl Venv {
         self.dir.join("temp")
     }
 
+    /// lvpm's own log of every command run on this venv: in lvpm's log
+    /// folder, not in the venv, named after the project (`logging.rs`).
+    pub fn log_path(&self) -> PathBuf {
+        logging::venv_log_path(&self.repo, &self.dir)
+    }
+
     /// The process id of the LabVIEW lvpm last started on this venv.
     pub fn pid_path(&self) -> PathBuf {
         self.dir.join("labview.pid")
@@ -199,13 +205,19 @@ pub fn find_for_removal(project: Option<&Path>, cwd: &Path) -> Result<Option<Ven
 }
 
 fn find_inner(project: Option<&Path>, cwd: &Path, allow_legacy: bool) -> Result<Option<Venv>> {
-    match project {
-        Some(repo) => load_inner(repo, allow_legacy).map(Some),
+    let v = match project {
+        Some(repo) => Some(load_inner(repo, allow_legacy)?),
         None => match locate(cwd)? {
-            Some(repo) => load_inner(&repo, allow_legacy).map(Some),
-            None => Ok(None),
+            Some(repo) => Some(load_inner(&repo, allow_legacy)?),
+            None => None,
         },
+    };
+    // A command on a venv logs into the venv's file. Removal too: the file is
+    // outside the folder it deletes.
+    if let Some(v) = &v {
+        logging::attach_venv(&v.repo, &v.dir);
     }
+    Ok(v)
 }
 
 fn load_inner(repo: &Path, allow_legacy: bool) -> Result<Venv> {
@@ -322,7 +334,7 @@ pub fn create(
             format!("[project]\nname = \"{name}\"\nlabview = \"{}\"\n\n[dependencies]\n", target.year()),
         )
         .with_context(|| format!("writing {}", manifest_path.display()))?;
-        eprintln!("wrote {}", manifest_path.display());
+        elog!("wrote {}", manifest_path.display());
     }
 
     std::fs::create_dir_all(dir.join("packages")).with_context(|| format!("creating {}", dir.display()))?;
@@ -349,15 +361,16 @@ pub fn create(
     // for this LabVIEW; from now on it is the venv's, and what is set in the
     // venv IDE stays in it. Written before the binding: the binding is what
     // makes a venv exist, so a failure here leaves nothing a retry trips on.
-    crate::launch::write_ini(&v, &[])?;
+    launch::write_ini(&v, &[])?;
     std::fs::write(binding_path(&v.dir), serde_json::to_string_pretty(&b)?)?;
+    logging::attach_venv(&v.repo, &v.dir);
     Ok(v)
 }
 
 /// Delete the venv — payload, store, binding, all of it.
 pub fn remove(v: &Venv, yes: bool) -> Result<()> {
     if !yes {
-        eprint!("delete {} and everything installed in it? [y/N] ", v.dir.display());
+        elogp!("delete {} and everything installed in it? [y/N] ", v.dir.display());
         let mut line = String::new();
         std::io::stdin().read_line(&mut line)?;
         if !line.trim().eq_ignore_ascii_case("y") {
@@ -366,12 +379,12 @@ pub fn remove(v: &Venv, yes: bool) -> Result<()> {
     }
     std::fs::remove_dir_all(&v.dir).with_context(|| {
         let mut why = format!("removing {}", v.dir.display());
-        if crate::launch::is_listening(v.port) {
+        if launch::is_listening(v.port) {
             why.push_str(" — a LabVIEW is running on this venv and holds files open; close it first");
         }
         why
     })?;
-    println!("removed {}", v.dir.display());
+    log!("removed {}", v.dir.display());
     Ok(())
 }
 
@@ -379,15 +392,20 @@ pub fn remove(v: &Venv, yes: bool) -> Result<()> {
 /// instance and a later `lvpm install` agree on where to meet: a hash of the
 /// venv's path into 3400–3999, clear of the 33xx LabVIEW's own defaults use.
 pub fn port_for(dir: &Path) -> u16 {
+    3400 + (path_hash(dir) % 600) as u16
+}
+
+/// A venv folder's path as a number: FNV-1a, 64-bit, over the path lowercased
+/// with `/` separators — small, dependency-free, and good enough to spread a
+/// handful of repo paths across ports and log names.
+pub fn path_hash(dir: &Path) -> u64 {
     let key = dir.to_string_lossy().to_lowercase().replace('\\', "/");
-    // FNV-1a, 64-bit — small, dependency-free, and good enough to spread a
-    // handful of repo paths across six hundred ports.
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in key.bytes() {
         h ^= b as u64;
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
     }
-    3400 + (h % 600) as u16
+    h
 }
 
 #[cfg(test)]
@@ -486,7 +504,7 @@ mod tests {
         assert_eq!(v.roots_for_pkg("pkg").unwrap().application, dir.join("packages").join("pkg").join("1"));
 
         std::fs::write(v.ini_path(), "[LabVIEW]\ncustom=True\n").unwrap();
-        crate::launch::write_ini(&v, &[]).unwrap();
+        launch::write_ini(&v, &[]).unwrap();
         let ini = std::fs::read_to_string(v.ini_path()).unwrap();
         let location = v.packages_dir().to_string_lossy().into_owned();
         let location = if location.contains(' ') { format!("\"{location}\"") } else { location };

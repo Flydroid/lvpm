@@ -6,6 +6,10 @@ description = "End-to-end checks of lvpm against LabVIEW in NI's container image
 license = "MIT OR Apache-2.0"
 publish = false
 
+# Not part of a release (dist-workspace.toml).
+[package.metadata.dist]
+dist = false
+
 [dependencies]
 anyhow = "1.0.104"
 assert_cmd = "2.2.2"

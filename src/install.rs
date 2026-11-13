@@ -12,6 +12,20 @@ use serde::{Deserialize, Serialize};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+/// A hook's state on an installed package. A hook is owed from the moment
+/// its package's files are copied until it has run, whichever command runs
+/// it: an install that stops part way leaves `Pending` for the next one.
+/// `Skipped` is a hook the hook policy held back (a venv runs none unless the
+/// manifest says `hooks = "run"`); it runs once the policy allows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "lowercase")]
+pub enum HookState {
+    Pending,
+    Ran { at: u64 },
+    Failed { at: u64, error: String },
+    Skipped { at: u64 },
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Manifest {
     pub name: String,
@@ -48,6 +62,10 @@ pub struct Manifest {
     /// and be retried.
     #[serde(default)]
     pub post_install_vi: Option<String>,
+    /// Where that PostInstall hook stands. `None` on records written before
+    /// this was tracked: whether it ran is unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_install: Option<HookState>,
     /// Where `PreInstall.vi` was extracted to, when the package ships one. It
     /// has already run by the time this manifest exists — kept for the record
     /// and so uninstall can clean it up.
@@ -286,14 +304,21 @@ pub fn apply(
         },
         files: written,
         dependencies,
+        // PostInstall is not listed: its state is `post_install`. In a venv
+        // PreInstall cannot run (its LabVIEW starts after the copy) and the
+        // uninstall hooks do not run either; globally PreInstall has run by
+        // now and the uninstall hooks wait in the copies extracted above.
         skipped_hooks: match roots.venv() {
-            Some(_) => spec.script_vis.iter().map(|(h, v)| format!("{h}={v}")).collect(),
-            // PreInstall has run by now, PostInstall runs after the relink
-            // pass and is recorded here only if it fails, and the uninstall
-            // hooks wait for `lvpm uninstall` in the copies extracted above.
+            Some(_) => spec
+                .script_vis
+                .iter()
+                .filter(|(h, _)| h != "PostInstall")
+                .map(|(h, v)| format!("{h}={v}"))
+                .collect(),
             None => Vec::new(),
         },
         relinked: false,
+        post_install: post_install_vi.as_ref().map(|_| HookState::Pending),
         post_install_vi: post_install_vi.map(|p| p.to_string_lossy().replace('\\', "/")),
         pre_install_vi: pre_install_vi.map(|p| p.to_string_lossy().replace('\\', "/")),
         pre_uninstall_vi: pre_uninstall_vi.map(|p| p.to_string_lossy().replace('\\', "/")),
@@ -353,6 +378,21 @@ pub fn mark_relinked(roots: &Roots, name: &str) -> Result<()> {
     }
     m.relinked = true;
     write_manifest(roots, &m)
+}
+
+/// Record how the package's PostInstall hook went.
+pub fn set_post_install(roots: &Roots, name: &str, state: HookState) -> Result<()> {
+    let mut m = read_manifest(roots, name)?;
+    m.post_install = Some(state);
+    write_manifest(roots, &m)
+}
+
+/// Now, as recorded in `HookState`.
+pub fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Record a hook this install declared and did not run, so `lvpm list` says
@@ -422,6 +462,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn hook_state_is_recorded_and_older_records_read_as_unknown() {
+        let old = r#"{"name":"p","version":"1","display_name":null,"installed_at":0,"target":"t",
+            "files":[],"dependencies":[],"skipped_hooks":["PostInstall=x.vi"],"post_install_vi":"h.vi"}"#;
+        let m: Manifest = serde_json::from_str(old).unwrap();
+        assert_eq!(m.post_install, None);
+
+        for state in [
+            HookState::Pending,
+            HookState::Ran { at: 5 },
+            HookState::Failed { at: 6, error: "boom".into() },
+        ] {
+            let mut m: Manifest = serde_json::from_str(old).unwrap();
+            m.post_install = Some(state.clone());
+            let text = serde_json::to_string(&m).unwrap();
+            let back: Manifest = serde_json::from_str(&text).unwrap();
+            assert_eq!(back.post_install, Some(state));
+        }
+        let text = serde_json::to_string(&HookState::Ran { at: 5 }).unwrap();
+        assert_eq!(text, r#"{"state":"ran","at":5}"#);
+    }
+
+    #[test]
     fn uninstall_prunes_package_but_preserves_packages_directory_and_state() {
         let dir = std::env::temp_dir().join(format!("lvpm-uninstall-layout-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -435,7 +497,7 @@ mod tests {
             name: "example".into(), version: "1".into(), display_name: None, installed_at: 0,
             target: "test".into(), files: vec![payload.to_string_lossy().into_owned()], dependencies: vec![],
             skipped_hooks: vec![], relinked: false, relink_folders: vec![],
-            post_install_vi: None, pre_install_vi: None, pre_uninstall_vi: None,
+            post_install_vi: None, post_install: None, pre_install_vi: None, pre_uninstall_vi: None,
             post_uninstall_vi: None, skipped_groups: vec![],
         };
         write_manifest(&package, &manifest).unwrap();

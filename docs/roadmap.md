@@ -45,10 +45,15 @@ wins over the overlay; `LVAddons.AdditionalLocations` needs LabVIEW 2024 Q1.
   `ni_lib_advanced_http_client_api`: it ships both `lvwebclient_32.dll` and
   `lvwebclient_64.dll` but records the 32-bit one in all 19 VIs, so without
   the hook `Open Session.vi` fails with error 1003; after it, all 19 point at
-  `_64` and the VI runs. `--no-hooks` opts out. Still open: `PreInstall` in a
-  venv (the instance only starts once the files are down), snapshotting the
-  real installation to catch a hook that writes outside the overlay, and
-  per-dependency `hooks = "run" | "skip"` in the manifest.
+  `_64` and the VI runs. `--no-hooks` opts out. Since then: linkfix's
+  `clfn-wildcard` method makes that hook's edit itself (the cause is VIPM's
+  known issue [VI Package Builder removes cross platform wildcards from Call
+  Library Function nodes](https://support.vipm.io/hc/en-us/articles/360053941572-VI-Package-Builder-removes-cross-platform-wildcards-from-Call-Library-Function-nodes-during-the-build-process)), and a venv runs no
+  hooks unless the manifest says `hooks = "run"` for the package (22 hooks
+  measured on NovaXC: six change the LabVIEW installation from a venv, none
+  of the rest is needed). Still open: `PreInstall` in a venv (the instance
+  only starts once the files are down), and snapshotting the real
+  installation to catch a hook that writes outside the overlay.
 - ~~**LabVIEW relink by default.**~~ Inverted: the LabVIEW load/save pass is opt-in behind
   `--relink`, as an alternative to linkfix rather than a subsequent pass.
   Measured across 10 packages saved between LabVIEW 8.6 and 2020,
@@ -113,6 +118,15 @@ wins over the overlay; `LVAddons.AdditionalLocations` needs LabVIEW 2024 Q1.
 - **Shadowing warning.** A package installed both globally and in the venv is
   loaded from the global copy whatever its version. Warn at install and at
   launch, with both versions and the uninstall command that fixes it.
+- **Detect changed package files at launch.** `lvpm launch` checks the
+  install records against the manifest (installed, version, files present,
+  relink and PostInstall state), but a record holds no hashes, so a package
+  VI edited, resaved by LabVIEW or replaced since install passes. Record a
+  hash (and size/mtime as a cheap pre-filter) per file at install, refresh it
+  after linkfix and the relink pass, and compare at launch or in a
+  `lvpm venv check`. Also open: `[dependencies.<name>]` groups are not
+  checked, because the venv does not record which groups it was installed
+  with; transitive dependencies are not checked either.
 - **Duplicate logical paths across addons.** Two venv packages shipping the
   same `vi.lib` file: LabVIEW's (undocumented) scan order picks one. Warn,
   naming the file and both packages.
@@ -151,7 +165,8 @@ Reference and `vipm.toml` comparison: [manifest.md](manifest.md).
   with `--with`, `--without`, `--only`; only `main` installs by default.
   Open: whether `dev` should install by default. Reference in
   [manifest.md](manifest.md#named-dependency-groups).
-- Per-dependency tables: `{ version = "...", hooks = "run", source = "local" }`.
+- Per-dependency tables: `hooks` is done (`{ version = "...", hooks = "run" }`);
+  `source = "local"` is still open.
 - `[venv]` overrides: `dir`, `vi-server-port`, `bitness`.
 - **`vipm.toml` conversion** — done for `--manifest vipm.toml`
   (`src/vipm_interop.rs`: `labview-version`, exact `[dependencies]`,
@@ -184,9 +199,32 @@ records) and make it first-class:
 
 ## Packaging and distribution (from idea.txt)
 
-- **One-command install of a released `lvpm.exe`.** A GitHub Release per tag
-  carrying `lvpm.exe` (built by CI, so the relink VI embedded in it is the one
-  from that commit), and an `install.ps1` at a stable URL for
+- **Authenticode signing through SignPath Foundation** (free code signing for
+  open-source projects) of `lvpm.exe` and the MSI, the lasting answer to
+  Defender and SmartScreen. Open points:
+  - Apply: SignPath Foundation signs only what CI builds from this public
+    repository, under a code signing policy the project publishes (who may
+    approve a release, what gets signed).
+  - Where it fits in `release.yml`: dist builds the zip and the MSI in one
+    job and hashes them there, so signing afterwards invalidates its
+    checksums, and `lvpm.exe` inside the MSI must be signed too. Either a
+    custom dist job that submits the built artifacts to SignPath (its
+    artifact configuration can sign the exe inside the zip and the MSI as
+    well as the MSI itself) and recomputes the checksums, or signing
+    `lvpm.exe` before dist packages it. Check what dist's custom-job hooks
+    allow before choosing.
+  - Each release then waits for an approval in SignPath.
+- **winget, after signing.** A `winget-pkgs` manifest for the MSI gives
+  `winget install lvpm` with hash checks and upgrades. Then the MSI is the
+  main route and `scripts/install.ps1` shrinks to the portable install and
+  `-BuildLocal`: until then it is what spares users SmartScreen's warning on
+  an unsigned MSI and checks the download's SHA-256.
+- **One-command install of a released `lvpm.exe`.** Done from v0.3.1: dist
+  (`dist-workspace.toml`) publishes a GitHub Release per version tag with the
+  archives, a per-user MSI and checksums, each carrying `relink-package.vi`
+  beside the executable, and lvpm refuses a VI from another build. The
+  original idea: a GitHub Release per tag
+  carrying `lvpm.exe` (built by CI), and an `install.ps1` at a stable URL for
   `irm https://…/install.ps1 | iex`: downloads the latest release (or
   `-Version x.y.z`), verifies its checksum, drops it in `%LOCALAPPDATA%\lvpm\bin`,
   adds that to the user `PATH`, prints `lvpm --version`. Motivation: a stale

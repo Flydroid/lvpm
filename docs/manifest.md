@@ -116,13 +116,60 @@ basename without version, e.g. `oglib_error`), and a quoted constraint.
 Rules:
 
 - The version must be quoted. `oglib_array = 6.0` is a TOML float and is
-  rejected, as is any non-string value (tables and arrays included).
+  rejected, as is an array or any other non-string value. The one other
+  form is a dependency table (below).
 - Versions compare component by component the way VIPM numbers them
   (`major.minor.patch.build`); odd but real forms such as `1.0.1-1` are
   accepted as written.
 - Other operators (`<`, `=`, `~`, `^`, ranges) are rejected with an error
   naming the dependency, rather than misread.
 - The install plan lists dependencies before the packages that need them.
+
+### Dependency tables: `hooks` and `relink`
+
+A dependency can be a table instead of a version string, to set whether
+the package's install hooks run and whether LabVIEW relinks it:
+
+```toml
+[dependencies]
+my_lib_with_setup = { version = "2.1.0.4", hooks = "run" }
+wiresmith_technology_lib_g_cli = { version = "3.0.1.98", hooks = "skip" }
+sklein_lib_webview2 = { version = "2.1.1.2", relink = true }
+```
+
+| Key       | Meaning                                                                 |
+| --------- | ----------------------------------------------------------------------- |
+| `version` | Required. The constraint, exactly as in the string form.               |
+| `hooks`   | `"run"` or `"skip"`. Unset: a venv runs none of the package's hooks, a LabVIEW installation runs them all, a headless machine none. |
+| `relink`  | `true`: after linkfix, the install loads and saves the package's VIs in LabVIEW, the pass `lvpm relink` runs. Unset or `false`: linkfix only. |
+
+Since a venv and a headless machine already skip hooks when `hooks` is
+unset, `hooks = "skip"` only changes anything when the manifest installs
+into a LabVIEW installation on a desktop (`lvpm install --global`). There it
+opts a package out of hooks that would otherwise run, as for the G-CLI line
+above. `hooks = "run"` is the opt-in that matters in a venv or headless.
+
+`--no-hooks` and `--hooks` on `lvpm install` override `hooks`; `--relink`
+relinks every package in place of linkfix, whatever `relink` says. To set
+either key for a package that is only a dependency of another, declare it too.
+Both settings also hold in groups. Two groups that set one differently for
+the same package are an error.
+
+`relink = true` is for packages whose VIs only LabVIEW can repair. A .NET
+invoke node stores the index of its method in the assembly. A package built
+against a different build of the assembly than the one it ships (as
+`sklein_lib_webview2` 2.1.1.2 is) loads with broken nodes. Linkfix only
+rewrites link paths, so it cannot fix them; loading and saving in LabVIEW
+looks the methods up by name again. VIPM does this load and save for every
+package by default (its "mass compile after install"), so such a package
+works there by accident.
+
+A table under `[dependencies]` is read as a dependency when its keys are
+`version` and, optionally, `hooks` and `relink`. Any other table is a
+[group](#named-dependency-groups). So a group cannot hold only packages named
+`version`, `hooks` and `relink`.
+
+VIPM does not read dependency tables: a `vipm.toml` keeps the string form.
 
 ### How the manifest resolves
 
@@ -133,9 +180,14 @@ pass:
 
 - Each root asks for what its constraint says. A dependency declared by a
   package's own spec is always treated as a floor.
-- Resolution is depth-first from all roots at once, with no backtracking: the
-  first resolution of a name wins. Pin a version exactly in the manifest when
-  a transitive floor would otherwise pick something you do not want.
+- Resolution is depth-first from all roots at once, with no backtracking.
+  Each package is held to the highest floor anything asks for: the walk
+  repeats until no pass finds a higher one. A root's own constraint is never
+  replaced by a dependency's floor; a pin below one is kept, with a warning
+  naming the dependent. Pin a version exactly in the manifest when a
+  transitive floor would otherwise pick something you do not want.
+- The plan installs every package after the packages it requires; roots keep
+  their manifest order where nothing forces otherwise.
 - A transitive dependency that is already installed at a version satisfying
   its floor is left alone. A root always resolves to what the index says, and
   the installer then decides whether that is a no-op, an upgrade, or a refused
@@ -416,7 +468,9 @@ Tracked in [roadmap.md](roadmap.md#the-manifest-and-the-lockfile---wip):
   - `lvpm.lock` records every group's packages, each tagged with its groups,
     so changing the selection never re-resolves. `lvpm sync` uninstalls
     packages that only unselected groups need.
-- **Per-dependency tables**: `{ version = "...", hooks = "run", source = "..." }`.
+- **Per-dependency tables**: ~~`hooks`~~ done (see
+  [Dependency tables](#dependency-tables-hooks-and-relink)), as is `relink`;
+  `source = "..."` is still open.
 - **`[venv]` overrides**: `dir`, `vi-server-port`, `bitness`.
 - **`vipm.toml` conversion, remaining fields**: `labview-bitness` is checked
   against the selected target once `[venv] bitness` exists. Writing an

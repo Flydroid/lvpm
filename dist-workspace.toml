@@ -1,0 +1,39 @@
+[workspace]
+members = ["cargo:."]
+
+# Releases are built by dist (https://axodotdev.github.io/cargo-dist/): push a
+# tag such as v0.3.1 and .github/workflows/release.yml builds, packages and
+# publishes them. `dist plan` shows what a tag would produce; `dist generate`
+# rewrites release.yml after a change here.
+[dist]
+# The preferred dist version to use in CI (Cargo.toml SemVer syntax)
+cargo-dist-version = "0.34.0"
+# CI backends to support
+ci = "github"
+# Where to host releases
+hosting = "github"
+# Windows x64 (the MSVC build) and static Linux x64: NI's container image is
+# Ubuntu 22.04, older than the runner's glibc.
+targets = ["x86_64-pc-windows-msvc", "x86_64-unknown-linux-musl"]
+# A per-user MSI for Windows. The zip and tarball are published too, and
+# scripts/install.ps1 installs the zip.
+installers = ["msi"]
+# Relink Package.vi ships next to the executable rather than inside it: an
+# unsigned exe that writes a blob out and hands it to another process looks
+# like a dropper to Microsoft Defender. lvpm looks for it beside itself.
+include = ["src/lv-src/relink-package.vi"]
+# gzip rather than xz for the Linux tarball: minimal images (NI's among them)
+# need not have xz-utils, and scripts/install.sh unpacks it with tar -z.
+unix-archive = ".tar.gz"
+# wix/main.wxs is edited by hand (per-user scope, the VI), so dist must not
+# insist that it matches what it would generate.
+allow-dirty = ["msi"]
+# Pull requests only check that the release plan still works; build.yml is
+# what tests them.
+pr-run-mode = "plan"
+# Extra steps before each build in release.yml.
+github-build-setup = "../build-setup.yml"
+
+# rusqlite's bundled SQLite is C, so the musl build needs musl-gcc.
+[dist.dependencies.apt]
+musl-tools = "*"

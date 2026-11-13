@@ -682,28 +682,75 @@ impl LinkSection {
     }
 }
 
-/// A class-API link tail, decoded far enough to re-pad it. Measured layouts
-/// (section-position padding marked `pad`):
+/// A class-API link tail, decoded far enough to re-pad it and to rewrite the
+/// class paths inside it. Layout (section-position padding marked `pad`):
 ///
 /// ```text
-/// LV13   pad4 cache                                  [pad4 offsets]   (heap kinds)
-/// LV16/17 pad4 cache five                            [pad4 offsets]
-/// LV20   pad4 cache u32 n { qual pad2 PTH0 u8 }×n five [pad4 offsets]
+/// pad4 cache
+///   LV16+  u32 n { u32 m, qual×m, PTH0, u8 }×n  u8                  ancestors
+///   LV20+  u32 k { u32 m, qual×m, PTH0, u32 p { u32 m, qual×m, PTH0 }×p }×k   classes
+///   heap   pad4 offsets
+///   DRPI   u8
 /// ```
 ///
-/// `cache` is u64 library version, three bools, and a long string; `five`
-/// is five fixed bytes (`00 00 00 00 ff` on heap kinds). The `n` parent-class
-/// links are what a class with a parent carries from LabVIEW 2020 on. Which
-/// pieces are present is decided by which combination consumes the tail
-/// exactly, so an unfamiliar variant is refused rather than guessed.
+/// `cache` is u64 library version, three bools, and a long string. The
+/// ancestor list names the class's parents, nearest first. The class list
+/// (OpenGDS, GOOP: a class whose parent is in another class library) pairs a
+/// class with its direct parents. Both are usually empty, which read as five
+/// fixed bytes (`00 00 00 00 xx`) before the lists were understood; measured
+/// on 19,000 tails of LabVIEW 9 to 2025 files. Class paths here have no
+/// 2-pad, even at odd positions. A dynamic-dispatch call (`DRPI`) ends with
+/// one more byte after its offset list.
+#[derive(Debug)]
 struct ApiTail {
     cache: Vec<u8>,
-    parents: Option<Vec<ParentLink>>,
-    five: Option<[u8; 5]>,
+    ancestors: Option<(Vec<ParentLink>, u8)>,
+    classes: Option<Vec<ClassParents>>,
     offsets: Option<Vec<u8>>,
+    trailer: Option<u8>,
 }
 
-fn parse_api_tail(t: &[u8], tail_pos: usize, ver: (u32, u32), heap: bool) -> Result<ApiTail> {
+/// A class and its direct parents, as the LabVIEW 2020 class list holds them.
+type ClassParents = (Vec<Vec<u8>>, Pth, Vec<(Vec<Vec<u8>>, Pth)>);
+
+/// `u32 m, qual×m, PTH0` at `q`: a class's qualified name and absolute path.
+fn parse_class_ref(t: &[u8], q: &mut usize) -> Result<(Vec<Vec<u8>>, Pth)> {
+    let m = be32(t, *q)? as usize;
+    ensure!(m <= 64, "qualified name too long");
+    *q += 4;
+    let mut qual = Vec::with_capacity(m);
+    for _ in 0..m {
+        let l = *t.get(*q).context("truncated")? as usize;
+        qual.push(t.get(*q + 1..*q + 1 + l).context("truncated")?.to_vec());
+        *q += 1 + l;
+    }
+    let (pth, e) = Pth::parse(t, *q)?;
+    *q = e;
+    Ok((qual, pth))
+}
+
+fn write_class_ref(qual: &[Vec<u8>], pth: &Pth, out: &mut Vec<u8>) {
+    out.extend_from_slice(&(qual.len() as u32).to_be_bytes());
+    for q in qual {
+        out.push(q.len() as u8);
+        out.extend_from_slice(q);
+    }
+    pth.write(out);
+}
+
+fn parse_api_tail(ident: &[u8; 4], t: &[u8], tail_pos: usize, ver: (u32, u32), heap: bool) -> Result<ApiTail> {
+    let a = read_api_tail(ident, t, tail_pos, ver, heap)
+        .context("class-API link tail has an unknown shape")?;
+    // Every field is kept, so writing it back where it was must give the
+    // same bytes. Anything else means the layout above is wrong for this
+    // object, and the object is refused rather than rewritten.
+    let mut again = Vec::new();
+    emit_api_tail(&a, tail_pos, &mut again);
+    ensure!(again == t, "class-API link tail does not round-trip");
+    Ok(a)
+}
+
+fn read_api_tail(ident: &[u8; 4], t: &[u8], tail_pos: usize, ver: (u32, u32), heap: bool) -> Result<ApiTail> {
     let mut p = pad_to(tail_pos, 4);
     ensure!(t.len() >= p && t[..p].iter().all(|&x| x == 0), "API cache pad is not zero");
     let start = p;
@@ -713,79 +760,72 @@ fn parse_api_tail(t: &[u8], tail_pos: usize, ver: (u32, u32), heap: bool) -> Res
     ensure!(p <= t.len(), "API cache overruns the object");
     let cache = t[start..p].to_vec();
 
-    // Everything after the cache, tried as each plausible shape.
-    let rest_at = p;
-    let try_shape = |with_parents: bool, with_five: bool, with_offsets: bool| -> Result<ApiTail> {
-        let mut q = rest_at;
-        let parents = if with_parents {
-            let n = be32(t, q)? as usize;
-            ensure!(n <= 16, "too many parent links");
+    let mut q = p;
+    let ancestors = if ver >= (16, 0) {
+        let n = be32(t, q)? as usize;
+        ensure!(n <= 64, "{n} ancestor links");
+        q += 4;
+        let mut v = Vec::with_capacity(n);
+        for _ in 0..n {
+            let (qual, pth) = parse_class_ref(t, &mut q)?;
+            let b = *t.get(q).context("truncated ancestor link")?;
+            q += 1;
+            v.push((qual, pth, b));
+        }
+        let b = *t.get(q).context("truncated ancestor list")?;
+        q += 1;
+        Some((v, b))
+    } else {
+        None
+    };
+    let classes = if ver >= (20, 0) {
+        let k = be32(t, q)? as usize;
+        ensure!(k <= 64, "{k} class entries");
+        q += 4;
+        let mut v = Vec::with_capacity(k);
+        for _ in 0..k {
+            let (qual, pth) = parse_class_ref(t, &mut q)?;
+            let np = be32(t, q)? as usize;
+            ensure!(np <= 64, "{np} parent links");
             q += 4;
-            let mut v = Vec::with_capacity(n);
-            for _ in 0..n {
-                let m = be32(t, q)? as usize;
-                ensure!(m <= 64, "qualified name too long");
-                q += 4;
-                let mut qual = Vec::with_capacity(m);
-                for _ in 0..m {
-                    let l = *t.get(q).context("truncated")? as usize;
-                    qual.push(t.get(q + 1..q + 1 + l).context("truncated")?.to_vec());
-                    q += 1 + l;
-                }
-                // Measured on LabVIEW 2020 OpenGDS: the parent path follows the
-                // qualified name directly, at odd positions too — no 2-pad here.
-                let (pth, e) = Pth::parse(t, q)?;
-                q = e;
-                let b = *t.get(q).context("truncated")?;
-                q += 1;
-                v.push((qual, pth, b));
+            let mut parents = Vec::with_capacity(np);
+            for _ in 0..np {
+                parents.push(parse_class_ref(t, &mut q)?);
             }
-            Some(v)
-        } else {
-            None
-        };
-        let five = if with_five {
-            let f: [u8; 5] = t.get(q..q + 5).context("truncated")?.try_into()?;
-            q += 5;
-            Some(f)
-        } else {
-            None
-        };
-        let offsets = if with_offsets {
-            let k = pad_to(tail_pos + q, 4);
-            ensure!(t.get(q..q + k).is_some_and(|z| z.iter().all(|&x| x == 0)), "offset list pad");
-            q += k;
-            let n = be32(t, q)? as usize;
-            ensure!(q + 4 + 4 * n == t.len(), "offset list does not end the tail");
-            Some(t[q..].to_vec())
-        } else {
-            None
-        };
-        ensure!(q == t.len() || offsets.is_some(), "bytes left over");
-        Ok(ApiTail { cache: cache.clone(), parents, five, offsets })
+            v.push((qual, pth, parents));
+        }
+        Some(v)
+    } else {
+        None
     };
     // A VI-side list (LIvi) never has offsets; a heap-side one always does.
-    // Without that split a 9-byte tail reads both as `n=0 parents + five`
-    // and as `five + empty offset list`.
-    let shapes: &[(bool, bool, bool)] = if heap {
-        &[(false, false, false), (false, false, true), (false, true, true), (true, true, true)]
+    let offsets = if heap {
+        let k = pad_to(tail_pos + q, 4);
+        ensure!(t.get(q..q + k).is_some_and(|z| z.iter().all(|&x| x == 0)), "offset list pad");
+        q += k;
+        let n = be32(t, q)? as usize;
+        let end = q + 4 + 4 * n;
+        ensure!(end <= t.len(), "offset list overruns the object");
+        let list = t[q..end].to_vec();
+        q = end;
+        Some(list)
     } else {
-        &[(false, false, false), (false, true, false), (true, true, false)]
+        None
     };
-    let mut hits = Vec::new();
-    for &(a, b, c) in shapes {
-        if let Ok(x) = try_shape(a, b, c) {
-            hits.push(x);
-        }
-    }
-    ensure!(!hits.is_empty(), "class-API link tail has an unknown shape ({} bytes after the cache)", t.len() - rest_at);
-    ensure!(hits.len() == 1, "class-API link tail is ambiguous");
-    Ok(hits.pop().unwrap())
+    let trailer = if ident == b"DRPI" && heap {
+        let b = *t.get(q).context("dynamic-dispatch link ends early")?;
+        q += 1;
+        Some(b)
+    } else {
+        None
+    };
+    ensure!(q == t.len(), "{} bytes after the known fields", t.len() - q);
+    Ok(ApiTail { cache, ancestors, classes, offsets, trailer })
 }
 
 /// Re-emit a class-API link tail at a new position with its pads recomputed.
 fn reflow_api_tail(o: &LinkObj, ver: (u32, u32), new_pos: usize, heap: bool, out: &mut Vec<u8>) -> Result<()> {
-    let a = parse_api_tail(&o.tail, o.tail_pos, ver, heap)?;
+    let a = parse_api_tail(&o.ident, &o.tail, o.tail_pos, ver, heap)?;
     emit_api_tail(&a, new_pos, out);
     Ok(())
 }
@@ -797,37 +837,52 @@ fn emit_api_tail(a: &ApiTail, new_pos: usize, out: &mut Vec<u8>) {
     let pos = |out: &Vec<u8>| new_pos + (out.len() - start);
     out.resize(out.len() + pad_to(new_pos, 4), 0);
     out.extend_from_slice(&a.cache);
-    if let Some(parents) = &a.parents {
-        out.extend_from_slice(&(parents.len() as u32).to_be_bytes());
-        for (qual, pth, b) in parents {
-            out.extend_from_slice(&(qual.len() as u32).to_be_bytes());
-            for q in qual {
-                out.push(q.len() as u8);
-                out.extend_from_slice(q);
-            }
-            pth.write(out);
+    if let Some((ancestors, b)) = &a.ancestors {
+        out.extend_from_slice(&(ancestors.len() as u32).to_be_bytes());
+        for (qual, pth, b) in ancestors {
+            write_class_ref(qual, pth, out);
             out.push(*b);
         }
+        out.push(*b);
     }
-    if let Some(f) = &a.five {
-        out.extend_from_slice(f);
+    if let Some(classes) = &a.classes {
+        out.extend_from_slice(&(classes.len() as u32).to_be_bytes());
+        for (qual, pth, parents) in classes {
+            write_class_ref(qual, pth, out);
+            out.extend_from_slice(&(parents.len() as u32).to_be_bytes());
+            for (qual, pth) in parents {
+                write_class_ref(qual, pth, out);
+            }
+        }
     }
     if let Some(list) = &a.offsets {
         let k = pad_to(pos(out), 4);
         out.resize(out.len() + k, 0);
         out.extend_from_slice(list);
     }
+    if let Some(b) = a.trailer {
+        out.push(b);
+    }
 }
 
-/// The nested parent-class links of a class-API entry carry the parent
-/// class's path in ABSOLUTE form — the build machine's, as packaged — and
-/// LabVIEW rewrites them to where the class is now, still absolute. Do the
-/// same, so nothing is left for it to rewrite.
+/// The class links nested in a class-API entry carry each class's path in
+/// ABSOLUTE form — the build machine's, as packaged — and LabVIEW rewrites
+/// them to where the class is now, still absolute. Do the same, so nothing
+/// is left for it to rewrite.
 fn fix_parent_paths(o: &mut LinkObj, ver: (u32, u32), heap: bool, tree: &Tree) -> Result<bool> {
-    let mut a = parse_api_tail(&o.tail, o.tail_pos, ver, heap)?;
-    let Some(parents) = a.parents.as_mut() else { return Ok(false) };
+    let mut a = parse_api_tail(&o.ident, &o.tail, o.tail_pos, ver, heap)?;
+    let mut refs: Vec<(&Vec<Vec<u8>>, &mut Pth)> = Vec::new();
+    if let Some((ancestors, _)) = a.ancestors.as_mut() {
+        refs.extend(ancestors.iter_mut().map(|(q, p, _)| (&*q, p)));
+    }
+    if let Some(classes) = a.classes.as_mut() {
+        for (q, p, parents) in classes.iter_mut() {
+            refs.push((&*q, p));
+            refs.extend(parents.iter_mut().map(|(q, p)| (&*q, p)));
+        }
+    }
     let mut changed = false;
-    for (qual, pth, _) in parents.iter_mut() {
+    for (qual, pth) in refs {
         if !pth.is_drive() {
             continue;
         }
@@ -1336,10 +1391,19 @@ pub enum Method {
     /// Embedded compiled code is removed and `.lvlib`/`.lvclass`
     /// files are marked source-only.
     SourceOnly,
+    /// A Call Library Function node whose library path is a cross-platform
+    /// wildcard (`lvwebclient_*.*`) gets its link back to that wildcard,
+    /// resolved for the target's bitness. VI Package Builder replaces the
+    /// wildcard with the build machine's file (`lvwebclient_32.dll`), which
+    /// breaks the package in the other bitness — VIPM's known issue
+    /// <https://support.vipm.io/hc/en-us/articles/360053941572>. Packages
+    /// repair it in a PostInstall hook that resaves every VI in LabVIEW
+    /// (NI's Advanced HTTP Client); this does the same edit without one.
+    ClfnWildcard,
 }
 
 impl Method {
-    pub const ALL: [Method; 4] = [Method::Owner, Method::Paths, Method::Qualifiers, Method::SourceOnly];
+    pub const ALL: [Method; 5] = [Method::Owner, Method::Paths, Method::Qualifiers, Method::SourceOnly, Method::ClfnWildcard];
 }
 
 /// Which [`Method`]s a run applies.
@@ -1349,26 +1413,32 @@ pub struct Methods {
     pub paths: bool,
     pub qualifiers: bool,
     pub source_only: bool,
+    /// The target's bitness when [`Method::ClfnWildcard`] is selected and
+    /// the target is known; `None` leaves Call Library links as they are.
+    pub bitness: Option<u8>,
 }
 
 impl Methods {
-    pub fn of(list: &[Method]) -> Methods {
+    /// The methods in `list`, for a target of `bitness` (32 or 64), if known.
+    pub fn of(list: &[Method], bitness: Option<u8>) -> Methods {
         Methods {
             owner: list.contains(&Method::Owner),
             paths: list.contains(&Method::Paths),
             qualifiers: list.contains(&Method::Qualifiers),
             source_only: list.contains(&Method::SourceOnly),
+            bitness: bitness.filter(|_| list.contains(&Method::ClfnWildcard)),
         }
     }
 
     fn links(&self) -> bool {
-        self.owner || self.paths || self.qualifiers
+        self.owner || self.paths || self.qualifiers || self.bitness.is_some()
     }
 }
 
 /// What one file got, by method: `owner` from [`Method::Owner`], `relative`
 /// and `absolute` from [`Method::Paths`], `qualifier` and `vils` from
-/// [`Method::Qualifiers`], `separated` from [`Method::SourceOnly`].
+/// [`Method::Qualifiers`], `separated` from [`Method::SourceOnly`], `clfn`
+/// from [`Method::ClfnWildcard`].
 #[derive(Default, Debug, Clone, serde::Serialize)]
 pub struct Changes {
     pub owner: usize,
@@ -1378,6 +1448,8 @@ pub struct Changes {
     pub vils: usize,
     /// 1 when this file was made source-only.
     pub separated: usize,
+    /// Call Library links given back their wildcard library name.
+    pub clfn: usize,
     /// Why [`Method::SourceOnly`] left this file's compiled code embedded,
     /// when it could not separate it; the other methods still ran.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1386,7 +1458,7 @@ pub struct Changes {
 
 impl Changes {
     pub fn total(&self) -> usize {
-        self.owner + self.relative + self.absolute + self.qualifier + self.vils + self.separated
+        self.owner + self.relative + self.absolute + self.qualifier + self.vils + self.separated + self.clfn
     }
 
     /// The methods that changed something in this file.
@@ -1404,8 +1476,100 @@ impl Changes {
         if self.separated > 0 {
             out.push(Method::SourceOnly);
         }
+        if self.clfn > 0 {
+            out.push(Method::ClfnWildcard);
+        }
         out
     }
+}
+
+/// The block-diagram heap, inflated: what the diagram's nodes hold.
+fn heap_bytes(rsrc: &Rsrc) -> Option<Vec<u8>> {
+    let s = rsrc.section(b"BDHc").or_else(|| rsrc.section(b"BDHb"))?;
+    let mut out = Vec::new();
+    flate2::read::ZlibDecoder::new(s.data.get(4..)?).read_to_end(&mut out).ok()?;
+    Some(out)
+}
+
+/// The two cross-platform wildcards a Call Library Function node's library
+/// name can hold (LabVIEW help, "Call Library Function Dialog Box"):
+/// `name*.*` reads as `name32` / `name64`, `name**.*` as `name` / `name_64`;
+/// the `.*` extension as the platform's library extension.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Wildcard {
+    Single,
+    Double,
+}
+
+/// The wildcard library names a resolved name `lib` may have come from,
+/// each with its prefix: `lvwebclient_32.dll` came from
+/// `lvwebclient_*.*` (single, prefix `lvwebclient_`); `foo.dll` and
+/// `foo_64.dll` from `foo**.*` (double, prefix `foo`). The extension may also
+/// have been written out (`lvwebclient_*.dll`).
+fn wildcard_sources(lib: &[u8]) -> Vec<(Vec<u8>, Wildcard, Vec<u8>)> {
+    let Some(dot) = lib.iter().rposition(|&c| c == b'.') else { return Vec::new() };
+    let (stem, ext) = (&lib[..dot], &lib[dot + 1..]);
+    let mut out = Vec::new();
+    for wext in [&b"*"[..], ext] {
+        let name = |prefix: &[u8], stars: &[u8]| [prefix, stars, b".", wext].concat();
+        if let Some(p) = stem.strip_suffix(b"32").or_else(|| stem.strip_suffix(b"64")) {
+            out.push((name(p, b"*"), Wildcard::Single, p.to_vec()));
+        }
+        let p = stem.strip_suffix(b"_64").unwrap_or(stem);
+        out.push((name(p, b"**"), Wildcard::Double, p.to_vec()));
+    }
+    out
+}
+
+/// The file a wildcard resolves to for `bits`, with the extension `ext`.
+fn resolve_wildcard(kind: Wildcard, prefix: &[u8], ext: &[u8], bits: u8) -> Vec<u8> {
+    let suffix = match (kind, bits) {
+        (Wildcard::Single, b) => format!("{b}"),
+        (Wildcard::Double, 64) => "_64".to_string(),
+        (Wildcard::Double, _) => String::new(),
+    };
+    [prefix, suffix.as_bytes(), b".", ext].concat()
+}
+
+/// Undo VI Package Builder's wildcard removal on one Call Library link
+/// (`NEXF`), VIPM's known issue "VI Package Builder removes cross platform
+/// wildcards from Call Library Function nodes during the build process"
+/// (<https://support.vipm.io/hc/en-us/articles/360053941572-VI-Package-Builder-removes-cross-platform-wildcards-from-Call-Library-Function-nodes-during-the-build-process>):
+/// when the diagram's node still asks for a wildcard library and
+/// the link names one bitness's file, the link gets the wildcard as its name
+/// and the target bitness's file as its path, as LabVIEW saves it after
+/// loading the VI there (measured on NI's Advanced HTTP Client after its
+/// PostInstall hook: `lvwebclient_*.*`, `.../lvwebclient_64.dll`). Nothing
+/// changes unless that file is in the tree beside the one named.
+fn fix_clfn_wildcard(o: &mut LinkObj, target: &str, bits: u8, heap: &[u8], tree: &Tree) -> bool {
+    if &o.ident != b"NEXF" || o.qual.len() != 1 || o.path.comps.is_empty() {
+        return false;
+    }
+    let lib = o.qual[0].clone();
+    let Some(dot) = lib.iter().rposition(|&c| c == b'.') else { return false };
+    let ext = &lib[dot + 1..];
+    // The node's own path holds the wildcard as a length-prefixed path
+    // component; a bare substring could be part of a function name.
+    let in_heap = |w: &[u8]| {
+        let mut needle = vec![w.len() as u8];
+        needle.extend_from_slice(w);
+        w.len() < 256 && heap.windows(needle.len()).any(|x| x == needle.as_slice())
+    };
+    let Some((wildcard, kind, prefix)) = wildcard_sources(&lib).into_iter().find(|(w, _, _)| in_heap(w)) else {
+        return false;
+    };
+    let want = resolve_wildcard(kind, &prefix, ext, bits);
+    let last = o.path.comps.len() - 1;
+    if o.path.comps[last] == want && o.qual[0] == wildcard {
+        return false;
+    }
+    let sibling = format!("{}/{}", parent(target), String::from_utf8_lossy(&want));
+    if !tree.resolvable(&sibling) {
+        return false;
+    }
+    o.qual = vec![wildcard];
+    o.path.comps[last] = want;
+    true
 }
 
 /// Apply the selected methods to one VI. Returns the new file bytes when
@@ -1446,6 +1610,9 @@ pub fn fix_vi(bytes: &[u8], vi_logical: &str, tree: &Tree, m: Methods) -> Result
             Err(e) => changes.not_separated = Some(format!("{e:#}")),
         }
     }
+
+    // Read once, and only when a Call Library link might need it.
+    let heap = m.bitness.and_then(|_| heap_bytes(&rsrc)).unwrap_or_default();
 
     for sec in rsrc.sections.iter_mut() {
         if !m.links() || !matches!(&sec.ident, b"LIvi" | b"LIbd" | b"LIfp" | b"LIds") {
@@ -1521,6 +1688,13 @@ pub fn fix_vi(bytes: &[u8], vi_logical: &str, tree: &Tree, m: Methods) -> Result
                     o.path = p;
                     sec_changed = true;
                 }
+            }
+
+            if let Some(bits) = m.bitness
+                && fix_clfn_wildcard(o, &target, bits, &heap, tree)
+            {
+                changes.clfn += 1;
+                sec_changed = true;
             }
 
             // Qualifier: the target's owner chain with our own chain's common
@@ -1944,7 +2118,7 @@ mod tests {
         let roots = venv_roots(&root).unwrap();
         assert_eq!(roots, vec![package, named_packages]);
         assert_eq!(venv_roots(&packages).unwrap(), roots);
-        let (_, outcomes) = fix_files(&roots, &[library.clone()], false, Methods::of(&Method::ALL)).unwrap();
+        let (_, outcomes) = fix_files(&roots, &[library.clone()], false, Methods::of(&Method::ALL, Some(64))).unwrap();
         assert_eq!(outcomes.len(), 1);
         assert!(outcomes[0].result.is_ok());
         assert!(std::fs::read_to_string(&library).unwrap().contains("NI.LV.All.SourceOnly"));
@@ -1980,7 +2154,7 @@ mod tests {
             std::fs::write(dir.join("vi.lib/X.lvlib"), xml).unwrap();
         }
         let files = vec![roots[0].join("vi.lib/X.lvlib")];
-        let error = fix_files(&roots, &files, false, Methods::of(&Method::ALL)).err().unwrap();
+        let error = fix_files(&roots, &files, false, Methods::of(&Method::ALL, Some(64))).err().unwrap();
         assert!(error.to_string().contains("ambiguous installed path"));
         for dir in &roots {
             assert_eq!(std::fs::read(dir.join("vi.lib/X.lvlib")).unwrap(), xml);
@@ -2010,8 +2184,8 @@ mod tests {
         std::fs::write(outside.join("External.lvlib"), xml).unwrap();
         link(&outside, &tree.join("external"));
         link(&tree, &tree.join("loop"));
-        assert!(fix_tree(&[tree.join("external")], false, Methods::of(&Method::ALL)).is_err());
-        let (_, outcomes) = fix_tree(&[tree], false, Methods::of(&Method::ALL)).unwrap();
+        assert!(fix_tree(&[tree.join("external")], false, Methods::of(&Method::ALL, Some(64))).is_err());
+        let (_, outcomes) = fix_tree(&[tree], false, Methods::of(&Method::ALL, Some(64))).unwrap();
         assert!(outcomes.is_empty());
         assert_eq!(std::fs::read(outside.join("External.lvlib")).unwrap(), xml);
         let store = root.join("store");
@@ -2079,7 +2253,7 @@ mod tests {
         std::fs::write(&existing, xml).unwrap();
         let roots = vec![root.clone()];
         let files = vec![installed.clone()];
-        let methods = Methods::of(&Method::ALL);
+        let methods = Methods::of(&Method::ALL, Some(64));
 
         let (_, preview) = fix_files(&roots, &files, true, methods).unwrap();
         assert_eq!(preview.len(), 1);
@@ -2174,7 +2348,7 @@ mod tests {
         let mut with_compiled_block = original.clone();
         with_compiled_block.edit_blocks(&[], Some((*b"VICD", b"synthetic compiled block".to_vec()))).unwrap();
         let tree = Tree { files: HashMap::new(), owner: HashMap::new(), by_name: HashMap::new() };
-        let (prepared, changes) = fix_vi(&with_compiled_block.write(), "vi.lib/Fixture.vi", &tree, Methods::of(&[Method::SourceOnly])).unwrap();
+        let (prepared, changes) = fix_vi(&with_compiled_block.write(), "vi.lib/Fixture.vi", &tree, Methods::of(&[Method::SourceOnly], None)).unwrap();
         assert_eq!(changes.separated, 1);
         let prepared = Rsrc::parse(&prepared.unwrap()).unwrap();
         assert_eq!(prepared.version().unwrap(), original.version().unwrap());
@@ -2314,5 +2488,101 @@ mod tests {
         let t = logical_to_token("user.lib/_OpenG.lib/a.lvlib").unwrap();
         assert_eq!(t[0], b"<userlib>");
         assert_eq!(t.len(), 3);
+    }
+
+    #[test]
+    fn clfn_wildcards_resolve_both_ways_for_both_forms() {
+        // `name*.*`: NI's Advanced HTTP Client, built on a 32-bit machine.
+        let single = wildcard_sources(b"lvwebclient_32.dll");
+        let (w, kind, prefix) = &single[0];
+        assert_eq!((w.as_slice(), *kind, prefix.as_slice()), (&b"lvwebclient_*.*"[..], Wildcard::Single, &b"lvwebclient_"[..]));
+        assert_eq!(resolve_wildcard(*kind, prefix, b"dll", 64), b"lvwebclient_64.dll");
+        assert_eq!(resolve_wildcard(*kind, prefix, b"dll", 32), b"lvwebclient_32.dll");
+        // `name**.*`: `name.dll` on 32-bit, `name_64.dll` on 64-bit.
+        for built in [&b"myshared.dll"[..], b"myshared_64.dll"] {
+            let (w, kind, prefix) = wildcard_sources(built).into_iter().find(|s| s.1 == Wildcard::Double).unwrap();
+            assert_eq!(w, b"myshared**.*");
+            assert_eq!(resolve_wildcard(kind, &prefix, b"dll", 64), b"myshared_64.dll");
+            assert_eq!(resolve_wildcard(kind, &prefix, b"dll", 32), b"myshared.dll");
+        }
+        // The extension may be written out instead of `.*`.
+        assert!(wildcard_sources(b"lvwebclient_32.dll").iter().any(|s| s.0 == b"lvwebclient_*.dll"));
+        assert!(wildcard_sources(b"noextension").is_empty());
+    }
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+    }
+
+    /// Re-emit a tail at a shifted position, then read it back there.
+    fn moved(ident: &[u8; 4], t: &[u8], pos: usize, to: usize, ver: (u32, u32), heap: bool) -> ApiTail {
+        let a = parse_api_tail(ident, t, pos, ver, heap).unwrap();
+        let mut out = Vec::new();
+        emit_api_tail(&a, to, &mut out);
+        parse_api_tail(ident, &out, to, ver, heap).unwrap()
+    }
+
+    // IG OOPanel `Sort Panels.vi` (LabVIEW 2020): a dynamic-dispatch call
+    // ends with one byte after its offset list.
+    #[test]
+    fn dynamic_dispatch_tail_keeps_its_last_byte() {
+        let t = unhex("00000001000000000000000100000000020000000000005600000000000000000002000003d0000005f201");
+        let a = parse_api_tail(b"DRPI", &t, 90, (20, 0), true).unwrap();
+        assert_eq!(a.trailer, Some(1));
+        assert_eq!(a.ancestors.as_ref().unwrap().1, 0x56);
+        assert!(a.classes.as_ref().unwrap().is_empty());
+        for to in 91..95 {
+            let b = moved(b"DRPI", &t, 90, to, (20, 0), true);
+            assert_eq!(b.offsets, a.offsets);
+            assert_eq!(b.trailer, Some(1));
+        }
+        // Other kinds have no such byte, so the same tail is refused there.
+        assert!(parse_api_tail(b"DDPI", &t, 90, (20, 0), true).is_err());
+    }
+
+    // JSONtext's example (LabVIEW 2017): a class whose parent is in another
+    // library carries the ancestor list before LabVIEW 2020 too.
+    #[test]
+    fn ancestor_links_are_read_from_labview_2016_on() {
+        let t = unhex(concat!(
+            "00000000010000000000010001000000000200000000000100000001234a534f4e74657874204c56436c6173732053657269616c",
+            "697a65722e6c76636c617373505448300000004a00000005014303476974084a534f4e74657874124c56436c617373205365726961",
+            "6c697a6572234a534f4e74657874204c56436c6173732053657269616c697a65722e6c76636c6173730100",
+        ));
+        let a = parse_api_tail(b"VIPI", &t, 105, (17, 0), false).unwrap();
+        let (ancestors, last) = a.ancestors.as_ref().unwrap();
+        assert_eq!(ancestors.len(), 1);
+        assert_eq!(ancestors[0].0, [b"JSONtext LVClass Serializer.lvclass".to_vec()]);
+        assert!(ancestors[0].1.is_drive());
+        assert_eq!(*last, 0);
+        assert!(a.classes.is_none());
+        moved(b"VIPI", &t, 105, 106, (17, 0), false);
+    }
+
+    // OpenGDS `GOOPUtil Demo.vi` (LabVIEW 2020): DemoSubClass1's link lists
+    // its ancestor DemoClass1, then itself paired with that parent.
+    #[test]
+    fn the_class_list_pairs_each_class_with_its_parents() {
+        let t = unhex(concat!(
+            "000000000100000000000400010000000002000000000001000000011244656d6f436c617373312e6c76636c617373505448300000",
+            "006b0000000b01430356495406476974487562074f70656e4744530676692e6c6962066164646f6e730b474f4f505574696c697479",
+            "055f44656d6f0d474f4f505574696c5f44656d6f1044656d6f436c617373315f636c6173731244656d6f436c617373312e6c76636c",
+            "617373010100000001000000011544656d6f537562436c617373312e6c76636c61737350544830000000710000000b014303564954",
+            "06476974487562074f70656e4744530676692e6c6962066164646f6e730b474f4f505574696c697479055f44656d6f0d474f4f5055",
+            "74696c5f44656d6f1344656d6f537562436c617373315f636c6173731544656d6f537562436c617373312e6c76636c617373000000",
+            "01000000011244656d6f436c617373312e6c76636c617373505448300000006b0000000b01430356495406476974487562074f7065",
+            "6e4744530676692e6c6962066164646f6e730b474f4f505574696c697479055f44656d6f0d474f4f505574696c5f44656d6f104465",
+            "6d6f436c617373315f636c6173731244656d6f436c617373312e6c76636c617373000000000001000007c2",
+        ));
+        let a = parse_api_tail(b"TCPI", &t, 3221, (20, 0), true).unwrap();
+        assert_eq!(a.ancestors.as_ref().unwrap().0.len(), 1);
+        let classes = a.classes.as_ref().unwrap();
+        assert_eq!(classes.len(), 1);
+        assert_eq!(classes[0].0, [b"DemoSubClass1.lvclass".to_vec()]);
+        assert_eq!(classes[0].2.len(), 1);
+        assert_eq!(classes[0].2[0].0, [b"DemoClass1.lvclass".to_vec()]);
+        for to in 3222..3226 {
+            assert_eq!(moved(b"TCPI", &t, 3221, to, (20, 0), true).offsets, a.offsets);
+        }
     }
 }

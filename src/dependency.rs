@@ -197,6 +197,7 @@ mod tests {
             relinked: false,
             relink_folders: vec![],
             post_install_vi: None,
+            post_install: None,
             pre_install_vi: None,
             pre_uninstall_vi: None,
             post_uninstall_vi: None,
